@@ -98,7 +98,7 @@ final class OpenAPPChatMessageListView: UIView {
         applyInsets()
     }
 
-    /// 在面板一次运动结算后更新列表的真实可见区域。
+    /// 随面板 displayHeight 更新列表的真实可见区域。
     ///
     /// BODragScroll 的 panelView 始终保持 full 尺寸，低档位只展示顶部一段；因此需要把未展示的
     /// panel 高度并入 tableView.bottomInset，`scrollToBottom` 才会停在屏幕当前可见的底边上方。

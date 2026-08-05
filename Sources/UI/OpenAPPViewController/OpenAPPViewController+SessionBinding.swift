@@ -118,6 +118,7 @@ extension OpenAPPViewController {
             contentsOf: [userMessage, assistantMessage],
             followLatest: false
         )
+        revealChatPanelForNewMessagesIfNeeded()
         scrollToBottom(animated: true)
 
         let stream = session.sendMessage(trimmed)

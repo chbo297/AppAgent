@@ -18,8 +18,12 @@ extension OpenAPPViewController {
         chatPanelContainer.translatesAutoresizingMaskIntoConstraints = true
         chatPanelContainer.installContentView(chatPanelCoordinator.dragScrollView)
         view.insertSubview(chatPanelContainer, belowSubview: inputBar)
-        mockChatResponder.onEvent = { [weak self] event in
-            self?.handleMockChatEvent(event)
+
+        chatPanelView.onSessionListRequested = { [weak self] in
+            self?.toggleSessionSidebar()
+        }
+        chatPanelView.onCollapseRequested = { [weak self] in
+            self?.setChatPanelDetent(.peek, animated: true)
         }
     }
 
@@ -39,18 +43,26 @@ extension OpenAPPViewController {
         )
     }
 
+    /// 【inputBar frame 接线点】同步 ChatPanel 的横向 frame、alpha，以及键盘触发的整体上移。
     func applyChatPanelContainerLayout(
         inputBarFrame: CGRect,
         inputBarExpandedFrame: CGRect,
         animation: OpenAPPInputBarFrameAnimation
     ) {
+        let keyboardLift = chatPanelKeyboardLift(for: inputBarExpandedFrame)
+        let shiftedBounds = view.bounds.offsetBy(dx: 0, dy: -keyboardLift)
         let layout = OpenAPPChatPanelContainerLayout(
-            bounds: view.bounds,
+            bounds: shiftedBounds,
             inputBarFrame: inputBarFrame,
-            inputBarExpandedFrame: inputBarExpandedFrame,
-            inputBarCornerRadius: inputBar.layer.cornerRadius
+            inputBarExpandedFrame: inputBarExpandedFrame
         )
         chatPanelContainer.apply(layout, animation: animation)
+    }
+
+    /// inputBar 展开态相对无键盘底部位置实际上移的距离；其他输入框触发键盘时结果为 0。
+    private func chatPanelKeyboardLift(for inputBarExpandedFrame: CGRect) -> CGFloat {
+        let restingInputBarBottom = view.bounds.maxY - max(0, view.safeAreaInsets.bottom)
+        return max(0, restingInputBarBottom - inputBarExpandedFrame.maxY)
     }
 
     /// 业务主动切换档位，实际动画和中途打断由 BODragScroll 管理。
@@ -63,14 +75,22 @@ extension OpenAPPViewController {
         chatPanelView.listView.scrollToBottom(animated: animated)
     }
 
-    /// 列表底部避让：悬浮 inputBar 高度 + 安全区/键盘取大者。
-    /// 面板 frame 本身不避让键盘（贴底不动），只调内容 inset 保证最新消息可见。
+    /// mock 与真实 session 共用：新消息出现时若面板收在 peek，直接发起一次 half 移动。
+    func revealChatPanelForNewMessagesIfNeeded() {
+        guard chatPanelCoordinator.isAtPeekDetent else { return }
+        setChatPanelDetent(.half, animated: true)
+    }
+
+    /// 列表底部避让：ChatPanel 已随自身 inputBar 上移时只保留安全区，否则继续避让外部键盘。
     func updateChatPanelListInsets() {
         chatPanelCoordinator.updateBottomAvoidingInset(chatPanelBottomAvoidingInset)
     }
 
     private var chatPanelBottomAvoidingInset: CGFloat {
-        max(view.safeAreaInsets.bottom, observedKeyboardHeight)
+        let bottomOcclusion = shouldInputBarAvoidKeyboard
+            ? view.safeAreaInsets.bottom
+            : max(view.safeAreaInsets.bottom, observedKeyboardHeight)
+        return bottomOcclusion
             + OpenAPPInputBar.barHeight
             + 12
     }
@@ -81,55 +101,27 @@ extension OpenAPPViewController {
     func dispatchOutgoingMessage(text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if usesMockChatResponder {
-            sendMockChatMessage(trimmed)
+        if usesFixedDebugReply {
+            sendFixedDebugReply(to: trimmed)
         } else {
             sendMessage(text: trimmed)
         }
     }
 
-    private func sendMockChatMessage(_ text: String) {
+    private func sendFixedDebugReply(to text: String) {
         inputBar.clearText()
-        // 用户连发会打断上一条流式回复：先把残留的 streaming 占位就地定格。
-        if let last = chatMessages.last,
-           last.role == .assistant,
-           last.status == .streaming {
-            chatMessages[chatMessages.count - 1].text = last.text.isEmpty ? "…" : last.text
-            chatMessages[chatMessages.count - 1].status = .complete
-            chatPanelView.listView.updateLastMessage(
-                text: last.text.isEmpty ? "…" : last.text,
-                status: .complete
-            )
-        }
-        let message = ChatMessage(role: .user, text: text)
-        chatMessages.append(message)
-        chatPanelView.listView.append(message, followLatest: false)
-        // 面板收着时来了新消息，自动弹到半屏，让用户看到回复。
-        if chatPanelCoordinator.isAtPeekDetent {
-            setChatPanelDetent(.half, animated: true)
-        }
-        mockChatResponder.send(text: text)
-        scrollToBottom(animated: true)
-    }
 
-    private func handleMockChatEvent(_ event: OpenAPPMockChatResponder.Event) {
-        switch event {
-        case .began:
-            let message = ChatMessage(role: .assistant, text: "", status: .streaming)
-            chatMessages.append(message)
-            // sendMockChatMessage 会在同步的 began 回调返回后统一滚动，避免连续启动两次动画。
-            chatPanelView.listView.append(message, followLatest: false)
-        case .partial(let text):
-            guard !chatMessages.isEmpty else { return }
-            chatMessages[chatMessages.count - 1].text = text
-            chatMessages[chatMessages.count - 1].status = .streaming
-            chatPanelView.listView.updateLastMessage(text: text, status: .streaming)
-        case .completed(let text):
-            guard !chatMessages.isEmpty else { return }
-            chatMessages[chatMessages.count - 1].text = text
-            chatMessages[chatMessages.count - 1].status = .complete
-            chatPanelView.listView.updateLastMessage(text: text, status: .complete)
-        }
+        let userMessage = ChatMessage(role: .user, text: text)
+        chatMessages.append(userMessage)
+        chatPanelView.listView.append(userMessage, followLatest: false)
+
+        let replyMessage = ChatMessage(role: .assistant, text: "收到了")
+        chatMessages.append(replyMessage)
+        chatPanelView.listView.append(replyMessage, followLatest: false)
+
+        // 面板收着时来了新消息，自动弹到半屏，让用户看到回复。
+        revealChatPanelForNewMessagesIfNeeded()
+        scrollToBottom(animated: true)
     }
 }
 

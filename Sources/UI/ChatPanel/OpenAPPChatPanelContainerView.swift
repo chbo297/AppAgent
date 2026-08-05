@@ -6,71 +6,68 @@
 #if canImport(UIKit)
 import UIKit
 
-/// ChatPanel 裁剪容器的纯布局结果。
+/// ChatPanel 外层容器的一次纯布局结果。
 ///
-/// `dragScrollView` 保持原始尺寸并跟随 container 横向移动；container 和 mask 只控制可见窗口，
-/// 避免 inputBar 收起动画污染 BODragScroll 的滚动几何。
+/// 外层容器跟随 inputBar 的横向位置、宽度以及键盘避让位移，不再参与 ChatPanel 的裁切；
+/// `dragScrollView` 始终保留展开态画布，避免 resize 跟手期间重建 BODragScroll 几何。
 struct OpenAPPChatPanelContainerLayout: Equatable {
+    /// ChatPanel 容器相对 inputBar 左右各扩出的距离。
+    static let horizontalOutset = OpenAPPInputBarFramePolicy.horizontalInset
+
+    /// inputBar 收起时 ChatPanel 淡出的 ease-out 系数；具体强度统一由此处配置。
+    static let alphaEaseOutCoefficient: CGFloat = 4
+
     let containerFrame: CGRect
     let dragScrollFrame: CGRect
-    let maskFrame: CGRect
-    let maskCornerRadius: CGFloat
-    let hidesAccessibilityElements: Bool
+
+    /// inputBar 从展开到收起时，ChatPanel 按 ease-out 曲线由完全显示过渡到透明。
+    let panelAlpha: CGFloat
 
     init(
         bounds: CGRect,
         inputBarFrame: CGRect,
-        inputBarExpandedFrame: CGRect,
-        inputBarCornerRadius: CGFloat
+        inputBarExpandedFrame: CGRect
     ) {
         guard bounds.width > 0,
               bounds.height > 0,
               inputBarFrame.width > 0,
-              inputBarFrame.height > 0 else {
+              inputBarFrame.height > 0,
+              inputBarExpandedFrame.width > 0,
+              inputBarExpandedFrame.height > 0 else {
             containerFrame = .zero
             dragScrollFrame = .zero
-            maskFrame = .zero
-            maskCornerRadius = 0
-            hidesAccessibilityElements = true
+            panelAlpha = 0
             return
         }
 
+        // 【inputBar 横向收起 alpha 计算入口】按当前宽度计算从展开端到收起端的归一化进度。
         let collapseProgress = Self.collapseProgress(
             inputBarWidth: inputBarFrame.width,
             expandedInputBarWidth: inputBarExpandedFrame.width
         )
-        let expandedContainerFrame = Self.expandedContainerFrame(
+        let expandedContainerFrame = Self.containerFrame(
             bounds: bounds,
-            inputBarExpandedFrame: inputBarExpandedFrame
+            inputBarFrame: inputBarExpandedFrame
         )
-        let collapsedContainerFrame = CGRect(
-            x: inputBarFrame.minX,
-            y: bounds.minY,
-            width: inputBarFrame.width,
+        containerFrame = Self.containerFrame(
+            bounds: bounds,
+            inputBarFrame: inputBarFrame
+        )
+
+        // 画布保持控制器原始尺寸，横向根据展开态 container 的原点反向偏移；纵向保持在容器本地原点，
+        // 因而容器被键盘整体顶起时会带着完整 ChatPanel 同步上移。
+        dragScrollFrame = CGRect(
+            x: bounds.minX - expandedContainerFrame.minX,
+            y: bounds.minY - expandedContainerFrame.minY,
+            width: bounds.width,
             height: bounds.height
         )
 
-        containerFrame = Self.interpolate(
-            from: expandedContainerFrame,
-            to: collapsedContainerFrame,
-            progress: collapseProgress
+        // 跟手阶段没有 UIView 动画；每一帧使用可调 ease-out 映射，起始淡出较快、接近透明时逐渐减速。
+        panelAlpha = 1 - OpenAPPGeometry.easeOut(
+            collapseProgress,
+            coefficient: Self.alphaEaseOutCoefficient
         )
-        dragScrollFrame = CGRect(origin: .zero, size: bounds.size)
-
-        let expandedMaskFrame = CGRect(origin: .zero, size: containerFrame.size)
-        let collapsedMaskFrame = CGRect(
-            x: inputBarFrame.minX - containerFrame.minX,
-            y: inputBarFrame.minY - containerFrame.minY,
-            width: inputBarFrame.width,
-            height: inputBarFrame.height
-        )
-        maskFrame = Self.interpolate(
-            from: expandedMaskFrame,
-            to: collapsedMaskFrame,
-            progress: collapseProgress
-        )
-        maskCornerRadius = max(0, inputBarCornerRadius) * collapseProgress
-        hidesAccessibilityElements = collapseProgress >= 0.999
     }
 
     private static func collapseProgress(
@@ -91,35 +88,25 @@ struct OpenAPPChatPanelContainerLayout: Equatable {
         return 1 - expandedProgress
     }
 
-    private static func expandedContainerFrame(
+    private static func containerFrame(
         bounds: CGRect,
-        inputBarExpandedFrame _: CGRect
+        inputBarFrame: CGRect
     ) -> CGRect {
-        bounds
-    }
-
-    private static func interpolate(from start: CGRect, to end: CGRect, progress: CGFloat) -> CGRect {
         CGRect(
-            x: interpolate(from: start.minX, to: end.minX, progress: progress),
-            y: interpolate(from: start.minY, to: end.minY, progress: progress),
-            width: interpolate(from: start.width, to: end.width, progress: progress),
-            height: interpolate(from: start.height, to: end.height, progress: progress)
+            x: inputBarFrame.minX - horizontalOutset,
+            y: bounds.minY,
+            width: inputBarFrame.width + horizontalOutset * 2,
+            height: bounds.height
         )
     }
 
-    private static func interpolate(from start: CGFloat, to end: CGFloat, progress: CGFloat) -> CGFloat {
-        start + (end - start) * OpenAPPGeometry.clamp(progress, 0, 1)
-    }
 }
 
-/// `BODragScrollView` 外层的可见窗口：container 只横向收窄，mask 同步变成 inputBar 胶囊。
+/// `BODragScrollView` 的透明外层容器，只负责跟随 inputBar 改变位置、宽度和透明度。
 final class OpenAPPChatPanelContainerView: UIView {
-    private let visibleMaskView = UIView()
     private weak var contentView: UIView?
     private var layoutAnimator: UIViewPropertyAnimator?
-
-    var visibleMaskFrame: CGRect { visibleMaskView.frame }
-    var visibleMaskCornerRadius: CGFloat { visibleMaskView.layer.cornerRadius }
+    private var alphaAnimator: UIViewPropertyAnimator?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -139,89 +126,72 @@ final class OpenAPPChatPanelContainerView: UIView {
     }
 
     func apply(_ layout: OpenAPPChatPanelContainerLayout, animation: OpenAPPInputBarFrameAnimation) {
-        // 取出内部 BODragScroll 内容视图应该使用的目标 frame。
         let contentTargetFrame = layout.dragScrollFrame
+        let targetFrameChanged = !frame.isApproximatelyEqual(to: layout.containerFrame)
+            || !(contentView?.frame.isApproximatelyEqual(to: contentTargetFrame) ?? true)
+        let targetAlphaChanged = abs(alpha - layout.panelAlpha) > 0.001
 
-        // 记录内部内容视图的 frame 是否发生变化。
-        let contentFrameChanged: Bool
-        // 如果已经安装了内容视图，就拿它当前 frame 和目标 frame 比较。
-        if let contentView {
-            // 用近似比较避免浮点小误差导致重复布局。
-            contentFrameChanged = !contentView.frame.isApproximatelyEqual(to: contentTargetFrame)
-        } else {
-            // 如果还没有安装内容视图，就认为内容 frame 没有变化。
-            contentFrameChanged = false
+        // 完全收起时同时退出命中和无障碍树；重新展开时在动画开始前立即恢复。
+        let isVisible = layout.panelAlpha > 0.01
+        isUserInteractionEnabled = isVisible
+        accessibilityElementsHidden = !isVisible
+
+        // animator 启动后 model 值已经是目标值；相同目标无需停止并重启动画。
+        guard targetFrameChanged || targetAlphaChanged else { return }
+
+        // 新手势或新动画必须先接管 presentation 状态，避免视图跳回旧 model 值。
+        stopAnimationsAtCurrentState()
+
+        let frameChanged = !frame.isApproximatelyEqual(to: layout.containerFrame)
+            || !(contentView?.frame.isApproximatelyEqual(to: contentTargetFrame) ?? true)
+        let alphaChanged = abs(alpha - layout.panelAlpha) > 0.001
+
+        if frameChanged {
+            let applyFrames = { [weak self] in
+                guard let self else { return }
+                self.frame = layout.containerFrame
+                self.contentView?.frame = contentTargetFrame
+            }
+            if let animator = animation.makeAnimator(animations: applyFrames) {
+                startLayoutAnimation(animator)
+            } else {
+                applyFrames()
+            }
         }
 
-        // 判断外层 container 的 frame 是否需要变化。
-        let containerFrameChanged = !frame.isApproximatelyEqual(to: layout.containerFrame)
-        // 判断 mask 的可见区域是否需要变化。
-        let maskFrameChanged = !visibleMaskView.frame.isApproximatelyEqual(to: layout.maskFrame)
-        // 判断 mask 圆角是否需要变化，0.5 以内的小差异直接忽略。
-        let maskCornerRadiusChanged = abs(visibleMaskView.layer.cornerRadius - layout.maskCornerRadius) > 0.5
-        // 只要 container、mask、圆角或内部内容任意一项变化，就需要重新应用布局。
-        let targetChanged = containerFrameChanged
-            || maskFrameChanged
-            || maskCornerRadiusChanged
-            || contentFrameChanged
-
-        // 先同步无障碍隐藏状态；即使 frame 没变，也要保证折叠态不会被 VoiceOver 读到。
-        accessibilityElementsHidden = layout.hidesAccessibilityElements
-        // 如果所有目标值都没变，就直接返回，避免创建无意义动画。
-        guard targetChanged else { return }
-
-        // 如果上一个布局动画还在跑，先停在当前视觉位置，避免新旧动画打架。
-        stopLayoutAnimationAtCurrentState()
-
-        // 把真正要改 frame/mask 的操作封装成闭包，方便立即执行或交给 animator 执行。
-        let applyLayout = { [weak self] in
-            // 动画闭包可能晚于 view 生命周期执行，所以用 weak self 防止循环引用。
-            guard let self else { return }
-            // 更新外层可见窗口的位置和尺寸。
-            self.frame = layout.containerFrame
-            // 更新内部 BODragScroll 内容视图尺寸；当前保持 x/y 为 0，让它跟随 container 移动。
-            self.contentView?.frame = contentTargetFrame
-            // 更新 mask 的 frame，决定 container 内部哪些区域真正可见。
-            self.visibleMaskView.frame = layout.maskFrame
-            // 更新 mask 圆角，让收起时逐步变成 inputBar 胶囊形状。
-            self.visibleMaskView.layer.cornerRadius = layout.maskCornerRadius
-            // 再同步一次无障碍隐藏状态，保证动画执行后状态仍正确。
-            self.accessibilityElementsHidden = layout.hidesAccessibilityElements
+        if alphaChanged {
+            applyAlpha(layout.panelAlpha, animation: animation)
         }
-
-        // 如果当前变化需要动画，就用 inputBar 同一套动画参数驱动 container/mask。
-        if let animator = animation.makeAnimator(animations: applyLayout) {
-            // 持有并启动 animator，后续新手势可以从当前动画位置接管。
-            startLayoutAnimation(animator)
-        } else {
-            // 拖拽跟手或普通布局刷新不需要动画，直接应用目标布局。
-            applyLayout()
-        }
-    }
-
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard containsVisibleMaskPoint(point) else { return nil }
-        let hit = super.hitTest(point, with: event)
-        return hit === self ? nil : hit
     }
 
     private func setup() {
         backgroundColor = .clear
+        clipsToBounds = false
         isAccessibilityElement = false
-        visibleMaskView.backgroundColor = .black
-        visibleMaskView.isUserInteractionEnabled = false
-        visibleMaskView.layer.masksToBounds = true
-        mask = visibleMaskView
     }
 
-    private func containsVisibleMaskPoint(_ point: CGPoint) -> Bool {
-        let frame = visibleMaskView.layer.presentation()?.frame ?? visibleMaskView.frame
-        guard frame.contains(point) else { return false }
+    private func applyAlpha(_ targetAlpha: CGFloat, animation: OpenAPPInputBarFrameAnimation) {
+        guard animation.isAnimated else {
+            // 手势 changed 阶段走这里：直接应用已经过 ease-out 函数计算的 alpha，保证完全跟手。
+            alpha = targetAlpha
+            return
+        }
 
-        let cornerRadius = visibleMaskView.layer.presentation()?.cornerRadius
-            ?? visibleMaskView.layer.cornerRadius
-        guard cornerRadius > 0.5 else { return true }
-        return UIBezierPath(roundedRect: frame, cornerRadius: cornerRadius).contains(point)
+        let duration: TimeInterval
+        switch animation {
+        case .immediate:
+            duration = 0
+        case .standard:
+            duration = 0.24
+        case .boundaryRebound:
+            duration = 0.30
+        }
+
+        // 抬手后的展开/收起落位也使用 easeOut，并可从 presentation 状态无缝接管。
+        let animator = UIViewPropertyAnimator(duration: duration, curve: .easeOut) { [weak self] in
+            self?.alpha = targetAlpha
+        }
+        startAlphaAnimation(animator)
     }
 
     private func startLayoutAnimation(_ animator: UIViewPropertyAnimator) {
@@ -236,18 +206,34 @@ final class OpenAPPChatPanelContainerView: UIView {
         animator.startAnimation()
     }
 
-    private func stopLayoutAnimationAtCurrentState() {
-        guard let animator = layoutAnimator else { return }
+    private func startAlphaAnimation(_ animator: UIViewPropertyAnimator) {
+        let identifier = ObjectIdentifier(animator)
+        alphaAnimator = animator
+        animator.addCompletion { [weak self] _ in
+            guard let self,
+                  let currentAnimator = self.alphaAnimator,
+                  ObjectIdentifier(currentAnimator) == identifier else { return }
+            self.alphaAnimator = nil
+        }
+        animator.startAnimation()
+    }
+
+    private func stopAnimationsAtCurrentState() {
         let containerPresentationFrame = layer.presentation()?.frame
         let contentPresentationFrame = contentView?.layer.presentation()?.frame
-        let maskPresentationFrame = visibleMaskView.layer.presentation()?.frame
-        let maskPresentationCornerRadius = visibleMaskView.layer.presentation()?.cornerRadius
+        let presentationAlpha = layer.presentation().map { CGFloat($0.opacity) }
 
-        layoutAnimator = nil
-        animator.stopAnimation(true)
+        if let layoutAnimator {
+            self.layoutAnimator = nil
+            layoutAnimator.stopAnimation(true)
+        }
+        if let alphaAnimator {
+            self.alphaAnimator = nil
+            alphaAnimator.stopAnimation(true)
+        }
+
         layer.removeAllAnimations()
         contentView?.layer.removeAllAnimations()
-        visibleMaskView.layer.removeAllAnimations()
 
         if let containerPresentationFrame {
             frame = containerPresentationFrame
@@ -255,11 +241,8 @@ final class OpenAPPChatPanelContainerView: UIView {
         if let contentPresentationFrame {
             contentView?.frame = contentPresentationFrame
         }
-        if let maskPresentationFrame {
-            visibleMaskView.frame = maskPresentationFrame
-        }
-        if let maskPresentationCornerRadius {
-            visibleMaskView.layer.cornerRadius = maskPresentationCornerRadius
+        if let presentationAlpha {
+            alpha = presentationAlpha
         }
     }
 }

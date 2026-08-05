@@ -62,7 +62,12 @@ open class OpenAPPViewController: UIViewController {
     public static var isInputBarDelegateDebugLoggingEnabled = false
 
     /// The agent powering this chat.
-    public var agent: AIAgent?
+    public var agent: AIAgent? {
+        didSet {
+            guard isViewLoaded else { return }
+            reloadSessionSidebarItems()
+        }
+    }
 
     /// inputBar frame 被 OpenAPPViewController 实际应用后触发，宿主可用它观察键盘、展开、收起和拖拽导致的位置变化。
     public var onInputBarFrameChange: ((OpenAPPInputBarFrameChangeContext) -> Void)?
@@ -78,13 +83,15 @@ open class OpenAPPViewController: UIViewController {
 
     /// Switch to a different session.
     public func switchSession(to sessionId: String) {
-        mockChatResponder.cancel()
         currentStreamTask?.cancel()
         currentStreamTask = nil
         currentSession?.uiState.onChange = nil
         currentSessionId = sessionId
         reloadFromSession()
         bindUIState()
+        if isViewLoaded {
+            reloadSessionSidebarItems()
+        }
     }
 
     /// 子类可 override 观察 inputBar frame 变化。
@@ -96,6 +103,7 @@ open class OpenAPPViewController: UIViewController {
     let voiceInputOverlayView = OpenAPPVoiceInputOverlayView()
     let chatPanelContainer = OpenAPPChatPanelContainerView()
     let chatPanelCoordinator = OpenAPPChatPanelCoordinator()
+    let sessionSidebarView = OpenAPPSessionSidebarView()
 
     /// ChatPanel 的固定内容视图；拖拽容器与状态由 coordinator 统一持有。
     var chatPanelView: OpenAPPChatPanelView { chatPanelCoordinator.panelView }
@@ -118,11 +126,8 @@ open class OpenAPPViewController: UIViewController {
     var expandedResizeStableStartTime: TimeInterval?
     var keyboardObserver: OpenAPPKeyboardObserver?
 
-    /// UI 调试阶段是否使用模拟回复；产品默认走真实 session，开发者可在模块内临时开启。
-    var usesMockChatResponder = false
-
-    /// 对话流面板的模拟回复源（UI 调试阶段）。
-    let mockChatResponder = OpenAPPMockChatResponder()
+    /// 当前 UI 调试阶段默认使用本地固定回复，避免依赖真实模型配置。
+    var usesFixedDebugReply = true
 
     /// inputBar 布局偏好的持久化存储；frame 策略本身在 OpenAPPInputBarFramePolicy。
     let inputBarLayoutStore: OpenAPPInputBarLayoutStoring = OpenAPPUserDefaultsInputBarLayoutStore()
@@ -161,6 +166,7 @@ open class OpenAPPViewController: UIViewController {
         loadPersistedInputBarLayout()
         setupInputBar()
         setupChatPanel()
+        setupSessionSidebar()
         setupVoiceInputOverlay()
         setupKeyboardObservers()
 
@@ -179,6 +185,7 @@ open class OpenAPPViewController: UIViewController {
         super.viewDidLayoutSubviews()
         layoutInputBar(reason: .layout)
         layoutChatPanel()
+        sessionSidebarView.frame = view.bounds
         voiceInputOverlayView.frame = view.bounds
         view.bringSubviewToFront(voiceInputOverlayView)
     }

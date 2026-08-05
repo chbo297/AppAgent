@@ -168,7 +168,8 @@ public final class OpenAPPInputBar: UIView {
     private static let minimumInputAreaWidth: CGFloat = 80
     private static let symbolIconPointSize: CGFloat = 24
     private static let keyboardIconPointSize: CGFloat = 17
-    private static let expandedCornerRadius: CGFloat = 16
+    /// 展开态 inputBar 背景圆角；ChatPanel 收至最小高度时复用该值以保持视觉对齐。
+    static let expandedCornerRadius: CGFloat = 16
     private static let inactiveTextInputPlaceholder = "发消息或按住说话..."
     private static let activeTextInputPlaceholder = "发消息..."
 
@@ -253,7 +254,7 @@ public final class OpenAPPInputBar: UIView {
 
     private lazy var keyboardModeLongPressGesture: UILongPressGestureRecognizer = {
         let press = UILongPressGestureRecognizer(target: self, action: #selector(handleKeyboardModeLongPress(_:)))
-        press.minimumPressDuration = 0.1
+        press.minimumPressDuration = 0.2
         press.cancelsTouchesInView = true
         press.delegate = self
         return press
@@ -742,10 +743,12 @@ public final class OpenAPPInputBar: UIView {
                 && voiceInputHoldButton.isEnabled
                 && voiceInputHoldButton.isUserInteractionEnabled
         case .keyboardModeLongPress:
-            // 键盘已激活（textField 聚焦）时长按不触发语音输入，保留原生文本编辑手势（光标/选区）。
+            // 键盘已激活或仍有草稿文字时，不触发语音输入：前者保留原生文本编辑手势，
+            // 后者避免收起键盘后长按误开启语音。空白字符也属于已输入内容，不做 trim。
             return inputSource == .keyboard
                 && textField.isEnabled
                 && !textField.isFirstResponder
+                && (textField.text ?? "").isEmpty
         }
     }
 
@@ -1078,7 +1081,8 @@ extension OpenAPPInputBar: UITextFieldDelegate {
 extension OpenAPPInputBar: UIGestureRecognizerDelegate {
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         if gestureRecognizer === keyboardModeLongPressGesture {
-            // 手指刚按下：只允许键盘模式、键盘未激活时，从输入区域或麦克风输入源按钮开始长按。
+            // 手指刚按下：只允许键盘模式、键盘未激活且无草稿时，
+            // 从输入区域或麦克风输入源按钮开始长按。
             guard canBeginVoiceInput(source: .keyboardModeLongPress) else { return false }
 
             if isTouch(touch, insideViewHierarchyOf: inputAreaContainer) {
@@ -1110,7 +1114,7 @@ extension OpenAPPInputBar: UIGestureRecognizerDelegate {
         }
 
         if gestureRecognizer === keyboardModeLongPressGesture {
-            // 从按下到 0.1 秒长按成立之间状态可能变化，因此在正式开始前再次校验。
+            // 从按下到长按成立之间状态可能变化，因此在正式开始前再次校验。
             return canBeginVoiceInput(source: .keyboardModeLongPress)
         }
 

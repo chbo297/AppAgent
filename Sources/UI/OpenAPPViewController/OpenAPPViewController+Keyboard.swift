@@ -22,7 +22,7 @@ extension OpenAPPViewController {
         observedKeyboardHeight = height
         let newEffectiveKeyboardHeight = effectiveKeyboardHeight
 
-        // 对话流面板的列表 inset 跟随任何键盘高度变化（面板 frame 本身不避让）。
+        // 列表只补偿整体位移后剩余的底部遮挡；inputBar 与 ChatPanel 容器在下方同一动画中同步上移。
         UIView.animate(withDuration: max(duration, 0.01)) {
             self.updateChatPanelListInsets()
         }

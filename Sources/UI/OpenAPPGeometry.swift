@@ -13,6 +13,15 @@ enum OpenAPPGeometry {
         guard upper >= lower else { return lower }
         return min(upper, max(lower, value))
     }
+
+    /// 可调强度的 ease-out；最小合法系数对应线性，系数越大则起始变化越快、接近终点时越缓。
+    /// 输入和输出均归一化；无效系数回退为线性，避免产生 NaN 或反向曲线。
+    static func easeOut(_ value: CGFloat, coefficient: CGFloat) -> CGFloat {
+        let progress = clamp(value, 0, 1)
+        let normalizedCoefficient = coefficient.isFinite ? max(1, coefficient) : 1
+        let remaining = 1 - progress
+        return 1 - pow(remaining, normalizedCoefficient)
+    }
 }
 
 extension CGPoint {

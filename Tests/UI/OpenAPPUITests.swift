@@ -39,5 +39,30 @@ final class OpenAPPUITests: XCTestCase {
         inputBar.layoutIfNeeded()
         XCTAssertFalse(inputBar.textField.isUserInteractionEnabled)
     }
+
+    func testInputBarKeyboardModeLongPressRequiresEmptyText() throws {
+        let inputBar = OpenAPPInputBar(frame: CGRect(
+            x: 0,
+            y: 0,
+            width: OpenAPPInputBar.minimumExpandedWidth,
+            height: OpenAPPInputBar.barHeight
+        ))
+        inputBar.layoutIfNeeded()
+
+        let longPress = try XCTUnwrap(
+            inputBar.gestureRecognizers?.compactMap { $0 as? UILongPressGestureRecognizer }.first
+        )
+
+        XCTAssertTrue(inputBar.gestureRecognizerShouldBegin(longPress))
+
+        inputBar.text = "draft"
+        XCTAssertFalse(inputBar.gestureRecognizerShouldBegin(longPress))
+
+        inputBar.text = " "
+        XCTAssertFalse(inputBar.gestureRecognizerShouldBegin(longPress))
+
+        inputBar.clearText()
+        XCTAssertTrue(inputBar.gestureRecognizerShouldBegin(longPress))
+    }
 }
 #endif

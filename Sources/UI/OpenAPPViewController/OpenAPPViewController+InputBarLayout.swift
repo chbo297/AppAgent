@@ -123,6 +123,8 @@ extension OpenAPPViewController {
         if didChange {
             inputBar.setInputBarFrame(targetFrame, animation: animation)
         }
+        // inputBar 手势 changed 使用 `.immediate`，ChatPanel frame 与 alpha 会随每个 frame 直接更新；
+        // 抬手落位使用动画类型，由 ChatPanelContainerView 分别处理 frame 动画和 easeOut alpha 动画。
         applyChatPanelContainerLayout(
             inputBarFrame: inputBar.frame,
             inputBarExpandedFrame: OpenAPPInputBarFramePolicy.preferredExpandedFrame(inputBarLayoutContext),

@@ -10,35 +10,38 @@ import UIKit
 /// ChatPanel 与 BODragScroll 之间的唯一适配层。
 ///
 /// 该对象拥有拖拽容器和固定尺寸面板，负责尺寸提供、detent、内部列表捕获、程序化移动以及
-/// 运动结束后的列表可见区同步。业务消息和 inputBar/键盘策略仍由 OpenAPPViewController 管理。
+/// displayHeight 驱动的列表可见区同步。业务消息和 inputBar/键盘策略仍由 OpenAPPViewController 管理。
 @MainActor
 final class OpenAPPChatPanelCoordinator: NSObject {
 
-    /// 铺满 OpenAPPViewController、但只在可见 panel 范围内命中触摸的拖拽容器。
+    /// 铺满 OpenAPPViewController、并由 BODragScroll 自己管理可见 panel 命中的拖拽容器。
     let dragScrollView = BODragScrollView(frame: .zero)
 
     /// 由 BODragScroll 固定尺寸承载的业务内容视图。
     let panelView = OpenAPPChatPanelView()
 
-    /// 最近一次稳定落位对应的业务档位，用于尺寸变化时保持语义位置。
-    private var settledDetent: OpenAPPChatPanelDetent = .half
+    /// 当前 displayHeight 映射出的业务档位，用于尺寸变化时保持语义位置。
+    private var displayDetent: OpenAPPChatPanelDetent = .half
 
     private var geometry: OpenAPPChatPanelGeometry?
     private var pendingLayoutDetent: OpenAPPChatPanelDetent?
     private var bottomAvoidingInset: CGFloat = 0
-    private var settlementSynchronizationGeneration: UInt = 0
 
     override init() {
         super.init()
 
         dragScrollView.backgroundColor = .clear
+        // 内容区背景的阴影会超出 panel bounds，因此 DragScroll 不裁掉它。
+        dragScrollView.clipsToBounds = false
         dragScrollView.behaviorProvider = self
         dragScrollView.eventDelegate = self
 
         var configuration = dragScrollView.configuration
-        configuration.handoff.mode = .coordinated
-        configuration.handoff.offsetMismatch = .waitForValidSegment
-        configuration.handoff.preventsInnerToPanelHandoff = false
+        // panel 到达最小展示高度后不再继续向更小方向产生 bounce。
+        configuration.bounce.allowsPanelTopBounce = false
+        // panel 到达顶部安全区下沿后不再继续向更大方向产生 bounce。
+        configuration.bounce.allowsPanelBottomBounce = false
+//        configuration.movement.defaultStyle = .viewAnimation
         dragScrollView.configuration = configuration
     }
 
@@ -59,7 +62,7 @@ final class OpenAPPChatPanelCoordinator: NSObject {
         ) else { return }
 
         guard geometry != newGeometry else {
-            synchronizeSettledStateIfPossible()
+            applyDisplayHeightState(dragScrollView.displayHeight)
             return
         }
 
@@ -67,10 +70,11 @@ final class OpenAPPChatPanelCoordinator: NSObject {
         geometry = newGeometry
         if isFirstGeometry {
             // 首次布局前若业务已经调用 move(to:)，保留该请求；否则默认停在 half。
-            pendingLayoutDetent = pendingLayoutDetent ?? settledDetent
-        } else {
-            pendingLayoutDetent = settledDetent
+            pendingLayoutDetent = pendingLayoutDetent ?? displayDetent
         }
+        // 后续旋转/分屏不写 pending detent；provider 保留 BODragScroll 提供的实时高度，
+        // 避免把进行中的拖拽或动画量化到最近档位。
+        dragScrollView.minimumDisplayHeight = newGeometry.peekHeight
         dragScrollView.detentHeights = newGeometry.detentHeights
 
         if dragScrollView.panelView == nil {
@@ -82,7 +86,7 @@ final class OpenAPPChatPanelCoordinator: NSObject {
 
         dragScrollView.setNeedsLayout()
         dragScrollView.layoutIfNeeded()
-        synchronizeSettledStateIfPossible()
+        applyDisplayHeightState(dragScrollView.displayHeight)
     }
 
     /// 更新悬浮 inputBar、safe area 或键盘占用的底部空间。
@@ -90,60 +94,59 @@ final class OpenAPPChatPanelCoordinator: NSObject {
         let normalizedInset = max(0, inset)
         guard abs(normalizedInset - bottomAvoidingInset) > 0.5 else { return }
         bottomAvoidingInset = normalizedInset
-        synchronizeSettledStateIfPossible()
+        applyDisplayHeightState(dragScrollView.displayHeight)
     }
 
     /// 由业务主动移动到指定档位；运动细节和中途打断全部交给 BODragScroll。
     func move(to detent: OpenAPPChatPanelDetent, animated: Bool) {
         guard let geometry else {
-            settledDetent = detent
+            displayDetent = detent
             pendingLayoutDetent = detent
             return
         }
 
-        dragScrollView.move(
+        dragScrollView.scroll(
             toDisplayHeight: geometry.height(for: detent),
             animated: animated
-        ) { [weak self] result in
-            guard result.outcome == .completed else { return }
-            self?.scheduleSettledStateSynchronization()
-        }
+        )
     }
 
-    /// 当前是否稳定处在 peek 附近，供新消息到达时决定是否自动展开。
+    /// 当前 displayHeight 是否处在 peek 附近，供新消息到达时决定是否自动展开。
     var isAtPeekDetent: Bool {
-        guard let geometry else { return settledDetent == .peek }
-        guard dragScrollView.displayHeight > 0 else { return settledDetent == .peek }
+        guard let geometry else { return displayDetent == .peek }
+        guard dragScrollView.displayHeight > 0 else { return displayDetent == .peek }
         return geometry.nearestDetent(
             to: dragScrollView.displayHeight,
-            preferredDetent: settledDetent
+            preferredDetent: displayDetent
         ) == .peek
     }
 
-    private var isMovementActive: Bool {
-        dragScrollView.isTracking
-            || dragScrollView.isDragging
-            || dragScrollView.isDecelerating
-            || dragScrollView.isAnimatingDisplayHeight
-    }
-
-    /// 运动中冻结 tableView 指标；稳定后只提交一次可见区补偿并重建滚动模型。
-    private func synchronizeSettledStateIfPossible() {
-        guard !isMovementActive else { return }
-        synchronizeSettledState(at: dragScrollView.displayHeight)
-    }
-
-    private func synchronizeSettledState(at displayHeight: CGFloat) {
+    /// 所有面板派生 UI 都只消费 displayHeight；不等待 movement completion 或 idle 回调。
+    private func applyDisplayHeightState(_ displayHeight: CGFloat) {
         guard let geometry, displayHeight > 0 else { return }
 
-        settledDetent = geometry.nearestDetent(
-            to: displayHeight,
-            preferredDetent: settledDetent
+        updatePanelPresentation(at: displayHeight)
+
+        let clampedDisplayHeight = geometry.clampedDisplayHeight(displayHeight)
+        displayDetent = geometry.nearestDetent(
+            to: clampedDisplayHeight,
+            preferredDetent: displayDetent
         )
-        let stableDisplayHeight = geometry.height(for: settledDetent)
+        let fixedTopAreaHeight = OpenAPPChatPanelGeometry.dragHandleAreaHeight
+            + OpenAPPChatPanelNavigationBar.height
+        let panelListHeight = max(
+            0,
+            geometry.maximumDisplayHeight - fixedTopAreaHeight
+        )
+        // 列表底部 inset 最多补偿到 half 档；面板继续收向 peek 时只改变视觉裁切，不再改变滚动指标。
+        let insetReferenceDisplayHeight = max(clampedDisplayHeight, geometry.halfHeight)
+        let insetReferenceListHeight = max(
+            0,
+            insetReferenceDisplayHeight - fixedTopAreaHeight
+        )
         let metricsChanged = panelView.listView.updateViewport(
-            panelHeight: geometry.fullHeight,
-            displayHeight: stableDisplayHeight,
+            panelHeight: panelListHeight,
+            displayHeight: insetReferenceListHeight,
             bottomAvoidingInset: bottomAvoidingInset
         )
         if metricsChanged {
@@ -151,14 +154,14 @@ final class OpenAPPChatPanelCoordinator: NSObject {
         }
     }
 
-    /// 避开 BODragScroll 自己的同步 delegate 调用栈，再读取最终几何并更新列表指标。
-    private func scheduleSettledStateSynchronization() {
-        settlementSynchronizationGeneration &+= 1
-        let generation = settlementSynchronizationGeneration
-        Task { @MainActor [weak self] in
-            guard let self, generation == self.settlementSynchronizationGeneration else { return }
-            self.synchronizeSettledStateIfPossible()
-        }
+    /// 【竖向收起接线点】把 BODragScroll 的实时展示高度交给 panel 内部，只更新背景和 viewport 的裁切几何。
+    private func updatePanelPresentation(at displayHeight: CGFloat) {
+        guard let geometry, displayHeight > 0 else { return }
+        panelView.updateDisplayHeight(
+            displayHeight,
+            minimumDisplayHeight: geometry.peekHeight,
+            compactTransitionStartDisplayHeight: geometry.halfHeight
+        )
     }
 }
 
@@ -190,26 +193,10 @@ extension OpenAPPChatPanelCoordinator: BODragScrollBehaviorProvider {
 extension OpenAPPChatPanelCoordinator: BODragScrollEventDelegate {
     func dragScrollView(
         _ dragScrollView: BODragScrollView,
-        didFinishMovement result: BODragScrollMovementResult
+        didChangeDisplayHeight displayHeight: CGFloat
     ) {
-        guard result.outcome == .completed else { return }
-        scheduleSettledStateSynchronization()
-    }
-
-    func dragScrollViewDidEndDragging(
-        _ dragScrollView: BODragScrollView,
-        willDecelerate: Bool
-    ) {
-        guard !willDecelerate else { return }
-        scheduleSettledStateSynchronization()
-    }
-
-    func dragScrollViewDidEndDecelerating(_ dragScrollView: BODragScrollView) {
-        scheduleSettledStateSynchronization()
-    }
-
-    func dragScrollViewDidEndScrollingAnimation(_ dragScrollView: BODragScrollView) {
-        scheduleSettledStateSynchronization()
+        // 【竖向收起每帧入口】手势拖动、减速或程序化移动改变展示高度时，BODragScroll 都从这里回调。
+        applyDisplayHeightState(displayHeight)
     }
 }
 
