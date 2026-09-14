@@ -1,6 +1,6 @@
 //
 //  LijiToolset.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  按 LijiConfig 的能力开关 + 已注入的 provider，组装 app agent 在百度地图中的工具集合。
 //  宿主拿到数组后自行注册到 ToolCentral（或通过 AIAgentProfile 暴露）。

@@ -1,6 +1,6 @@
 //
 //  JSONSchema.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

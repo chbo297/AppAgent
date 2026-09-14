@@ -1,6 +1,6 @@
 //
 //  DemoConfig.swift
-//  OpenAPPDemo
+//  AppAgentDemo
 //
 
 import Foundation

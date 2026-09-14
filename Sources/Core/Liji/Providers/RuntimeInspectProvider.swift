@@ -1,6 +1,6 @@
 //
 //  RuntimeInspectProvider.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  宿主 app（百度地图）实现，向 app agent 暴露「运行时内省」能力：
 //  UI 层级、类列表、方法/属性列表、属性取值、方法调用。

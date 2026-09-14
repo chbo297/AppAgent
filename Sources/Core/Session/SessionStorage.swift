@@ -1,6 +1,6 @@
 //
 //  SessionStorage.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
@@ -74,7 +74,7 @@ public actor FileSessionStorage: SessionStorage {
             self.directory = directory
         } else {
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            self.directory = docs.appendingPathComponent("OpenAPP/sessions", isDirectory: true)
+            self.directory = docs.appendingPathComponent("AppAgent/sessions", isDirectory: true)
         }
         try? FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true)
     }

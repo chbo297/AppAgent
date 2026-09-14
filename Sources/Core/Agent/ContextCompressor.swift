@@ -1,6 +1,6 @@
 //
 //  ContextCompressor.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

@@ -1,6 +1,6 @@
 //
 //  ReadySignal.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

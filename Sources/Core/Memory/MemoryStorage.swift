@@ -1,6 +1,6 @@
 //
 //  MemoryStorage.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

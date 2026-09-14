@@ -1,6 +1,6 @@
 //
 //  ClarifyTool.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

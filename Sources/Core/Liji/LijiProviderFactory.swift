@@ -1,6 +1,6 @@
 //
 //  LijiProviderFactory.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  由 LijiConfig 构造 ModelProvider。当前复用通用 HTTP+SSE 的 AnthropicProvider
 //  （其内部按 apiProtocol 分派 anthropic-messages / openai-completions 两种线格式）。

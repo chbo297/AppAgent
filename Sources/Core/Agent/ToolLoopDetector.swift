@@ -1,6 +1,6 @@
 //
 //  ToolLoopDetector.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

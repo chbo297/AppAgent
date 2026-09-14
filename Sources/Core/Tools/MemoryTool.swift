@@ -1,6 +1,6 @@
 //
 //  MemoryTool.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

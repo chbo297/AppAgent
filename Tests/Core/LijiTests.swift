@@ -1,10 +1,10 @@
 //
 //  LijiTests.swift
-//  OpenAPP — Liji 集成层测试
+//  AppAgent — Liji 集成层测试
 //
 
 import XCTest
-@testable import OpenAPP
+@testable import AppAgent
 
 final class LijiTests: XCTestCase {
 

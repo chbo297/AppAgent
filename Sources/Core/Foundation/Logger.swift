@@ -1,18 +1,18 @@
 //
 //  Logger.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
 
-/// Log level for OpenAPP debug logging.
-public enum OpenAPPLogLevel: Int, Comparable, Sendable {
+/// Log level for AppAgent debug logging.
+public enum AppAgentLogLevel: Int, Comparable, Sendable {
     case debug = 0
     case info = 1
     case warning = 2
     case error = 3
 
-    public static func < (lhs: OpenAPPLogLevel, rhs: OpenAPPLogLevel) -> Bool {
+    public static func < (lhs: AppAgentLogLevel, rhs: AppAgentLogLevel) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
 
@@ -26,9 +26,9 @@ public enum OpenAPPLogLevel: Int, Comparable, Sendable {
     }
 }
 
-/// Centralized logger for the OpenAPP SDK.
+/// Centralized logger for the AppAgent SDK.
 ///
-/// All log lines are prefixed with `[OpenAPP]` followed by the level and subsystem.
+/// All log lines are prefixed with `[AppAgent]` followed by the level and subsystem.
 /// Logging is disabled by default. Enable via `Logger.isEnabled = true`.
 ///
 /// Host apps can redirect logs by setting a custom handler:
@@ -43,12 +43,12 @@ public enum Logger {
     public static var isEnabled: Bool = false
 
     /// Minimum log level. Messages below this level are suppressed. Default: .debug.
-    public static var minimumLevel: OpenAPPLogLevel = .debug
+    public static var minimumLevel: AppAgentLogLevel = .debug
 
     /// Optional custom log handler. When set, replaces the default `print` output.
     /// The closure receives the log level and the fully-formatted message string
-    /// (already including the `[OpenAPP]` prefix).
-    public static var handler: ((OpenAPPLogLevel, String) -> Void)?
+    /// (already including the `[AppAgent]` prefix).
+    public static var handler: ((AppAgentLogLevel, String) -> Void)?
 
     /// Whether to redact sensitive information (API keys, tokens, etc.) from log output.
     /// Default: true.
@@ -61,12 +61,12 @@ public enum Logger {
     ///   - subsystem: A short tag identifying the component (e.g., "AISession", "AIAgentExecutor", "Anthropic").
     ///   - message: The log message. Evaluated lazily via @autoclosure.
     public static func log(
-        _ level: OpenAPPLogLevel,
+        _ level: AppAgentLogLevel,
         subsystem: String,
         _ message: @autoclosure () -> String
     ) {
         guard isEnabled, level >= minimumLevel else { return }
-        let raw = "[OpenAPP] [\(level.label)] [\(subsystem)] \(message())"
+        let raw = "[AppAgent] [\(level.label)] [\(subsystem)] \(message())"
         let formatted = redactSensitive ? redact(raw) : raw
         if let handler = handler {
             handler(level, formatted)

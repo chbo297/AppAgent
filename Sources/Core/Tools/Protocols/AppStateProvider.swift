@@ -1,6 +1,6 @@
 //
 //  AppStateProvider.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

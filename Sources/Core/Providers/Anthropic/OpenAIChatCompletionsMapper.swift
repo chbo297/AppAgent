@@ -1,6 +1,6 @@
 //
 //  OpenAIChatCompletionsMapper.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

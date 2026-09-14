@@ -1,6 +1,6 @@
 //
 //  LijiRequirementListView.swift
-//  OpenAPP — Liji 面板 UI
+//  AppAgent — Liji 面板 UI
 //
 //  「需求列表」纯 UIKit 视图：展示状态、摘要/错误，并通过回调暴露应用/分享/取消/重新生成动作。
 //  数据来自 LijiPanelDataSource.requirementRows（不含网络逻辑，由宿主注入回调触发 client 调用）。

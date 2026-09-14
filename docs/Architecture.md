@@ -1,6 +1,6 @@
 # Architecture
 
-OpenAPP currently ships as one Swift package product and one Swift module named `OpenAPP`.
+AppAgent currently ships as one Swift package product and one Swift module named `AppAgent`.
 
 The repository still separates implementation files by responsibility:
 
@@ -16,18 +16,18 @@ Those directories are organizational boundaries inside the same target, not sepa
 
 ```text
 Package.swift
-  product: OpenAPP
-  target:  OpenAPP
+  product: AppAgent
+  target:  AppAgent
   path:    Sources
 ```
 
 Use:
 
 ```swift
-import OpenAPP
+import AppAgent
 ```
 
-Do not import `OpenAPPCore` or `OpenAPPUI`; those products do not exist in the current package.
+Do not import `AppAgentCore` or `AppAgentUI`; those products do not exist in the current package.
 
 ## Runtime Layers
 
@@ -151,10 +151,10 @@ UIKit files live in `Sources/UI` and are compiled when UIKit is available.
 
 Key public types:
 
-- `OpenAPPOverlay`: creates a passthrough overlay window and binds it to an agent/session
-- `OpenAPPWindow`: lets taps outside OpenAPP UI pass through to the host app
-- `OpenAPPViewController`: chat UI backed by `AISession.uiState`
-- `OpenAPPInputBar`, `OpenAPPTextField`, `OpenAPPMenuButton`: input controls
+- `AppAgentOverlay`: creates a passthrough overlay window and binds it to an agent/session
+- `AppAgentWindow`: lets taps outside AppAgent UI pass through to the host app
+- `AppAgentViewController`: chat UI backed by `AISession.uiState`
+- `AppAgentInputBar`, `AppAgentTextField`, `AppAgentMenuButton`: input controls
 - `ChatMessage`, `ChatMessageCell`: UI message model and table cell
 
 The UI layer is optional at runtime. Apps can ignore it and build directly against `AISession`.

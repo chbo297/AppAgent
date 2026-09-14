@@ -75,7 +75,7 @@ toolCentral.register(
 ## 验证
 
 1. 跑 `/build` 确认编译通过。
-2. 检查 `Tests/Core/OpenAPPCoreTests.swift` 是否需要加测试（早期阶段非强制）。
+2. 检查 `Tests/Core/AppAgentCoreTests.swift` 是否需要加测试（早期阶段非强制）。
 3. 提醒用户：如果工具属于"宿主 app 注入 Provider"类（如 `WebSearchTool`），还需要同步定义 Provider 协议，参考 `Sources/Core/Tools/Protocols/`。
 
 ## 输出

@@ -1,6 +1,6 @@
 # Liji 集成层（app agent × 百度地图 × liji_server）
 
-> 本工程 **OpenApp 即「app agent」**。`liji` 分支在 Core 之上新增 `Sources/Core/Liji/`，
+> 本工程 **AppAgent 即「app agent」**。`liji` 分支在 Core 之上新增 `Sources/Core/Liji/`，
 > 让 app agent 在百度地图内：用 OneAPI 跑大模型、把地图与运行时能力当工具、
 > 需求不够本地实现时发给 liji_server 生成 JS 热修复补丁并应用/分享。
 
@@ -30,7 +30,7 @@ Sources/Core/Liji/
 ## 宿主（百度地图）接入示例
 
 ```swift
-import OpenAPP
+import AppAgent
 
 // 1) 配置：默认 OneAPI，用户可覆盖 apiKey / 打开能力开关
 var config = LijiConfig.baiduMapDefault()
@@ -42,7 +42,7 @@ config.hotfixEnabled = RemoteConfig.bool("liji_hotfix")
 let (provider, policy) = LijiProviderFactory.makeProviderAndPolicy(from: config)
 await ModelProviderCentral.default.register(name: provider.name, provider: provider)
 
-// 3) 工具：地图能力用 OpenApp 既有的 AppАction/AppNavigation/AppState provider（由地图侧实现）；
+// 3) 工具：地图能力用 AppAgent 既有的 AppАction/AppNavigation/AppState provider（由地图侧实现）；
 //    运行时/热修复/后台服务用 Liji provider。
 let tools = LijiToolset.makeTools(
     config: config,

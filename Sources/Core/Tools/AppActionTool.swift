@@ -1,6 +1,6 @@
 //
 //  AppActionTool.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

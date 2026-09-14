@@ -1,6 +1,6 @@
 //
 //  HapticTool.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

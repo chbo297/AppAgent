@@ -15,9 +15,9 @@ source_path=$(CDPATH= cd -- "$source_path" && pwd)
 cd "$repository_root"
 swift package resolve
 if swift package show-dependencies --format json | grep -Fq "\"path\": \"$source_path\""; then
-    echo "OpenAPP already uses editable BODragScroll source at: $source_path"
+    echo "AppAgent already uses editable BODragScroll source at: $source_path"
     exit 0
 fi
 swift package edit bodragscroll --path "$source_path"
 
-echo "OpenAPP now uses editable BODragScroll source at: $source_path"
+echo "AppAgent now uses editable BODragScroll source at: $source_path"

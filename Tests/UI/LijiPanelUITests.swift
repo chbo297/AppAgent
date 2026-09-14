@@ -1,6 +1,6 @@
 #if canImport(UIKit)
 import XCTest
-@testable import OpenAPP
+@testable import AppAgent
 
 final class LijiPanelUITests: XCTestCase {
 

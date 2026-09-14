@@ -1,6 +1,6 @@
 //
 //  LijiPanelViewController.swift
-//  OpenAPP — Liji 面板 UI
+//  AppAgent — Liji 面板 UI
 //
 //  「需求列表 / 分享给我的」个人中心容器：顶部分段控制切换两个列表，
 //  数据来自注入的 LijiServerClient，动作（应用/分享/取消/重新生成/开关）直接调用对应 API。

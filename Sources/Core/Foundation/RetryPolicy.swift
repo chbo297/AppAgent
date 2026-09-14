@@ -1,6 +1,6 @@
 //
 //  RetryPolicy.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

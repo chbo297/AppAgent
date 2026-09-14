@@ -1,6 +1,6 @@
 //
 //  AIAgentEvent.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

@@ -1,11 +1,11 @@
-diff --git a/Sources/UI/VoiceInputOverlay/OpenAPPVoiceActionZoneView.swift b/Sources/UI/VoiceInputOverlay/OpenAPPVoiceActionZoneView.swift
+diff --git a/Sources/UI/VoiceInputOverlay/AppAgentVoiceActionZoneView.swift b/Sources/UI/VoiceInputOverlay/AppAgentVoiceActionZoneView.swift
 index 4273750..e7045da 100644
---- a/Sources/UI/VoiceInputOverlay/OpenAPPVoiceActionZoneView.swift
-+++ b/Sources/UI/VoiceInputOverlay/OpenAPPVoiceActionZoneView.swift
+--- a/Sources/UI/VoiceInputOverlay/AppAgentVoiceActionZoneView.swift
++++ b/Sources/UI/VoiceInputOverlay/AppAgentVoiceActionZoneView.swift
 @@ -7,11 +7,34 @@
  import UIKit
  
- final class OpenAPPVoiceActionZoneView: UIView {
+ final class AppAgentVoiceActionZoneView: UIView {
 +    private static let selectionAnimationDuration: TimeInterval = 0.2
 +    private static let selectedScale: CGFloat = 1.1
 +    private static let hintLabelOffsetFromOuterArc: CGFloat = 18
@@ -37,7 +37,7 @@ index 4273750..e7045da 100644
      var fillColor: UIColor = .clear {
          didSet {
              guard !fillColor.isEqual(oldValue) else { return }
-@@ -20,17 +43,22 @@ final class OpenAPPVoiceActionZoneView: UIView {
+@@ -20,17 +43,22 @@ final class AppAgentVoiceActionZoneView: UIView {
      }
  
      private let side: Side
@@ -63,7 +63,7 @@ index 4273750..e7045da 100644
      }
  
      override func draw(_ rect: CGRect) {
-@@ -45,46 +73,269 @@ final class OpenAPPVoiceActionZoneView: UIView {
+@@ -45,46 +73,269 @@ final class AppAgentVoiceActionZoneView: UIView {
              context.scaleBy(x: -1, y: 1)
          }
  
@@ -275,16 +275,16 @@ index 4273750..e7045da 100644
 +    }
 +
 +    private func actionArcGeometry(in rect: CGRect) -> ActionArcGeometry {
-+        let strokeWidth = min(OpenAPPVoiceArcMetrics.actionRingThickness, rect.height)
-+        let bottomArcApexY = rect.minY + OpenAPPVoiceArcMetrics.actionTopExpansionFromBottomApex
-+        let virtualFullWidth = (rect.width + OpenAPPVoiceArcMetrics.actionCenterGap) * 2
-+        let bottomArc = OpenAPPVoiceArcMetrics.symmetricTopArc(
++        let strokeWidth = min(AppAgentVoiceArcMetrics.actionRingThickness, rect.height)
++        let bottomArcApexY = rect.minY + AppAgentVoiceArcMetrics.actionTopExpansionFromBottomApex
++        let virtualFullWidth = (rect.width + AppAgentVoiceArcMetrics.actionCenterGap) * 2
++        let bottomArc = AppAgentVoiceArcMetrics.symmetricTopArc(
 +            minX: rect.minX,
 +            maxX: rect.minX + virtualFullWidth,
 +            apexY: bottomArcApexY
 +        )
 +        let strokeRadius = bottomArc.radius
-+            + OpenAPPVoiceArcMetrics.actionLowerArcSpacingFromBottomArc
++            + AppAgentVoiceArcMetrics.actionLowerArcSpacingFromBottomArc
 +            + strokeWidth / 2
 +        let endAngle = Self.endAngleKeepingRoundedCapInside(
 +            arcCenterX: bottomArc.center.x,
@@ -319,8 +319,8 @@ index 4273750..e7045da 100644
 +
 +        let capRadius = geometry.strokeWidth / 2
 +        let labelInset = min(capRadius, rect.width / 2)
-+        let targetX = OpenAPPGeometry.clamp(referenceBounds.midX, rect.minX + labelInset, rect.maxX - labelInset)
-+        let dx = OpenAPPGeometry.clamp(targetX - geometry.center.x, -geometry.radius, geometry.radius)
++        let targetX = AppAgentGeometry.clamp(referenceBounds.midX, rect.minX + labelInset, rect.maxX - labelInset)
++        let dx = AppAgentGeometry.clamp(targetX - geometry.center.x, -geometry.radius, geometry.radius)
 +        let y = geometry.center.y - sqrt(max(0, geometry.radius * geometry.radius - dx * dx))
 +        let angle = atan2(y - geometry.center.y, dx)
 +
@@ -366,22 +366,22 @@ index 4273750..e7045da 100644
      }
  }
  
-diff --git a/Sources/UI/VoiceInputOverlay/OpenAPPVoiceArcMetrics.swift b/Sources/UI/VoiceInputOverlay/OpenAPPVoiceArcMetrics.swift
+diff --git a/Sources/UI/VoiceInputOverlay/AppAgentVoiceArcMetrics.swift b/Sources/UI/VoiceInputOverlay/AppAgentVoiceArcMetrics.swift
 new file mode 100644
 index 0000000..cce8693
 --- /dev/null
-+++ b/Sources/UI/VoiceInputOverlay/OpenAPPVoiceArcMetrics.swift
++++ b/Sources/UI/VoiceInputOverlay/AppAgentVoiceArcMetrics.swift
 @@ -0,0 +1,59 @@
 +//
-+//  OpenAPPVoiceArcMetrics.swift
-+//  OpenAPPUI
++//  AppAgentVoiceArcMetrics.swift
++//  AppAgentUI
 +//
 +
 +#if canImport(UIKit)
 +import UIKit
 +
 +/// 语音输入浮层里 bottom 圆弧与取消/编辑按钮圆环共用的几何定义。
-+enum OpenAPPVoiceArcMetrics {
++enum AppAgentVoiceArcMetrics {
 +    /// 一条左右对称、顶部拱起的圆弧几何信息。
 +    struct SymmetricTopArc {
 +        let center: CGPoint

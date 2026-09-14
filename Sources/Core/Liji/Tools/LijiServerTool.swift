@@ -1,6 +1,6 @@
 //
 //  LijiServerTool.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  让 app agent 把「产品诉求」发给 liji_server 生成热修复补丁，并查询/应用/分享。
 //  当本地运行时信息不足以实现需求时，走后台服务读取地图源码生成补丁。

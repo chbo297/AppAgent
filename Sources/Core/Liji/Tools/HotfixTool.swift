@@ -1,6 +1,6 @@
 //
 //  HotfixTool.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  把宿主 app 的热修复能力封装为工具。仅当 HotfixProvider 注入且能力开启时注册。
 //

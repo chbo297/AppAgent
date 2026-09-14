@@ -1,6 +1,6 @@
 //
 //  LijiServerClient.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  访问 liji_server（后台补丁服务）。生产环境请求发往零信任网关域名，
 //  身份由网关注入 X-Zt-Authorization；本地联调可用 devUser → X-Dev-User。

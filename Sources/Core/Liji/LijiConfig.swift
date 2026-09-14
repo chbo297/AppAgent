@@ -1,8 +1,8 @@
 //
 //  LijiConfig.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
-//  「app agent」（＝本工程 OpenApp）在百度地图内的运行配置。
+//  「app agent」（＝本工程 AppAgent）在百度地图内的运行配置。
 //  默认填入 OneAPI 网关；允许宿主/用户覆盖 endpoint / apiKey / model / protocol。
 //
 

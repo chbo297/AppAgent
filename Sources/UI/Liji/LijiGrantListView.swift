@@ -1,6 +1,6 @@
 //
 //  LijiGrantListView.swift
-//  OpenAPP — Liji 面板 UI
+//  AppAgent — Liji 面板 UI
 //
 //  「分享给我的」列表：展示他人分享的补丁 + 开关。
 //

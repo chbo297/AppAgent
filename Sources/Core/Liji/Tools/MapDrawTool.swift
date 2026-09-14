@@ -1,6 +1,6 @@
 //
 //  MapDrawTool.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  把「图区绘制」暴露为 agent 工具：agent 可用任意坐标/样式/数据在地图上画任意内容。
 //  仅当宿主注入 MapDrawProvider 时注册。

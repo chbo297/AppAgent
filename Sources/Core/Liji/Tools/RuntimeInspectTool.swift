@@ -1,6 +1,6 @@
 //
 //  RuntimeInspectTool.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  把宿主 app 的运行时内省能力封装为一个多操作工具，供 app agent 灵活调用。
 //  仅当 RuntimeInspectProvider 注入且能力开启时才应注册本工具。

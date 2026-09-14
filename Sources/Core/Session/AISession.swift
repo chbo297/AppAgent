@@ -1,6 +1,6 @@
 //
 //  AISession.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

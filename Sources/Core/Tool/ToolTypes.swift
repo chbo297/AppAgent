@@ -1,6 +1,6 @@
 //
 //  ToolTypes.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

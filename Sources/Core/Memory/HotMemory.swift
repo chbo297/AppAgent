@@ -1,6 +1,6 @@
 //
 //  HotMemory.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

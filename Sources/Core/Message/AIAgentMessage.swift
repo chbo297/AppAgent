@@ -1,6 +1,6 @@
 //
 //  AIAgentMessage.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

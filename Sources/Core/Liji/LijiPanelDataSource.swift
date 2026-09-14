@@ -1,6 +1,6 @@
 //
 //  LijiPanelDataSource.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  「需求列表 / 分享给我的」面板的纯展示模型与构建逻辑（不依赖 UIKit，可在 swift test 覆盖）。
 //  真正的 UIKit 视图见 Sources/UI/Liji/。

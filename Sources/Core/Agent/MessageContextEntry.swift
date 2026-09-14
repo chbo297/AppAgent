@@ -1,6 +1,6 @@
 //
 //  MessageContextEntry.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

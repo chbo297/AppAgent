@@ -1,6 +1,6 @@
 //
 //  MapDrawProvider.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  「图区绘制」作为 agent 能力（tool）：让 app agent 用任意坐标/样式/数据在地图上绘制任意内容。
 //  不改地图 C++ 渲染引擎——由宿主实现一个覆盖物(overlay)层，agent 通过本 provider 增删改。

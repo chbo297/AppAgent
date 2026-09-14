@@ -1,14 +1,14 @@
-# Contributing to OpenAPP
+# Contributing to AppAgent
 
-Thank you for your interest in contributing to OpenAPP! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to AppAgent! This document provides guidelines and instructions for contributing.
 
 ## Getting Started
 
 1. Fork the repository
 2. Clone your fork:
    ```bash
-   git clone https://github.com/your-username/OpenAPP.git
-   cd OpenAPP
+   git clone https://github.com/your-username/AppAgent.git
+   cd AppAgent
    ```
 3. Open the Package in Xcode to explore the SDK:
    ```bash
@@ -33,7 +33,7 @@ Thank you for your interest in contributing to OpenAPP! This document provides g
    cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
    ```
 2. Edit `Examples/iOS/Resources/config.json` with your API key and settings
-3. Open `Package.swift` in Xcode, select the `OpenAPPDemoApp` scheme
+3. Open `Package.swift` in Xcode, select the `AppAgentDemoApp` scheme
 4. Build and run on a simulator or device
 
 ## Making Changes
@@ -70,4 +70,4 @@ See [docs/Tools.md](docs/Tools.md) for a guide on implementing the `Tool` protoc
 
 ## License
 
-By contributing to OpenAPP, you agree that your contributions will be licensed under the Apache License 2.0.
+By contributing to AppAgent, you agree that your contributions will be licensed under the Apache License 2.0.

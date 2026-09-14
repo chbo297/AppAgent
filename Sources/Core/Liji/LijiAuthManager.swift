@@ -1,6 +1,6 @@
 //
 //  LijiAuthManager.swift
-//  OpenAPP — Liji 集成层
+//  AppAgent — Liji 集成层
 //
 //  登录绑定与直连端点管理的纯逻辑助手（可 swift build 验证）。
 //

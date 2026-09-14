@@ -1,4 +1,4 @@
-# OpenAPP 优化计划
+# AppAgent 优化计划
 
 > 2026-06-13 基于完整代码走读产出（覆盖全部 Sources / Tests / docs / Package / Podspec，
 > 并已验证 swift build 与 swift test 通过，62 用例全绿）。
@@ -19,8 +19,8 @@
 
 ## 一、方向性优化
 
-1. **把差异化做厚**：通用 chat+tools agent loop 是红海，OpenAPP 的护城河是“agent 操作宿主 App”
-   （app_action / app_navigate / app_state 三个注入协议 + 可穿透 OpenAPPWindow 浮层）。
+1. **把差异化做厚**：通用 chat+tools agent loop 是红海，AppAgent 的护城河是“agent 操作宿主 App”
+   （app_action / app_navigate / app_state 三个注入协议 + 可穿透 AppAgentWindow 浮层）。
    主线 demo 应直接演示“一句话 → agent 跳页 / 执行业务动作”，而不是又一个聊天框。
 2. **Provider 路线收敛**：下一个 provider 做 OpenAI-compatible 一种，即可覆盖
    OpenAI / DeepSeek / Qwen / Ollama / vLLM 及绝大多数网关；不要逐个实现 APIProtocol 的 9 种协议。
@@ -28,15 +28,15 @@
 3. **多模态**：ModelSpec 声明了 image 输入，但 AIAgentMessage.Content 没有 image case。
    “截屏给 agent 看当前界面”与“操作 App”主线天然互补，优先级应提前。
 4. **授权 / 澄清 UX 产品化**：sensitive/dangerous 工具授权（delegate 回调）和 clarify 工具
-   目前都要宿主自己做 UI。把“确认弹层 + 澄清问答”内置进 OpenAPPUI 的 overlay。
-5. **定发布姿态**：README 的 anthropics org、from 1.0.0，podspec 的 github.com/user/OpenAPP
+   目前都要宿主自己做 UI。把“确认弹层 + 澄清问答”内置进 AppAgentUI 的 overlay。
+5. **定发布姿态**：README 的 anthropics org、from 1.0.0，podspec 的 github.com/user/AppAgent
    均为占位；版本实际 0.1.0。开源或内部交付二选一，并建立小步提交习惯。
 
 ## 二、结构性优化
 
-1. **Package 拆分**：README/podspec 宣称 OpenAPPCore / OpenAPPUI 两模块，实际只有单 target OpenAPP。
+1. **Package 拆分**：README/podspec 宣称 AppAgentCore / AppAgentUI 两模块，实际只有单 target AppAgent。
    应拆为 Core（仅 Foundation）+ UI（依赖 Core）两个 target/product。
-2. **Podspec 修复**：source_files 路径 Sources/OpenAPP/**/*.swift 不存在（实际 Sources/Core、Sources/UI），
+2. **Podspec 修复**：source_files 路径 Sources/AppAgent/**/*.swift 不存在（实际 Sources/Core、Sources/UI），
    按现状打包为空；宣称的 subspec 未定义；frameworks 无条件含 UIKit 与“Core 零 UI 依赖”矛盾。
 3. **文档一体化**：README + 全部 5 篇 docs 引用已不存在的 API（LLMProvider / ProviderConfiguration /
    ChatViewController / .textDelta 事件）；CLAUDE.md UI 章节（3 文件）落后于实际（8 文件 overlay）。
@@ -72,7 +72,7 @@
 
 - 2026-06-13 输入框拖拽收展手势重构：松手吸附改为「甩动阈值 + 惯性投影 + 中线吸附」三层判定，
   弹簧动画继承手指速度；“手势位移 → 尺寸”换算抽离为
-  OpenAPPViewController.applyPanTranslationToInputBar(translationX:)（逐行注释）。
-- 2026-06-14 发布口径修正：以当前 Package.swift 的单 product/target `OpenAPP` 和实际目录
+  AppAgentViewController.applyPanTranslationToInputBar(translationX:)（逐行注释）。
+- 2026-06-14 发布口径修正：以当前 Package.swift 的单 product/target `AppAgent` 和实际目录
   `Sources/Core`、`Sources/UI` 为准，重写 README 与 docs 下 GettingStarted / Architecture /
   Providers / Tools / UICustomization，修正 Podspec 的 `source_files`、平台、Swift 版本和 framework 声明。

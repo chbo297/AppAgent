@@ -1,6 +1,6 @@
 //
 //  AIAgentProfile.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
@@ -70,7 +70,7 @@ public struct AIAgentProfile: Sendable {
     /// Names of built-in tools to disable (e.g., ["clipboard", "haptic"]).
     public var disabledBuiltInTools: Set<String>
 
-    /// Root directory for file tools (sandbox). Default: Documents/OpenAPP/files/.
+    /// Root directory for file tools (sandbox). Default: Documents/AppAgent/files/.
     public var sandboxRoot: URL?
 
     // MARK: - Built-in Tool Prompt Defaults
