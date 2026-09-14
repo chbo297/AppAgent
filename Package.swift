@@ -16,7 +16,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/chbo297/BODragScroll.git",
-            from: "1.0.1"
+            from: "2.0.0"
         )
     ],
     targets: [
