@@ -1,6 +1,6 @@
 //
 //  AIAgentError.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

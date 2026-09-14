@@ -1,6 +1,6 @@
 # Tools
 
-OpenAPP tools conform to `ToolProtocol`. Tools are registered in `ToolCentral` and copied into each `AISession` when the session is created.
+AppAgent tools conform to `ToolProtocol`. Tools are registered in `ToolCentral` and copied into each `AISession` when the session is created.
 
 ## ToolProtocol
 
@@ -141,7 +141,7 @@ func aiAgent(
 
 ```swift
 import Foundation
-import OpenAPP
+import AppAgent
 
 public struct WeatherLookupTool: ToolProtocol {
     public let name = "weather_lookup"

@@ -1,4 +1,4 @@
-# OpenAPP
+# AppAgent
 
 [![Swift 5.10](https://img.shields.io/badge/Swift-5.10-orange.svg)](https://swift.org)
 [![Platforms](https://img.shields.io/badge/Platforms-iOS%2013%20%7C%20macOS%2012%20%7C%20Mac%20Catalyst%2013.1-blue.svg)](https://developer.apple.com)
@@ -6,30 +6,30 @@
 [![CocoaPods Compatible](https://img.shields.io/badge/CocoaPods-Compatible-brightgreen.svg)](https://cocoapods.org)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-OpenAPP is an iOS/macOS AI agent SDK for embedding conversational agents into an app. It includes a provider abstraction, Anthropic streaming provider, tool loop, memory, skills, session persistence, built-in tools, and an optional UIKit overlay UI. The Core implementation has no third-party dependencies; the UIKit ChatPanel uses `BODragScroll` for panel and nested-list interaction.
+AppAgent is an iOS/macOS AI agent SDK for embedding conversational agents into an app. It includes a provider abstraction, Anthropic streaming provider, tool loop, memory, skills, session persistence, built-in tools, and an optional UIKit overlay UI. The Core implementation has no third-party dependencies; the UIKit ChatPanel uses `BODragScroll` for panel and nested-list interaction.
 
 ## Package Shape
 
 The current Swift package exposes one library product:
 
 ```swift
-.product(name: "OpenAPP", package: "OpenAPP")
+.product(name: "AppAgent", package: "AppAgent")
 ```
 
 All public types are imported from the single Swift module:
 
 ```swift
-import OpenAPP
+import AppAgent
 ```
 
-The repository keeps implementation files under `Sources/Core` and `Sources/UI` for organization, but these are directories inside the same `OpenAPP` target. There are not separate `OpenAPPCore` or `OpenAPPUI` products in the current package.
+The repository keeps implementation files under `Sources/Core` and `Sources/UI` for organization, but these are directories inside the same `AppAgent` target. There are not separate `AppAgentCore` or `AppAgentUI` products in the current package.
 
 ## Requirements
 
 | Integration | Minimum OS | Notes |
 |---|---:|---|
-| Swift Package Manager | iOS 13, macOS 12, Mac Catalyst 13.1 | Single `OpenAPP` product |
-| CocoaPods | iOS 13, macOS 12, Mac Catalyst 13.1 | Single `OpenAPP` pod |
+| Swift Package Manager | iOS 13, macOS 12, Mac Catalyst 13.1 | Single `AppAgent` product |
+| CocoaPods | iOS 13, macOS 12, Mac Catalyst 13.1 | Single `AppAgent` pod |
 | UIKit overlay UI | iOS 13, Mac Catalyst 13.1 | Shared UIKit implementation on mobile and desktop |
 
 - Swift tools version: 5.10
@@ -44,19 +44,19 @@ Add the package to your app and depend on the single product:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/chbo297/OpenAPP.git", from: "0.1.0")
+    .package(url: "https://github.com/chbo297/AppAgent.git", from: "0.1.0")
 ],
 targets: [
     .target(
         name: "YourApp",
         dependencies: [
-            .product(name: "OpenAPP", package: "OpenAPP")
+            .product(name: "AppAgent", package: "AppAgent")
         ]
     )
 ]
 ```
 
-In Xcode, use **File > Add Package Dependencies...** and select the `OpenAPP` product.
+In Xcode, use **File > Add Package Dependencies...** and select the `AppAgent` product.
 
 ### Local BODragScroll Development
 
@@ -74,10 +74,10 @@ Scripts/Dependencies/use-released-bodragscroll.sh
 
 ### CocoaPods
 
-Add OpenAPP to your `Podfile`:
+Add AppAgent to your `Podfile`:
 
 ```ruby
-pod 'OpenAPP', '~> 0.1'
+pod 'AppAgent', '~> 0.1'
 ```
 
 Then run:
@@ -89,7 +89,7 @@ pod install
 ## Quick Start
 
 ```swift
-import OpenAPP
+import AppAgent
 
 let providerCentral = ModelProviderCentral()
 await providerCentral.register(
@@ -129,17 +129,17 @@ for await event in stream {
 }
 ```
 
-Native macOS apps can use the complete Core API. The overlay UI is UIKit-based and is available on Mac through Mac Catalyst; OpenAPP does not currently ship a separate AppKit overlay.
+Native macOS apps can use the complete Core API. The overlay UI is UIKit-based and is available on Mac through Mac Catalyst; AppAgent does not currently ship a separate AppKit overlay.
 
 ## UIKit Overlay
 
-On iOS and Mac Catalyst, OpenAPP can run as a passthrough overlay window above the host app:
+On iOS and Mac Catalyst, AppAgent can run as a passthrough overlay window above the host app:
 
 ```swift
 import UIKit
-import OpenAPP
+import AppAgent
 
-let overlay = await OpenAPPOverlay.start(
+let overlay = await AppAgentOverlay.start(
     in: windowScene,
     agent: agent,
     sessionTitle: "Chat"
@@ -148,7 +148,7 @@ let overlay = await OpenAPPOverlay.start(
 overlay.show()
 ```
 
-For direct embedding, create an `OpenAPPViewController`, assign an agent, and switch it to an existing session id.
+For direct embedding, create an `AppAgentViewController`, assign an agent, and switch it to an existing session id.
 
 ## Documentation
 
@@ -162,7 +162,7 @@ For direct embedding, create an `OpenAPPViewController`, assign an agent, and sw
 
 ## Example App
 
-The shared UIKit demo lives in `Examples/iOS/OpenAPPDemo.xcodeproj` and runs on iOS as well as Mac Catalyst.
+The shared UIKit demo lives in `Examples/iOS/AppAgentDemo.xcodeproj` and runs on iOS as well as Mac Catalyst.
 
 ```bash
 cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
@@ -174,8 +174,8 @@ To verify the Mac build from the command line:
 
 ```bash
 xcodebuild \
-  -project Examples/iOS/OpenAPPDemo.xcodeproj \
-  -scheme OpenAPPDemo \
+  -project Examples/iOS/AppAgentDemo.xcodeproj \
+  -scheme AppAgentDemo \
   -configuration Debug \
   -destination 'generic/platform=macOS,variant=Mac Catalyst' \
   CODE_SIGNING_ALLOWED=NO \
@@ -184,4 +184,4 @@ xcodebuild \
 
 ## License
 
-OpenAPP is released under the Apache 2.0 License. See [LICENSE](LICENSE) for details.
+AppAgent is released under the Apache 2.0 License. See [LICENSE](LICENSE) for details.

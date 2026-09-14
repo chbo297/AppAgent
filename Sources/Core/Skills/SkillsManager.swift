@@ -1,6 +1,6 @@
 //
 //  SkillsManager.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
@@ -9,7 +9,7 @@ import Foundation
 ///
 /// Skills are stored as directories containing a SKILL.md file, either:
 /// - Bundled in the app's Bundle (read-only, built-in)
-/// - In App Documents/OpenAPP/skills/ (user-created/managed)
+/// - In App Documents/AppAgent/skills/ (user-created/managed)
 ///
 /// The SKILL.md file uses YAML frontmatter for metadata:
 /// ```
@@ -34,7 +34,7 @@ public actor SkillsManager {
             self.userSkillsURL = userURL
         } else {
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            self.userSkillsURL = docs.appendingPathComponent("OpenAPP/skills")
+            self.userSkillsURL = docs.appendingPathComponent("AppAgent/skills")
         }
     }
 

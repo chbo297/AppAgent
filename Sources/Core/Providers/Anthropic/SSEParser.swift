@@ -1,6 +1,6 @@
 //
 //  SSEParser.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

@@ -1,6 +1,6 @@
 //
 //  FileMemoryStorage.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
@@ -12,14 +12,14 @@ public actor FileMemoryStorage: MemoryStorage {
     private let fileURL: URL
 
     /// - Parameter directory: Directory for the memory.json file.
-    ///   Defaults to Documents/OpenAPP/memory/.
+    ///   Defaults to Documents/AppAgent/memory/.
     public init(directory: URL? = nil) {
         let dir: URL
         if let directory {
             dir = directory
         } else {
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            dir = docs.appendingPathComponent("OpenAPP/memory", isDirectory: true)
+            dir = docs.appendingPathComponent("AppAgent/memory", isDirectory: true)
         }
         self.fileURL = dir.appendingPathComponent("memory.json")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

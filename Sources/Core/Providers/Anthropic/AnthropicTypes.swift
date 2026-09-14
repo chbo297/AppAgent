@@ -1,6 +1,6 @@
 //
 //  AnthropicTypes.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

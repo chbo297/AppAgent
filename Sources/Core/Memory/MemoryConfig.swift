@@ -1,6 +1,6 @@
 //
 //  MemoryConfig.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
@@ -20,7 +20,7 @@ public struct MemoryConfig: Sendable {
     public var maxEntryLength: Int
 
     /// Directory for long-term memory persistence.
-    /// nil = default Documents/OpenAPP/memory/.
+    /// nil = default Documents/AppAgent/memory/.
     public var storageDirectory: URL?
 
     public init(

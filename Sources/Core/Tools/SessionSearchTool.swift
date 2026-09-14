@@ -1,6 +1,6 @@
 //
 //  SessionSearchTool.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

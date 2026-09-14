@@ -1,16 +1,16 @@
 # UI Customization
 
-OpenAPP currently exposes UIKit UI types from the single `OpenAPP` module on iOS and Mac Catalyst. The UI source lives under `Sources/UI`, but there is no separate `OpenAPPUI` product. Native AppKit targets can use OpenAPP Core but do not compile these UIKit overlay types.
+AppAgent currently exposes UIKit UI types from the single `AppAgent` module on iOS and Mac Catalyst. The UI source lives under `Sources/UI`, but there is no separate `AppAgentUI` product. Native AppKit targets can use AppAgent Core but do not compile these UIKit overlay types.
 
 ## Overlay Window
 
-The recommended iOS and Mac Catalyst entry point is `OpenAPPOverlay`. It creates a passthrough `OpenAPPWindow` above the host app and hosts an `OpenAPPViewController`.
+The recommended iOS and Mac Catalyst entry point is `AppAgentOverlay`. It creates a passthrough `AppAgentWindow` above the host app and hosts an `AppAgentViewController`.
 
 ```swift
 import UIKit
-import OpenAPP
+import AppAgent
 
-let overlay = await OpenAPPOverlay.start(
+let overlay = await AppAgentOverlay.start(
     in: windowScene,
     agent: agent,
     sessionTitle: "Chat"
@@ -26,19 +26,19 @@ Taps on empty overlay areas pass through to the app below. The overlay only hand
 If you already have a session:
 
 ```swift
-let overlay = OpenAPPOverlay.attach(in: windowScene)
+let overlay = AppAgentOverlay.attach(in: windowScene)
 overlay.bind(agent: agent, sessionId: session.id)
 overlay.show()
 ```
 
 ## Direct View Controller Embedding
 
-You can embed `OpenAPPViewController` inside your own navigation stack:
+You can embed `AppAgentViewController` inside your own navigation stack:
 
 ```swift
 let session = await agent.createSession(title: "Support")
 
-let viewController = OpenAPPViewController()
+let viewController = AppAgentViewController()
 viewController.agent = agent
 viewController.switchSession(to: session.id)
 
@@ -110,25 +110,25 @@ session.uiState.onChange = { key in
 
 ## SwiftUI Wrapper
 
-Wrap `OpenAPPViewController` with `UIViewControllerRepresentable`:
+Wrap `AppAgentViewController` with `UIViewControllerRepresentable`:
 
 ```swift
 import SwiftUI
-import OpenAPP
+import AppAgent
 
-struct OpenAPPChatView: UIViewControllerRepresentable {
+struct AppAgentChatView: UIViewControllerRepresentable {
     let agent: AIAgent
     let session: AISession
 
-    func makeUIViewController(context: Context) -> OpenAPPViewController {
-        let viewController = OpenAPPViewController()
+    func makeUIViewController(context: Context) -> AppAgentViewController {
+        let viewController = AppAgentViewController()
         viewController.agent = agent
         viewController.switchSession(to: session.id)
         return viewController
     }
 
     func updateUIViewController(
-        _ uiViewController: OpenAPPViewController,
+        _ uiViewController: AppAgentViewController,
         context: Context
     ) {}
 }
@@ -138,10 +138,10 @@ struct OpenAPPChatView: UIViewControllerRepresentable {
 
 The UIKit layer is intentionally small:
 
-- `OpenAPPViewController`: table view plus input bar binding
-- `OpenAPPInputBar`: text field, send button, collapsed menu behavior
-- `OpenAPPTextField`: custom text field used by the input bar
-- `OpenAPPMenuButton`: compact menu button
+- `AppAgentViewController`: table view plus input bar binding
+- `AppAgentInputBar`: text field, send button, collapsed menu behavior
+- `AppAgentTextField`: custom text field used by the input bar
+- `AppAgentMenuButton`: compact menu button
 - `ChatMessage`: UI-facing message model
 - `ChatMessageCell`: table cell for user, assistant, streaming, error, and tool-info display
 

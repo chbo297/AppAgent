@@ -1,6 +1,6 @@
 //
 //  ChatMessage.swift
-//  OpenAPPUI
+//  AppAgentUI
 //
 
 #if canImport(UIKit)

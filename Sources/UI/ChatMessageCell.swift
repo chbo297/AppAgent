@@ -1,6 +1,6 @@
 //
 //  ChatMessageCell.swift
-//  OpenAPPUI
+//  AppAgentUI
 //
 
 #if canImport(UIKit)
@@ -67,17 +67,17 @@ public final class ChatMessageCell: UITableViewCell {
         switch message.role {
         case .user:
             trailingConstraint.isActive = true
-            bubbleView.backgroundColor = OpenAPPAppearance.userBubbleBackground
+            bubbleView.backgroundColor = AppAgentAppearance.userBubbleBackground
             messageLabel.textColor = .white
         case .assistant:
             leadingConstraint.isActive = true
-            bubbleView.backgroundColor = OpenAPPAppearance.assistantBubbleBackground
-            messageLabel.textColor = OpenAPPAppearance.primaryText
+            bubbleView.backgroundColor = AppAgentAppearance.assistantBubbleBackground
+            messageLabel.textColor = AppAgentAppearance.primaryText
         }
 
         if message.status == .error {
-            bubbleView.backgroundColor = OpenAPPAppearance.errorBackground
-            messageLabel.textColor = OpenAPPAppearance.errorText
+            bubbleView.backgroundColor = AppAgentAppearance.errorBackground
+            messageLabel.textColor = AppAgentAppearance.errorText
         }
     }
 }

@@ -1,6 +1,6 @@
 //
 //  AnthropicProvider.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
@@ -149,7 +149,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         let delegate = SSEStreamDelegate(apiProtocol: apiProtocol, continuation: continuation)
         let delegateQueue = OperationQueue()
         delegateQueue.maxConcurrentOperationCount = 1
-        delegateQueue.name = "openapp.sse-delegate"
+        delegateQueue.name = "appagent.sse-delegate"
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: delegateQueue)
         let task = session.dataTask(with: request)
         delegate.task = task

@@ -1,6 +1,6 @@
 //
 //  AppDelegate.swift
-//  OpenAPPDemo
+//  AppAgentDemo
 //
 
 import UIKit

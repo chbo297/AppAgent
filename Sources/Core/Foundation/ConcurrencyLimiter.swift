@@ -1,6 +1,6 @@
 //
 //  ConcurrencyLimiter.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

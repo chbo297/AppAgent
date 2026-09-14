@@ -1,6 +1,6 @@
 //
 //  SandboxPathResolver.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
@@ -17,7 +17,7 @@ public struct SandboxPathResolver: Sendable {
             self.sandboxRoot = root
         } else {
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            self.sandboxRoot = docs.appendingPathComponent("OpenAPP/files")
+            self.sandboxRoot = docs.appendingPathComponent("AppAgent/files")
         }
     }
 

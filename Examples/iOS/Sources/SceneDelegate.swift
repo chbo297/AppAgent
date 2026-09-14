@@ -1,6 +1,6 @@
 //
 //  SceneDelegate.swift
-//  OpenAPPDemo
+//  AppAgentDemo
 //
 
 import UIKit
@@ -8,7 +8,7 @@ import UIKit
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     var hostWindow: UIWindow?
-    var openAPPOverlay: OpenAPPOverlay?
+    var openAPPOverlay: AppAgentOverlay?
     var agent: AIAgent?
 
     func scene(
@@ -63,7 +63,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             )
             self.agent = agent
 
-            self.openAPPOverlay = await OpenAPPOverlay.start(
+            self.openAPPOverlay = await AppAgentOverlay.start(
                 in: windowScene,
                 agent: agent
             )

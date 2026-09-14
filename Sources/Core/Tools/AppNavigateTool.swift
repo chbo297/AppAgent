@@ -1,6 +1,6 @@
 //
 //  AppNavigateTool.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

@@ -1,6 +1,6 @@
 //
 //  JSONValue.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

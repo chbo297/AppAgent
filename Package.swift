@@ -2,15 +2,15 @@
 import PackageDescription
 
 let package = Package(
-    name: "OpenAPP",
+    name: "AppAgent",
     platforms: [
         .iOS(.v13),
         .macOS(.v12)
     ],
     products: [
         .library(
-            name: "OpenAPP",
-            targets: ["OpenAPP"]
+            name: "AppAgent",
+            targets: ["AppAgent"]
         ),
     ],
     dependencies: [
@@ -21,7 +21,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "OpenAPP",
+            name: "AppAgent",
             dependencies: [
                 .product(
                     name: "BODragScroll",
@@ -32,8 +32,8 @@ let package = Package(
             path: "Sources"
         ),
         .testTarget(
-            name: "OpenAPPTests",
-            dependencies: ["OpenAPP"],
+            name: "AppAgentTests",
+            dependencies: ["AppAgent"],
             path: "Tests"
         ),
     ]

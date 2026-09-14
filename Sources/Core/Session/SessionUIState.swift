@@ -1,6 +1,6 @@
 //
 //  SessionUIState.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

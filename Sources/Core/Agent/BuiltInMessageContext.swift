@@ -1,6 +1,6 @@
 //
 //  BuiltInMessageContext.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

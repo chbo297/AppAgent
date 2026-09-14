@@ -1,6 +1,6 @@
 //
 //  HostTabBarController.swift
-//  OpenAPPDemo
+//  AppAgentDemo
 //
 
 import UIKit
@@ -31,7 +31,7 @@ private enum DemoPalette {
 }
 
 /// A minimal tab bar host that simulates a real app's window hierarchy.
-/// The OpenAPP SDK's chat UI lives in its own independent overlay window
+/// The AppAgent SDK's chat UI lives in its own independent overlay window
 /// floating above this controller.
 final class HostTabBarController: UITabBarController {
 

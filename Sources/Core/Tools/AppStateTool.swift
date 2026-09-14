@@ -1,6 +1,6 @@
 //
 //  AppStateTool.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

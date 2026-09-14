@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide follows the current package shape: one SwiftPM product, one Swift module, imported as `OpenAPP`.
+This guide follows the current package shape: one SwiftPM product, one Swift module, imported as `AppAgent`.
 
 ## Prerequisites
 
@@ -13,17 +13,17 @@ This guide follows the current package shape: one SwiftPM product, one Swift mod
 
 ### Swift Package Manager
 
-Add the package and depend on the `OpenAPP` product:
+Add the package and depend on the `AppAgent` product:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/chbo297/OpenAPP.git", from: "0.1.0")
+    .package(url: "https://github.com/chbo297/AppAgent.git", from: "0.1.0")
 ],
 targets: [
     .target(
         name: "YourApp",
         dependencies: [
-            .product(name: "OpenAPP", package: "OpenAPP")
+            .product(name: "AppAgent", package: "AppAgent")
         ]
     )
 ]
@@ -32,13 +32,13 @@ targets: [
 Then import:
 
 ```swift
-import OpenAPP
+import AppAgent
 ```
 
 ### CocoaPods
 
 ```ruby
-pod 'OpenAPP', '~> 0.1'
+pod 'AppAgent', '~> 0.1'
 ```
 
 CocoaPods supports the native macOS Core and the UIKit implementation on iOS/Mac Catalyst. Swift Package Manager remains the recommended integration path for new projects.
@@ -48,7 +48,7 @@ CocoaPods supports the native macOS Core and the UIKit implementation on iOS/Mac
 `ModelProviderCentral` stores providers by name. Model references use the `"providerName/modelId"` format.
 
 ```swift
-import OpenAPP
+import AppAgent
 
 let providerCentral = ModelProviderCentral()
 
@@ -145,7 +145,7 @@ session.cancel()
 
 ## Running the iOS and Mac Demo
 
-The shared UIKit demo is an Xcode project at `Examples/iOS/OpenAPPDemo.xcodeproj`.
+The shared UIKit demo is an Xcode project at `Examples/iOS/AppAgentDemo.xcodeproj`.
 
 ```bash
 cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
@@ -153,7 +153,7 @@ cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
 
 Fill in `Examples/iOS/Resources/config.json`, open the Xcode project, then choose an iOS Simulator/device or **My Mac (Mac Catalyst)** and run.
 
-OpenAPP Core also compiles for native macOS 12+. The complete overlay UI uses UIKit, so desktop apps that need the built-in OpenAPP interface should use Mac Catalyst rather than an AppKit target.
+AppAgent Core also compiles for native macOS 12+. The complete overlay UI uses UIKit, so desktop apps that need the built-in AppAgent interface should use Mac Catalyst rather than an AppKit target.
 
 ## Next Steps
 

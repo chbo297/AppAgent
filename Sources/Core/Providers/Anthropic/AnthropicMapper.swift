@@ -1,6 +1,6 @@
 //
 //  AnthropicMapper.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

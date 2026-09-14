@@ -1,6 +1,6 @@
 //
 //  AIAgentMask.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

@@ -1,6 +1,6 @@
 //
 //  ClipboardTool.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

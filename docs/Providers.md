@@ -1,6 +1,6 @@
 # Providers
 
-Providers connect OpenAPP to model backends. The current provider protocol is `ModelProvider`.
+Providers connect AppAgent to model backends. The current provider protocol is `ModelProvider`.
 
 ## ModelProvider
 
@@ -96,7 +96,7 @@ For Anthropic, `.cacheControl` attaches ephemeral cache control to the previous 
 
 ```swift
 import Foundation
-import OpenAPP
+import AppAgent
 
 public final class OpenAICompatibleProvider: ModelProvider, @unchecked Sendable {
     public let name = "openai-compatible"

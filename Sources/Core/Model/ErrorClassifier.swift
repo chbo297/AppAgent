@@ -1,6 +1,6 @@
 //
 //  ErrorClassifier.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation

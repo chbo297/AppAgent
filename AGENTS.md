@@ -1,4 +1,4 @@
-# OpenAPP SDK
+# AppAgent SDK
 
 iOS/macOS AIAgent SDK，为应用提供嵌入式 AI AIAgent 能力。Core 零第三方依赖；完整 UIKit UI 支持 iOS 13+ / Mac Catalyst 13.1+，原生 macOS 12+ 提供 Core；iOS/Catalyst ChatPanel 使用 BODragScroll。
 
@@ -7,11 +7,11 @@ iOS/macOS AIAgent SDK，为应用提供嵌入式 AI AIAgent 能力。Core 零第
 ```bash
 swift build
 swift test        # 原生 macOS Core：68 tests
-xcodebuild -project Examples/iOS/OpenAPPDemo.xcodeproj -scheme OpenAPPDemo -configuration Debug -destination 'generic/platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO build
-xcodebuild -scheme OpenAPP -configuration Debug -destination 'platform=macOS,variant=Mac Catalyst,name=My Mac' test  # Core + UIKit：102 tests
+xcodebuild -project Examples/iOS/AppAgentDemo.xcodeproj -scheme AppAgentDemo -configuration Debug -destination 'generic/platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO build
+xcodebuild -scheme AppAgent -configuration Debug -destination 'platform=macOS,variant=Mac Catalyst,name=My Mac' test  # Core + UIKit：102 tests
 ```
 
-Demo App 在 `Examples/iOS/OpenAPPDemo.xcodeproj`，支持 iOS 和 Mac Catalyst；需要先复制 `Resources/config.json.example` 为 `Resources/config.json` 并填入配置。
+Demo App 在 `Examples/iOS/AppAgentDemo.xcodeproj`，支持 iOS 和 Mac Catalyst；需要先复制 `Resources/config.json.example` 为 `Resources/config.json` 并填入配置。
 
 ## 架构概览
 
@@ -119,10 +119,10 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 
 ## BODragScroll 联合开发与发布
 
-- OpenAPP 仓库位于当前目录；BODragScroll 是同级、独立的 Git 仓库 `../BODragScroll`。涉及面板拖拽或嵌套滚动时，可以直接修改该源码仓并与 OpenAPP 联调。
+- AppAgent 仓库位于当前目录；BODragScroll 是同级、独立的 Git 仓库 `../BODragScroll`。涉及面板拖拽或嵌套滚动时，可以直接修改该源码仓并与 AppAgent 联调。
 - Demo 工程直接引用 `../BODragScroll`；根 Swift Package 本地联调时运行 `Scripts/Dependencies/use-local-bodragscroll.sh` 进入 editable checkout，结束后可运行 `Scripts/Dependencies/use-released-bodragscroll.sh` 恢复正式依赖。
-- 两个仓库的改动、测试、提交和版本发布必须分别管理；不要把 BODragScroll 源码混入 OpenAPP 提交。若 OpenAPP 依赖尚未发布的 BODragScroll API，先提交并发布/打标 BODragScroll，再更新 OpenAPP 的 SwiftPM/CocoaPods 版本声明并发布 OpenAPP。
-- OpenAPP 正式发布必须通过 SwiftPM/CocoaPods 引入 BODragScroll，不能依赖本机兄弟目录；禁止提交 `Packages/` 中的本地符号链接或其他机器相关路径。
+- 两个仓库的改动、测试、提交和版本发布必须分别管理；不要把 BODragScroll 源码混入 AppAgent 提交。若 AppAgent 依赖尚未发布的 BODragScroll API，先提交并发布/打标 BODragScroll，再更新 AppAgent 的 SwiftPM/CocoaPods 版本声明并发布 AppAgent。
+- AppAgent 正式发布必须通过 SwiftPM/CocoaPods 引入 BODragScroll，不能依赖本机兄弟目录；禁止提交 `Packages/` 中的本地符号链接或其他机器相关路径。
 
 ## 文件导航快速索引
 
@@ -138,7 +138,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | **改 provider/模型** | `Core/Model/ModelProvider.swift` 协议 + `Core/Providers/Anthropic/` 参考实现 + `Core/Model/ModelProviderCentral.swift` |
 | **改 UI** | `UI/ChatViewController.swift` + `Core/Session/SessionUIState.swift` |
 | **改 memory 系统** | `Core/Memory/MemoryStore.swift` 协调 + `Core/Memory/MemoryStorage.swift` 协议 + `Core/Tools/MemoryTool.swift` LLM 接口 |
-| **加测试** | `Tests/Core/OpenAPPCoreTests.swift`（用 InMemorySessionStorage / InMemoryMemoryStorage 隔离） |
+| **加测试** | `Tests/Core/AppAgentCoreTests.swift`（用 InMemorySessionStorage / InMemoryMemoryStorage 隔离） |
 
 ## 完整文件清单
 
@@ -280,5 +280,5 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 
 | 文件 | 职责 |
 |------|------|
-| `Tests/Core/OpenAPPCoreTests.swift` | 62 测试用例，覆盖 JSON、消息、Provider、SSE、存储、Agent、Memory、UIState、Prompt |
-| `Tests/UI/OpenAPPUITests.swift` | ChatMessage 创建 + 流式状态测试 |
+| `Tests/Core/AppAgentCoreTests.swift` | 62 测试用例，覆盖 JSON、消息、Provider、SSE、存储、Agent、Memory、UIState、Prompt |
+| `Tests/UI/AppAgentUITests.swift` | ChatMessage 创建 + 流式状态测试 |

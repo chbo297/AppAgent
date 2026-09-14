@@ -1,4 +1,4 @@
-# OpenAPP SDK
+# AppAgent SDK
 
 iOS/macOS AIAgent SDK，为移动应用提供嵌入式 AI AIAgent 能力。Core 零第三方依赖；iOS/Catalyst ChatPanel 使用 BODragScroll，iOS 13+ / macOS 12+。
 
@@ -6,10 +6,10 @@ iOS/macOS AIAgent SDK，为移动应用提供嵌入式 AI AIAgent 能力。Core 
 
 ```bash
 swift build
-swift test        # 68 macOS core tests；UIKit 可用时还会包含 OpenAPPUITests + OpenAPPVoiceInputCoordinatorTests
+swift test        # 68 macOS core tests；UIKit 可用时还会包含 AppAgentUITests + AppAgentVoiceInputCoordinatorTests
 ```
 
-Demo App 在 `Examples/iOS/OpenAPPDemo.xcodeproj`，需要先 `cp Examples/iOS/Resources/config.json.example Examples/iOS/config.json` 并填入配置。
+Demo App 在 `Examples/iOS/AppAgentDemo.xcodeproj`，需要先 `cp Examples/iOS/Resources/config.json.example Examples/iOS/config.json` 并填入配置。
 
 ## 架构概览
 
@@ -104,9 +104,9 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 - `ConcurrencyLimiter`: actor FIFO 并发控制 (默认 limit=5)
 
 ### UI
-- `OpenAPPOverlay` / `OpenAPPWindow`: 独立 overlay window，空白区域触摸穿透宿主 App
-- `OpenAPPViewController`: 聊天界面，通过 `session.uiState.onChange` 响应式更新
-- `OpenAPPInputBar` / `OpenAPPTextField` / `OpenAPPMenuButton`: 输入栏与折叠菜单控件
+- `AppAgentOverlay` / `AppAgentWindow`: 独立 overlay window，空白区域触摸穿透宿主 App
+- `AppAgentViewController`: 聊天界面，通过 `session.uiState.onChange` 响应式更新
+- `AppAgentInputBar` / `AppAgentTextField` / `AppAgentMenuButton`: 输入栏与折叠菜单控件
 - `ChatMessage` / `ChatMessageCell`: 气泡样式消息
 
 ## 代码规范
@@ -128,9 +128,9 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | **改 prompt 组装** | `Core/Agent/AIAgent.swift` assembleFullSystemPrompt() → `Core/Agent/PromptBuilder.swift` → `Core/Memory/MemoryStore.swift` assembleMemoryPrompts() |
 | **改执行循环** | `Core/Session/LLMExecutor.swift` runLoop() + `Core/Agent/ToolLoopDetector.swift` + `Core/Agent/ContextCompressor.swift` |
 | **改 provider/模型** | `Core/Model/ModelProvider.swift` 协议 + `Core/Providers/Anthropic/` 参考实现 + `Core/Model/ModelProviderCentral.swift` |
-| **改 UI** | `UI/OpenAPPViewController.swift` + `UI/OpenAPPOverlay.swift` + `Core/Session/SessionUIState.swift` |
+| **改 UI** | `UI/AppAgentViewController.swift` + `UI/AppAgentOverlay.swift` + `Core/Session/SessionUIState.swift` |
 | **改 memory 系统** | `Core/Memory/MemoryStore.swift` 协调 + `Core/Memory/MemoryStorage.swift` 协议 + `Core/Tools/MemoryTool.swift` LLM 接口 |
-| **加测试** | `Tests/Core/OpenAPPCoreTests.swift`（用 InMemorySessionStorage / InMemoryMemoryStorage 隔离） |
+| **加测试** | `Tests/Core/AppAgentCoreTests.swift`（用 InMemorySessionStorage / InMemoryMemoryStorage 隔离） |
 
 ## 完整文件清单
 
@@ -262,20 +262,20 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 
 ### UI/ — UIKit 聊天界面
 
-分层约定：录音识别（Manager）→ 语音交互状态机（Coordinator）→ 视图（InputBar/Overlay）→ OpenAPPViewController 只做接线。
+分层约定：录音识别（Manager）→ 语音交互状态机（Coordinator）→ 视图（InputBar/Overlay）→ AppAgentViewController 只做接线。
 
 | 文件 | 职责 |
 |------|------|
-| `OpenAPPOverlay.swift` | overlay 入口：创建 OpenAPPWindow + OpenAPPViewController，绑定 Agent/Session |
-| `OpenAPPWindow.swift` | 触摸穿透 UIWindow，空白区域不拦截宿主 App |
-| `OpenAPPInputBar.swift` | 输入栏视图：布局、输入源切换、手势识别；对外只发值事件（含 `OpenAPPInputBarVoiceGestureEvent`），不决定自身 frame |
-| `OpenAPPInputBarFramePolicy.swift` | inputBar frame 纯函数策略（可用区域/展开收起/拖拽约束/松手吸附）+ `OpenAPPInputBarLayoutStoring` 持久化抽象 |
-| `OpenAPPTextField.swift` | 输入框控件 |
-| `OpenAPPMenuButton.swift` | 折叠菜单按钮 |
-| `OpenAPPGeometry.swift` | 共享几何工具：clamp、CGPoint/CGSize/CGRect/UIEdgeInsets 近似相等 |
-| `OpenAPPKeyboardObserver.swift` | 键盘高度观察助手（keyboardWillChangeFrame 解析统一在此） |
-| `OpenAPPVoiceRecognitionManager.swift` | 录音识别服务（AVAudioEngine + SFSpeechRecognizer，audioQueue 隔离，AsyncStream 事件流）；`preferredLocales` 语言优先级默认中文优先；`OpenAPPVoiceRecognitionProviding` 协议缝 |
-| `VoiceInput/OpenAPPVoiceInputCoordinator.swift` | 语音输入状态机：一次语音输入（按下→移动→松手→编辑收尾）的唯一状态主人；依赖识别协议 + releaseActionResolver + 触觉反馈抽象，输出语义 delegate 回调 |
+| `AppAgentOverlay.swift` | overlay 入口：创建 AppAgentWindow + AppAgentViewController，绑定 Agent/Session |
+| `AppAgentWindow.swift` | 触摸穿透 UIWindow，空白区域不拦截宿主 App |
+| `AppAgentInputBar.swift` | 输入栏视图：布局、输入源切换、手势识别；对外只发值事件（含 `AppAgentInputBarVoiceGestureEvent`），不决定自身 frame |
+| `AppAgentInputBarFramePolicy.swift` | inputBar frame 纯函数策略（可用区域/展开收起/拖拽约束/松手吸附）+ `AppAgentInputBarLayoutStoring` 持久化抽象 |
+| `AppAgentTextField.swift` | 输入框控件 |
+| `AppAgentMenuButton.swift` | 折叠菜单按钮 |
+| `AppAgentGeometry.swift` | 共享几何工具：clamp、CGPoint/CGSize/CGRect/UIEdgeInsets 近似相等 |
+| `AppAgentKeyboardObserver.swift` | 键盘高度观察助手（keyboardWillChangeFrame 解析统一在此） |
+| `AppAgentVoiceRecognitionManager.swift` | 录音识别服务（AVAudioEngine + SFSpeechRecognizer，audioQueue 隔离，AsyncStream 事件流）；`preferredLocales` 语言优先级默认中文优先；`AppAgentVoiceRecognitionProviding` 协议缝 |
+| `VoiceInput/AppAgentVoiceInputCoordinator.swift` | 语音输入状态机：一次语音输入（按下→移动→松手→编辑收尾）的唯一状态主人；依赖识别协议 + releaseActionResolver + 触觉反馈抽象，输出语义 delegate 回调 |
 | `ChatMessage.swift` | UI 层消息模型 (role, text, status, toolInfo) |
 | `ChatMessageCell.swift` | 气泡样式 UITableViewCell |
 
@@ -283,42 +283,42 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 
 | 文件 | 职责 |
 |------|------|
-| `OpenAPPChatPanelView.swift` | 固定最大尺寸的卡片视觉：顶部圆角/阴影/拖拽条/内容区；不持有手势和运动策略 |
-| `OpenAPPChatPanelGeometry.swift` | peek/half/full 业务档位和固定面板尺寸的纯几何结果 |
-| `OpenAPPChatPanelCoordinator.swift` | BODragScroll 唯一适配层：尺寸、detent、列表捕获、程序化移动和稳定落位同步 |
-| `OpenAPPChatMessageListView.swift` | 聊天内容区：复用 ChatMessage/ChatMessageCell，处理列表可见区补偿和条件式流式跟随 |
-| `OpenAPPMockChatResponder.swift` | 模拟回复源（UI 调试阶段）：began/partial/completed 事件形状对齐真实流式通路 |
+| `AppAgentChatPanelView.swift` | 固定最大尺寸的卡片视觉：顶部圆角/阴影/拖拽条/内容区；不持有手势和运动策略 |
+| `AppAgentChatPanelGeometry.swift` | peek/half/full 业务档位和固定面板尺寸的纯几何结果 |
+| `AppAgentChatPanelCoordinator.swift` | BODragScroll 唯一适配层：尺寸、detent、列表捕获、程序化移动和稳定落位同步 |
+| `AppAgentChatMessageListView.swift` | 聊天内容区：复用 ChatMessage/ChatMessageCell，处理列表可见区补偿和条件式流式跟随 |
+| `AppAgentMockChatResponder.swift` | 模拟回复源（UI 调试阶段）：began/partial/completed 事件形状对齐真实流式通路 |
 
-### UI/OpenAPPViewController/ — 控制器（组装根）
+### UI/AppAgentViewController/ — 控制器（组装根）
 
 | 文件 | 职责 |
 |------|------|
-| `OpenAPPViewController.swift` | 成员与生命周期；持有 coordinator/store/observer |
-| `OpenAPPViewController+InputBarDelegate.swift` | inputBar 事件路由 |
-| `OpenAPPViewController+InputBarLayout.swift` | frame 策略接线层（状态 + 视图应用，计算全部委托 FramePolicy） |
-| `OpenAPPViewController+Keyboard.swift` | 键盘高度 → inputBar 避让 |
-| `OpenAPPViewController+VoiceInput.swift` | 语音输入接线层：手势事件 → coordinator；coordinator 语义回调 → overlay/inputBar/session |
-| `OpenAPPViewController+SessionBinding.swift` | session ↔ UI、sendMessage |
-| `OpenAPPViewController+ChatPanel.swift` | 对话流面板接线：环境布局、程序化档位、键盘避让和统一消息分发；默认走真实 session |
+| `AppAgentViewController.swift` | 成员与生命周期；持有 coordinator/store/observer |
+| `AppAgentViewController+InputBarDelegate.swift` | inputBar 事件路由 |
+| `AppAgentViewController+InputBarLayout.swift` | frame 策略接线层（状态 + 视图应用，计算全部委托 FramePolicy） |
+| `AppAgentViewController+Keyboard.swift` | 键盘高度 → inputBar 避让 |
+| `AppAgentViewController+VoiceInput.swift` | 语音输入接线层：手势事件 → coordinator；coordinator 语义回调 → overlay/inputBar/session |
+| `AppAgentViewController+SessionBinding.swift` | session ↔ UI、sendMessage |
+| `AppAgentViewController+ChatPanel.swift` | 对话流面板接线：环境布局、程序化档位、键盘避让和统一消息分发；默认走真实 session |
 
 ### UI/VoiceInputOverlay/ — 语音输入浮层
 
 | 文件 | 职责 |
 |------|------|
-| `OpenAPPVoiceInputOverlayView.swift` | 浮层组合根：手势阶段状态渲染 + releaseAction 几何判定 + 编辑态形态切换 |
-| `OpenAPPVoiceEditModeSession.swift` | 编辑会话对象：textView/取消/发送按钮、键盘跟随、点/滑收放键盘；与手势态共享同一 bubbleView 保证形变连续 |
-| `OpenAPPVoiceBubbleView.swift` | 气泡视图：形状/位置全由 path 表达，状态切换是连续 path 形变；contentView 内容容器与 path 同节奏动画 |
-| `OpenAPPVoiceWaveformView.swift` | 波形视图（CAShapeLayer path，支持尺寸/颜色渐变动画） |
-| `OpenAPPVoiceActionZoneView.swift` | 取消/编辑弧形按钮 |
-| `OpenAPPVoiceBottomPanelView.swift` | 底部“语音”弧形面板 |
-| `OpenAPPVoiceArcMetrics.swift` | 弧形几何共享定义 |
-| `OpenAPPVoiceInputOverlayState.swift` | 识别可视状态 + 松手行为枚举 |
+| `AppAgentVoiceInputOverlayView.swift` | 浮层组合根：手势阶段状态渲染 + releaseAction 几何判定 + 编辑态形态切换 |
+| `AppAgentVoiceEditModeSession.swift` | 编辑会话对象：textView/取消/发送按钮、键盘跟随、点/滑收放键盘；与手势态共享同一 bubbleView 保证形变连续 |
+| `AppAgentVoiceBubbleView.swift` | 气泡视图：形状/位置全由 path 表达，状态切换是连续 path 形变；contentView 内容容器与 path 同节奏动画 |
+| `AppAgentVoiceWaveformView.swift` | 波形视图（CAShapeLayer path，支持尺寸/颜色渐变动画） |
+| `AppAgentVoiceActionZoneView.swift` | 取消/编辑弧形按钮 |
+| `AppAgentVoiceBottomPanelView.swift` | 底部“语音”弧形面板 |
+| `AppAgentVoiceArcMetrics.swift` | 弧形几何共享定义 |
+| `AppAgentVoiceInputOverlayState.swift` | 识别可视状态 + 松手行为枚举 |
 
 ### Tests/ (3 files)
 
 | 文件 | 职责 |
 |------|------|
-| `Tests/Core/OpenAPPCoreTests.swift` | 68 测试用例，覆盖 JSON、消息、Provider、SSE、存储、Agent、Memory、UIState、Prompt、LLMExecutor |
-| `Tests/UI/OpenAPPUITests.swift` | UIKit 可用时覆盖 ChatMessage 创建 + 流式状态测试 |
-| `Tests/UI/OpenAPPVoiceInputCoordinatorTests.swift` | 语音输入状态机测试：手势转移、震动 diff、发送回填顺序、编辑交接（识别/触觉均为替身） |
-| `Tests/UI/OpenAPPChatPanelGeometryTests.swift` | 对话流面板测试：几何档位、紧凑窗口去重、列表补偿和 BODragScroll 首次/程序化落位 |
+| `Tests/Core/AppAgentCoreTests.swift` | 68 测试用例，覆盖 JSON、消息、Provider、SSE、存储、Agent、Memory、UIState、Prompt、LLMExecutor |
+| `Tests/UI/AppAgentUITests.swift` | UIKit 可用时覆盖 ChatMessage 创建 + 流式状态测试 |
+| `Tests/UI/AppAgentVoiceInputCoordinatorTests.swift` | 语音输入状态机测试：手势转移、震动 diff、发送回填顺序、编辑交接（识别/触觉均为替身） |
+| `Tests/UI/AppAgentChatPanelGeometryTests.swift` | 对话流面板测试：几何档位、紧凑窗口去重、列表补偿和 BODragScroll 首次/程序化落位 |

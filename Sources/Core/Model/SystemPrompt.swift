@@ -1,6 +1,6 @@
 //
 //  SystemPrompt.swift
-//  OpenAPP
+//  AppAgent
 //
 
 import Foundation
