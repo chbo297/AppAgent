@@ -22,7 +22,7 @@ public enum ContentOrCacheControl<T: Sendable>: Sendable {
 // MARK: - API Protocol
 
 /// Wire-format protocol for communicating with a model provider.
-/// `.anthropicMessages` and `.openaiCompletions` are implemented; the rest are reserved for future use.
+/// `.anthropicMessages`, `.openaiCompletions` and `.openaiResponses` are implemented; the rest are reserved for future use.
 public enum APIProtocol: String, Sendable, Codable, CaseIterable {
     /// Anthropic Messages API (Claude models).
     case anthropicMessages = "anthropic-messages"

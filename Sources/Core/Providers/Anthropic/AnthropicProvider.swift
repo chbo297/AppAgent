@@ -196,6 +196,14 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
                 modelId: modelId,
                 maxTokens: maxTokens
             )
+        case .openaiResponses:
+            return try buildOpenAIResponsesRequest(
+                messages: messages,
+                system: system,
+                tools: tools,
+                modelId: modelId,
+                maxTokens: maxTokens
+            )
         default:
             throw ModelError.providerError("API protocol '\(apiProtocol.rawValue)' is not implemented")
         }
@@ -330,6 +338,71 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         return request
     }
+
+    private func buildOpenAIResponsesRequest(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String,
+        maxTokens: Int
+    ) throws -> URLRequest {
+        let effectiveBaseURL = baseURL.isEmpty
+            ? "https://api.openai.com/v1"
+            : baseURL
+        let base = effectiveBaseURL.hasSuffix("/")
+            ? String(effectiveBaseURL.dropLast())
+            : effectiveBaseURL
+
+        let endpoint = base.hasSuffix("/responses")
+            ? base
+            : "\(base)/responses"
+
+        guard let url = URL(string: endpoint) else {
+            throw ModelError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        for (key, value) in customHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        var body: [String: Any] = [
+            "model": modelId,
+            "max_output_tokens": maxTokens,
+            "stream": true,
+            "input": OpenAIResponsesMapper.toInput(messages)
+        ]
+
+        let instructions = OpenAIResponsesMapper.toInstructions(system)
+        if !instructions.isEmpty {
+            body["instructions"] = instructions
+        }
+
+        let toolDefinitions = OpenAIResponsesMapper.toTools(tools)
+        if !toolDefinitions.isEmpty {
+            body["tools"] = toolDefinitions
+            body["tool_choice"] = "auto"
+        }
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        Logger.debug("Anthropic", "buildOpenAIResponsesRequest: url=\(url.absoluteString), model=\(modelId), maxTokens=\(maxTokens), messageCount=\(messages.count), systemSegments=\(system.count), toolCount=\(tools.count)")
+        if Logger.isEnabled {
+            if let bodyData = request.httpBody,
+               let jsonObj = try? JSONSerialization.jsonObject(with: bodyData),
+               let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys]),
+               let prettyStr = String(data: prettyData, encoding: .utf8) {
+                Logger.debug("Anthropic", "buildOpenAIResponsesRequest body:\n\(prettyStr)")
+            }
+        }
+
+        return request
+    }
 }
 
 private func parseProviderSSEEvent(
@@ -343,6 +416,8 @@ private func parseProviderSSEEvent(
         return AnthropicMapper.parseSSEEvent(sseEvent, activeToolCalls: &anthropicToolCalls)
     case .openaiCompletions:
         return OpenAIChatCompletionsMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
+    case .openaiResponses:
+        return OpenAIResponsesMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
     default:
         return []
     }
