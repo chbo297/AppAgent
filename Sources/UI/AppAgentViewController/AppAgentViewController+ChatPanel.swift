@@ -25,6 +25,18 @@ extension AppAgentViewController {
         chatPanelView.onCollapseRequested = { [weak self] in
             self?.setChatPanelDetent(.peek, animated: true)
         }
+        chatPanelView.onNewSessionRequested = { [weak self] in
+            self?.startNewSession()
+        }
+    }
+
+    /// 新建一个会话并切换过去；未绑定 agent 时无操作。
+    func startNewSession() {
+        guard let agent else { return }
+        Task { @MainActor in
+            let session = await agent.createSession(title: "对话")
+            switchSession(to: session.id)
+        }
     }
 
     /// 将当前 viewport、安全区和 inputBar 展开宽度交给 coordinator 更新固定面板几何。

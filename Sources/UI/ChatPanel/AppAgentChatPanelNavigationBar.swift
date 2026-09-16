@@ -12,9 +12,11 @@ final class AppAgentChatPanelNavigationBar: UIView {
 
     var onSessionListRequested: (() -> Void)?
     var onCollapseRequested: (() -> Void)?
+    var onNewSessionRequested: (() -> Void)?
 
     let sessionListButton = UIButton(type: .system)
     let collapseButton = UIButton(type: .system)
+    let newSessionButton = UIButton(type: .system)
 
     var title: String = "对话" {
         didSet {
@@ -56,9 +58,15 @@ final class AppAgentChatPanelNavigationBar: UIView {
             width: buttonSize,
             height: buttonSize
         )
+        newSessionButton.frame = CGRect(
+            x: max(Self.horizontalInset, collapseButton.frame.minX - 6 - buttonSize),
+            y: buttonY,
+            width: buttonSize,
+            height: buttonSize
+        )
 
         let titleMinX = sessionListButton.frame.maxX + 8
-        let titleMaxX = collapseButton.frame.minX - 8
+        let titleMaxX = newSessionButton.frame.minX - 8
         titleLabel.frame = CGRect(
             x: titleMinX,
             y: 0,
@@ -77,6 +85,7 @@ final class AppAgentChatPanelNavigationBar: UIView {
         let cornerRadius = buttonSize / 2
         sessionListButton.layer.cornerRadius = cornerRadius
         collapseButton.layer.cornerRadius = cornerRadius
+        newSessionButton.layer.cornerRadius = cornerRadius
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -102,6 +111,14 @@ final class AppAgentChatPanelNavigationBar: UIView {
             action: #selector(didTapCollapseButton)
         )
         addSubview(collapseButton)
+
+        configure(
+            newSessionButton,
+            symbolName: "square.and.pencil",
+            accessibilityLabel: "新对话",
+            action: #selector(didTapNewSessionButton)
+        )
+        addSubview(newSessionButton)
 
         titleLabel.text = title
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -130,7 +147,7 @@ final class AppAgentChatPanelNavigationBar: UIView {
     private func applyAppearance() {
         titleLabel.textColor = AppAgentAppearance.primaryText
         separatorView.backgroundColor = AppAgentAppearance.inputBarBorder
-        [sessionListButton, collapseButton].forEach { button in
+        [sessionListButton, collapseButton, newSessionButton].forEach { button in
             button.tintColor = AppAgentAppearance.icon
             button.backgroundColor = AppAgentAppearance.voicePressedBackground
         }
@@ -142,6 +159,10 @@ final class AppAgentChatPanelNavigationBar: UIView {
 
     @objc func didTapCollapseButton() {
         onCollapseRequested?()
+    }
+
+    @objc func didTapNewSessionButton() {
+        onNewSessionRequested?()
     }
 }
 

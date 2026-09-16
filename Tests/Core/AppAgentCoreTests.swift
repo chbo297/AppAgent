@@ -293,7 +293,139 @@ final class AppAgentCoreTests: XCTestCase {
         }
     }
 
-    // MARK: - AISession Storage
+    // MARK: - OpenAI Responses protocol
+
+    func testOpenAIResponsesParserTextDelta() {
+        var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
+        let event = SSEEvent(
+            event: "response.output_text.delta",
+            data: #"{"type":"response.output_text.delta","output_index":0,"delta":"Hello"}"#
+        )
+
+        let events = OpenAIResponsesMapper.parseSSEEvent(event, activeToolCalls: &activeToolCalls)
+
+        XCTAssertEqual(events.count, 1)
+        if case .textDelta(let text) = events[0] {
+            XCTAssertEqual(text, "Hello")
+        } else {
+            XCTFail("Expected text delta")
+        }
+    }
+
+    func testOpenAIResponsesParserToolCall() {
+        var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
+
+        let added = SSEEvent(
+            event: "response.output_item.added",
+            data: #"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"file_search","arguments":""}}"#
+        )
+        XCTAssertTrue(OpenAIResponsesMapper.parseSSEEvent(added, activeToolCalls: &activeToolCalls).isEmpty)
+
+        let argsDelta = SSEEvent(
+            event: "response.function_call_arguments.delta",
+            data: #"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"query\":\"Swift\"}"}"#
+        )
+        XCTAssertTrue(OpenAIResponsesMapper.parseSSEEvent(argsDelta, activeToolCalls: &activeToolCalls).isEmpty)
+
+        let completed = SSEEvent(
+            event: "response.completed",
+            data: #"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":12,"output_tokens":7}}}"#
+        )
+        let events = OpenAIResponsesMapper.parseSSEEvent(completed, activeToolCalls: &activeToolCalls)
+
+        XCTAssertEqual(events.count, 3)
+        if case .usage(let input, let output) = events[0] {
+            XCTAssertEqual(input, 12)
+            XCTAssertEqual(output, 7)
+        } else {
+            XCTFail("Expected usage event")
+        }
+        if case .toolCall(let call) = events[1] {
+            XCTAssertEqual(call.id, "call_1")
+            XCTAssertEqual(call.name, "file_search")
+            XCTAssertEqual(call.arguments["query"]?.stringValue, "Swift")
+        } else {
+            XCTFail("Expected tool call")
+        }
+        if case .done(let stopReason) = events[2] {
+            XCTAssertEqual(stopReason, .toolUse)
+        } else {
+            XCTFail("Expected done event")
+        }
+    }
+
+    func testOpenAIResponsesParserCompletedEndTurn() {
+        var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
+        let completed = SSEEvent(
+            event: "response.completed",
+            data: #"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":4}}}"#
+        )
+        let events = OpenAIResponsesMapper.parseSSEEvent(completed, activeToolCalls: &activeToolCalls)
+
+        XCTAssertEqual(events.count, 2)
+        if case .done(let stopReason) = events[1] {
+            XCTAssertEqual(stopReason, .endTurn)
+        } else {
+            XCTFail("Expected done end_turn event")
+        }
+    }
+
+    func testOpenAIResponsesParserIncompleteMaxTokens() {
+        var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
+        let incomplete = SSEEvent(
+            event: "response.incomplete",
+            data: #"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#
+        )
+        let events = OpenAIResponsesMapper.parseSSEEvent(incomplete, activeToolCalls: &activeToolCalls)
+
+        guard case .done(let stopReason) = events.last else {
+            return XCTFail("Expected done event")
+        }
+        XCTAssertEqual(stopReason, .maxTokens)
+    }
+
+    func testOpenAIResponsesInputMapping() {
+        let messages: [AIAgentMessage] = [
+            .user("Where am I?"),
+            AIAgentMessage(role: .assistant, content: [
+                .text("Let me check."),
+                .toolUse(AIAgentMessage.ToolCall(id: "call_1", name: "app_map_location", arguments: [:]))
+            ]),
+            AIAgentMessage(role: .user, content: [
+                .toolResult(AIAgentMessage.ToolCallResult(toolCallId: "call_1", content: "{\"lat\":39.9}"))
+            ])
+        ]
+
+        let input = OpenAIResponsesMapper.toInput(messages)
+
+        // user text -> role message with input_text
+        XCTAssertEqual(input[0]["role"] as? String, "user")
+        let userContent = input[0]["content"] as? [[String: Any]]
+        XCTAssertEqual(userContent?.first?["type"] as? String, "input_text")
+        XCTAssertEqual(userContent?.first?["text"] as? String, "Where am I?")
+
+        // assistant text -> output_text, then a function_call item
+        XCTAssertEqual(input[1]["role"] as? String, "assistant")
+        let asstContent = input[1]["content"] as? [[String: Any]]
+        XCTAssertEqual(asstContent?.first?["type"] as? String, "output_text")
+        XCTAssertEqual(input[2]["type"] as? String, "function_call")
+        XCTAssertEqual(input[2]["call_id"] as? String, "call_1")
+        XCTAssertEqual(input[2]["name"] as? String, "app_map_location")
+
+        // tool result -> function_call_output top-level item
+        XCTAssertEqual(input[3]["type"] as? String, "function_call_output")
+        XCTAssertEqual(input[3]["call_id"] as? String, "call_1")
+    }
+
+    func testOpenAIResponsesToolsAndInstructions() {
+        let instructions = OpenAIResponsesMapper.toInstructions([
+            .content(SystemPrompt("You are a map agent.")),
+            .content(SystemPrompt("Be concise."))
+        ])
+        XCTAssertEqual(instructions, "You are a map agent.\n\nBe concise.")
+    }
+
+
 
     func testInMemorySessionStorage() async throws {
         let storage = InMemorySessionStorage()

@@ -31,7 +31,7 @@ public struct SessionSearchTool: ToolProtocol {
         ],
         required: []
     )
-    public let group: String = "core"
+    public let group: String = "session"
     public let safetyLevel: Tool.SafetyLevel = .safe
 
     public init() {}

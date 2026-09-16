@@ -32,8 +32,15 @@ public struct SSEParser {
             return previous
         }
         if line.hasPrefix("data: ") {
+            // A new `data:` line also delimits an event. Some transports
+            // (notably URLSession.AsyncBytes.lines) do not surface the blank
+            // separator line between SSE events, so `data:`-only streams
+            // (OpenAI chat/completions chunks) would otherwise keep
+            // overwriting the buffer and never emit. Flush the buffered
+            // event first, then start accumulating the new one.
+            let previous = emitIfReady()
             currentData = String(line.dropFirst(6))
-            return nil
+            return previous
         }
         // Empty line = event boundary (standard SSE)
         if line.isEmpty {

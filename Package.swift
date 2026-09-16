@@ -16,13 +16,18 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/chbo297/BODragScroll.git",
-            from: "1.0.1"
+            from: "2.0.0"
         )
     ],
     targets: [
         .target(
+            name: "AppAgentObjCSupport",
+            path: "ObjCSupport"
+        ),
+        .target(
             name: "AppAgent",
             dependencies: [
+                "AppAgentObjCSupport",
                 .product(
                     name: "BODragScroll",
                     package: "BODragScroll",

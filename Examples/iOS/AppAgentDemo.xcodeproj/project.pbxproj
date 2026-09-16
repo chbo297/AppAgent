@@ -31,6 +31,12 @@
 			path = ../../Sources;
 			sourceTree = "<group>";
 		};
+		A1B2C3D4E5F6A7B800000071 /* ObjCSupport */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			name = ObjCSupport;
+			path = ../../ObjCSupport;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -49,6 +55,7 @@
 			isa = PBXGroup;
 			children = (
 				A1B2C3D4E5F6A7B800000070 /* AppAgent */,
+				A1B2C3D4E5F6A7B800000071 /* ObjCSupport */,
 				A1B2C3D4E5F6A7B800000004 /* Sources */,
 				A1B2C3D4E5F6A7B800000005 /* Resources */,
 				A1B2C3D4E5F6A7B800000011 /* Products */,
@@ -82,6 +89,7 @@
 				A1B2C3D4E5F6A7B800000004 /* Sources */,
 				A1B2C3D4E5F6A7B800000005 /* Resources */,
 				A1B2C3D4E5F6A7B800000070 /* AppAgent */,
+				A1B2C3D4E5F6A7B800000071 /* ObjCSupport */,
 			);
 			name = AppAgentDemo;
 			packageProductDependencies = (
@@ -172,6 +180,8 @@
 				SUPPORTS_MACCATALYST = YES;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/AppAgentDemo-Bridging-Header.h";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../ObjCSupport/include";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -205,6 +215,8 @@
 				SUPPORTS_MACCATALYST = YES;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/AppAgentDemo-Bridging-Header.h";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../ObjCSupport/include";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

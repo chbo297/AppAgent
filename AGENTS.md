@@ -2,6 +2,10 @@
 
 iOS/macOS AIAgent SDK，为应用提供嵌入式 AI AIAgent 能力。Core 零第三方依赖；完整 UIKit UI 支持 iOS 13+ / Mac Catalyst 13.1+，原生 macOS 12+ 提供 Core；iOS/Catalyst ChatPanel 使用 BODragScroll。
 
+> **命名约定（长期生效）**：本工程 **AppAgent 即「app agent」**。任何文档/对话/代码注释中提到「app agent」都指本工程。
+> `liji` 分支新增 `Sources/Core/Liji/`：OneAPI 多协议 Provider 工厂、liji_server 客户端、运行时内省 / 热修复的宿主 provider 协议与工具。集成说明见 [`docs/Liji.md`](docs/Liji.md)。
+> 关联：后台服务 liji_server（`/Users/bdmap/Baidu/baidu/personal-code/liji_server`）、百度地图壳工程 liji_pub（分支 `feature_liji`）。
+
 ## 构建 & 测试
 
 ```bash

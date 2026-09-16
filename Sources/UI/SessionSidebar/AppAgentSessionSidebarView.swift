@@ -10,6 +10,7 @@ import UIKit
 final class AppAgentSessionSidebarView: UIView {
     var onDismissRequested: (() -> Void)?
     var onSelectItem: ((AppAgentSessionSidebarItem) -> Void)?
+    var onRenameItem: ((AppAgentSessionSidebarItem) -> Void)?
 
     private(set) var isPresented = false
     let sessionListView = AppAgentSessionListView()
@@ -111,6 +112,9 @@ final class AppAgentSessionSidebarView: UIView {
         sessionListView.layer.shadowOffset = CGSize(width: 4, height: 0)
         sessionListView.onSelectItem = { [weak self] item in
             self?.onSelectItem?(item)
+        }
+        sessionListView.onRenameItem = { [weak self] item in
+            self?.onRenameItem?(item)
         }
         addSubview(sessionListView)
     }

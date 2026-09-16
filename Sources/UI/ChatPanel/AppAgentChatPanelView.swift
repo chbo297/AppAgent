@@ -18,6 +18,9 @@ final class AppAgentChatPanelView: UIView {
     /// 点击内容区导航栏右侧收起按钮时触发。
     var onCollapseRequested: (() -> Void)?
 
+    /// 点击内容区导航栏“新对话”按钮时触发。
+    var onNewSessionRequested: (() -> Void)?
+
     /// 聊天内容区，消息的追加和流式更新由宿主直接操作。
     let listView = AppAgentChatMessageListView()
 
@@ -177,6 +180,9 @@ final class AppAgentChatPanelView: UIView {
         }
         navigationBar.onCollapseRequested = { [weak self] in
             self?.onCollapseRequested?()
+        }
+        navigationBar.onNewSessionRequested = { [weak self] in
+            self?.onNewSessionRequested?()
         }
 
         viewportMaskLayer.fillColor = UIColor.black.cgColor
