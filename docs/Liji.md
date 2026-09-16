@@ -23,9 +23,16 @@ Sources/Core/Liji/
 
 ## 协议支持
 
-- 已实现：`.openaiCompletions`（OneAPI 默认走此协议）、`.anthropicMessages`。
+- 已实现：`.openaiCompletions`（OneAPI 默认走此协议）、`.anthropicMessages`、`.openaiResponses`（`POST /v1/responses`，`OpenAIResponsesMapper` 负责 typed input / flat function tools / SSE 事件解析）。
 - OneAPI 默认：`https://oneapi-comate.baidu-int.com/v1` + `comate_custom_header`，模型 `gpt-5.6-sol`。
-- 待扩展：`.openaiResponses`（provider 目前 throws；需补 mapper + SSE 解析）。
+
+## 边界：地图能力不在 AppAgent
+
+按「AppAgent 只做通用共用与协议、地图领域能力由宿主实现」的约束，`app_map_*`
+系列工具与其 provider 协议（视野控制/绘制/检索/收藏/图层/定位/导航/路况/轨迹/搜索历史/周边）
+**不在本仓库**，已迁至宿主百度地图 `mapframework/Sources/AppAgentIntegration`，
+由宿主自行构造 `Map*Tool` 并注册到 `ToolCentral`。AppAgent 仅保留通用的运行时内省
+（`RuntimeInspectProvider`）、热修复、liji_server 后台服务这类跨宿主可复用的能力。
 
 ## 宿主（百度地图）接入示例
 
