@@ -100,11 +100,13 @@ final class LijiTests: XCTestCase {
         let tools = LijiToolset.makeTools(config: c,
                                           runtimeProvider: MockRuntime(),
                                           hotfixProvider: MockHotfix())
-        XCTAssertEqual(Set(tools.map(\.name)), ["liji_server", "app_runtime_inspect", "app_hotfix"])
+        // app_hook_capture 随 runtimeToolsEnabled 开放（自包含，无需 provider）。
+        XCTAssertEqual(Set(tools.map(\.name)),
+                       ["liji_server", "app_runtime_inspect", "app_hook_capture", "app_hotfix"])
 
-        // 开启但不注入 provider → 跳过对应工具
+        // 开启但不注入 provider → 需要 provider 的工具跳过；app_hook_capture 仍在。
         let toolsNoProvider = LijiToolset.makeTools(config: c)
-        XCTAssertEqual(toolsNoProvider.map(\.name).sorted(), ["liji_server"])
+        XCTAssertEqual(toolsNoProvider.map(\.name).sorted(), ["app_hook_capture", "liji_server"])
     }
 
     func testRequirementDTODecoding() throws {

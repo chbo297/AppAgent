@@ -32,6 +32,11 @@ public enum LijiToolset {
         if config.runtimeToolsEnabled, let runtimeProvider {
             tools.append(RuntimeInspectTool(provider: runtimeProvider))
         }
+        // 消息捕获诊断工具随运行时诊断能力一并开放。自包含（读写共享 NSUserDefaults 契约 +
+        // 沙盒 JSONL），无需注入 provider；捕获通道默认全关，由本工具按需拨动。
+        if config.runtimeToolsEnabled {
+            tools.append(HookCaptureTool())
+        }
         if config.hotfixEnabled, let hotfixProvider {
             tools.append(HotfixTool(provider: hotfixProvider))
         }
