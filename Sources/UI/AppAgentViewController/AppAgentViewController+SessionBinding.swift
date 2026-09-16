@@ -107,6 +107,14 @@ extension AppAgentViewController {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let session = currentSession else { return }
 
+        // 并行上限预检：达到上限时在任何乐观 UI 之前硬阻断（既不追加气泡也不禁用输入）。
+        // AISession.sendMessage 会作为权威闸门再次复检（防御性双重校验）。
+        if let agent = agent, !agent.sessionManager.canAdmitRun(for: session) {
+            let limit = agent.sessionManager.governor.limit
+            Logger.info("AppAgentViewController", "sendMessage 被并行上限拦截: limit=\(limit)")
+            return
+        }
+
         inputBar.clearText()
         inputBar.setInputEnabled(false)
 

@@ -16,6 +16,10 @@ public protocol AIAgentDelegate: AnyObject, Sendable {
     /// Called when a session completes an agent run.
     func aiAgent(_ aiAgent: AIAgent, session: AISession, didCompleteRun result: AIAgentFinish)
 
+    /// Called when a run is rejected before it starts (e.g. the concurrency limit is reached).
+    /// No run lifecycle callbacks follow a rejection.
+    func aiAgent(_ aiAgent: AIAgent, session: AISession, didRejectRun error: Error)
+
     /// Called when a session encounters an error.
     func aiAgent(_ aiAgent: AIAgent, session: AISession, didEncounterError error: Error)
 
@@ -35,6 +39,7 @@ extension AIAgentDelegate {
     public func aiAgent(_ aiAgent: AIAgent, didCreateSession session: AISession) {}
     public func aiAgent(_ aiAgent: AIAgent, didDeleteSession sessionId: String) {}
     public func aiAgent(_ aiAgent: AIAgent, session: AISession, didCompleteRun result: AIAgentFinish) {}
+    public func aiAgent(_ aiAgent: AIAgent, session: AISession, didRejectRun error: Error) {}
     public func aiAgent(_ aiAgent: AIAgent, session: AISession, didEncounterError error: Error) {}
 
     /// Default: allow all tool executions.

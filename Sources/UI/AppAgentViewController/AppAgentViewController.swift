@@ -75,6 +75,10 @@ open class AppAgentViewController: UIViewController {
     /// inputBar frame 被 AppAgentViewController 实际应用后触发，宿主可用它观察键盘、展开、收起和拖拽导致的位置变化。
     public var onInputBarFrameChange: ((AppAgentInputBarFrameChangeContext) -> Void)?
 
+    /// UI 层展示事件（会话切换、聊天面板显隐）的宿主回调。与核心 `AIAgentDelegate` 分离：
+    /// 「当前展示的是哪个会话 / 面板是否可见」是纯 UI 概念，核心 `AIAgent` 不应依赖 UI 层。
+    public weak var presentationDelegate: AppAgentPresentationDelegate?
+
     /// The currently displayed session ID.
     public private(set) var currentSessionId: String?
 
@@ -86,6 +90,7 @@ open class AppAgentViewController: UIViewController {
 
     /// Switch to a different session.
     public func switchSession(to sessionId: String) {
+        let old = currentSessionId
         currentStreamTask?.cancel()
         currentStreamTask = nil
         currentSession?.uiState.onChange = nil
@@ -95,6 +100,7 @@ open class AppAgentViewController: UIViewController {
         if isViewLoaded {
             reloadSessionSidebarItems()
         }
+        presentationDelegate?.appAgent(didSwitchSessionFrom: old, to: sessionId)
     }
 
     /// 子类可 override 观察 inputBar frame 变化。
@@ -129,8 +135,10 @@ open class AppAgentViewController: UIViewController {
     var expandedResizeStableStartTime: TimeInterval?
     var keyboardObserver: AppAgentKeyboardObserver?
 
-    /// 当前 UI 调试阶段默认使用本地固定回复，避免依赖真实模型配置。
-    var usesFixedDebugReply = true
+    /// 消息发送是否走本地固定回复（仅供 UI 调试脱离真实模型时用）。
+    /// 生产默认 false：走真实 session → agent → 模型，保证配置 key 后能真正收发消息。
+    /// 需要脱离模型联调 UI 时，宿主可将其显式置为 true（`agent` 绑定时仍会按是否有 agent 自动纠正）。
+    public var usesFixedDebugReply = false
 
     /// inputBar 布局偏好的持久化存储；frame 策略本身在 AppAgentInputBarFramePolicy。
     let inputBarLayoutStore: AppAgentInputBarLayoutStoring = AppAgentUserDefaultsInputBarLayoutStore()

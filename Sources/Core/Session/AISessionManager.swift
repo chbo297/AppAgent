@@ -22,6 +22,27 @@ public final class AISessionManager: @unchecked Sendable {
     @WeakLocked
     public internal(set) var agent: AIAgent?
 
+    /// Concurrency admission policy for top-level runs. MVP: fixed hard limit of 4.
+    /// Sub-sessions (delegation) do not count against this limit.
+    public let governor = RunGovernor(limit: 4)
+
+    /// Number of top-level sessions (`delegationDepth == 0`) currently running an agent loop.
+    /// Derived live from each executor's `isRunning` — no separate counter.
+    public var runningSessionCount: Int {
+        sessions.values.filter { $0.delegationDepth == 0 && $0.isRunning }.count
+    }
+
+    /// Whether a new run can be admitted for `session` under the concurrency limit.
+    ///
+    /// - A sub-session (delegation depth > 0) is always admitted (exempt from the limit).
+    /// - A session that is already running re-runs in its own slot (always admitted).
+    /// - Otherwise a new top-level run is admitted only if the running count is below the limit.
+    public func canAdmitRun(for session: AISession) -> Bool {
+        guard session.delegationDepth == 0 else { return true }
+        return governor.canAdmit(runningCount: runningSessionCount,
+                                 isAlreadyRunning: session.isRunning)
+    }
+
     // Session ID generation state
     @Locked private var lastPrefix: String = ""
     @Locked private var sequence: Int = 0

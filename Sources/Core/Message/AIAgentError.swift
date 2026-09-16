@@ -16,6 +16,7 @@ public enum AIAgentError: Error, LocalizedError, Sendable {
     case toolExecutionDenied(String)
     case toolLoopDetected(String)
     case toolExecutionTimedOut(toolName: String)
+    case concurrencyLimitReached(limit: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -37,6 +38,8 @@ public enum AIAgentError: Error, LocalizedError, Sendable {
             return "Tool loop detected: '\(name)' called repeatedly with identical arguments"
         case .toolExecutionTimedOut(let name):
             return "Tool '\(name)' execution timed out"
+        case .concurrencyLimitReached(let limit):
+            return "已达并行上限(\(limit))，请先暂停其他任务再重试。"
         }
     }
 }

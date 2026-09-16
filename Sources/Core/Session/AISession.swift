@@ -135,8 +135,19 @@ public final class AISession: @unchecked Sendable {
     // MARK: - Agent Interaction
 
     /// Send a message and get a stream of agent events.
+    ///
+    /// Concurrency admission is gated here — the single authoritative entry point for
+    /// starting a run. If the parallel-run limit is reached, the run is rejected: the
+    /// agent's delegate is notified via `didRejectRun` and an immediately-finished empty
+    /// stream is returned (no `.error` event, so the rejection does not pollute history).
     public func sendMessage(_ text: String) -> AsyncStream<AIAgentEvent> {
-        executor.run(text)
+        if let agent = agentMask?.agent, !agent.sessionManager.canAdmitRun(for: self) {
+            let limit = agent.sessionManager.governor.limit
+            Logger.info("AISession", "sendMessage rejected by concurrency limit: sessionId=\(id), limit=\(limit)")
+            agent.sessionDidRejectRun(self, error: AIAgentError.concurrencyLimitReached(limit: limit))
+            return AsyncStream { $0.finish() }
+        }
+        return executor.run(text)
     }
 
     /// Add a user message to the conversation history.

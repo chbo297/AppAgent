@@ -69,10 +69,12 @@ public final class AppAgentOverlay {
 
     public func show() {
         window.isHidden = false
+        viewController.presentationDelegate?.appAgentChatPanelWillShow()
     }
 
     public func hide() {
         window.isHidden = true
+        viewController.presentationDelegate?.appAgentChatPanelDidHide()
     }
 }
 

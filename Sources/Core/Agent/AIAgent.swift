@@ -305,6 +305,13 @@ public final class AIAgent: @unchecked Sendable {
 
     // MARK: - Internal Callbacks
 
+    /// Called by AISession when a run is rejected before starting (e.g. concurrency limit).
+    /// Forwarded to the delegate; no run lifecycle callbacks follow.
+    func sessionDidRejectRun(_ session: AISession, error: Error) {
+        Logger.info("AIAgent", "sessionDidRejectRun: sessionId=\(session.id), error=\(error)")
+        delegate?.aiAgent(self, session: session, didRejectRun: error)
+    }
+
     /// Called by AISession after a successful agent run. Handles auto-save and delegate notification.
     func sessionDidCompleteRun(_ session: AISession, result: AIAgentFinish) {
         Logger.info("AIAgent", "sessionDidCompleteRun: sessionId=\(session.id), textLength=\(result.text.count), autoPersist=\(profile.autoPersist)")
