@@ -105,6 +105,7 @@ final class HostPlaceholderViewController: UIViewController {
 
     private let titleLabel = UILabel()
     private let hapticButton = UIButton(type: .system)
+    private let selfCheckButton = UIButton(type: .system)
     private let labelText: String
     private let showsHapticButton: Bool
     private lazy var hapticGenerator = makeHapticGenerator()
@@ -145,6 +146,20 @@ final class HostPlaceholderViewController: UIViewController {
         hapticButton.addTarget(self, action: #selector(playHapticFeedback), for: .touchDown)
         hapticButton.addTarget(self, action: #selector(playHapticFeedback), for: .touchUpInside)
         view.addSubview(hapticButton)
+
+        selfCheckButton.setTitle("能力自检", for: .normal)
+        selfCheckButton.setImage(UIImage(systemName: "checkmark.seal"), for: .normal)
+        selfCheckButton.tintColor = DemoPalette.accent
+        selfCheckButton.setTitleColor(DemoPalette.accent, for: .normal)
+        selfCheckButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        selfCheckButton.backgroundColor = DemoPalette.chrome
+        selfCheckButton.layer.cornerRadius = 10
+        selfCheckButton.layer.borderWidth = 1
+        selfCheckButton.layer.borderColor = DemoPalette.separator.cgColor
+        selfCheckButton.contentEdgeInsets = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
+        selfCheckButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: -4, bottom: 0, right: 4)
+        selfCheckButton.addTarget(self, action: #selector(runCapabilitySelfCheck), for: .touchUpInside)
+        view.addSubview(selfCheckButton)
     }
 
     override func viewDidLayoutSubviews() {
@@ -167,11 +182,64 @@ final class HostPlaceholderViewController: UIViewController {
             width: buttonSize.width,
             height: 44
         )
+
+        let scSize = selfCheckButton.sizeThatFits(CGSize(width: labelW, height: 48))
+        selfCheckButton.frame = CGRect(
+            x: (bounds.width - scSize.width) / 2,
+            y: hapticButton.frame.maxY + 12,
+            width: scSize.width,
+            height: 44
+        )
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
         hapticButton.layer.borderColor = DemoPalette.separator.cgColor
+        selfCheckButton.layer.borderColor = DemoPalette.separator.cgColor
+    }
+
+    @objc private func runCapabilitySelfCheck() {
+        selfCheckButton.isEnabled = false
+        Task { @MainActor in
+            let session: AISession
+            if let existing = DemoAgentHolder.currentSession() {
+                session = existing
+            } else {
+                session = await CapabilitySelfCheck.ephemeralSession()
+            }
+            let report = await CapabilitySelfCheck.run(session: session)
+            self.selfCheckButton.isEnabled = true
+            self.presentReport("能力自检结果", report)
+        }
+    }
+
+    private func presentReport(_ title: String, _ body: String) {
+        let vc = UIViewController()
+        vc.title = title
+        vc.view.backgroundColor = DemoPalette.background
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textColor = DemoPalette.primaryText
+        textView.backgroundColor = .clear
+        textView.text = body
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        vc.view.addSubview(textView)
+        NSLayoutConstraint.activate([
+            textView.topAnchor.constraint(equalTo: vc.view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            textView.leadingAnchor.constraint(equalTo: vc.view.leadingAnchor, constant: 12),
+            textView.trailingAnchor.constraint(equalTo: vc.view.trailingAnchor, constant: -12),
+            textView.bottomAnchor.constraint(equalTo: vc.view.bottomAnchor)
+        ])
+        let nav = UINavigationController(rootViewController: vc)
+        vc.navigationItem.rightBarButtonItem = UIBarButtonItem(
+            barButtonSystemItem: .done, target: self, action: #selector(dismissReport)
+        )
+        present(nav, animated: true)
+    }
+
+    @objc private func dismissReport() {
+        presentedViewController?.dismiss(animated: true)
     }
 
     @objc private func playHapticFeedback() {

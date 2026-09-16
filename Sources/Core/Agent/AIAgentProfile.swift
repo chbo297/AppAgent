@@ -112,6 +112,13 @@ public struct AIAgentProfile: Sendable {
             Search past conversation sessions. Use proactively when the user says \
             'we did this before', 'remember when', or references past work.
             """,
+        "session_manage": """
+            Inspect and manage your own conversations. 'list' shows every session you own \
+            (title, message count, status, which is current); 'read' pulls another session's \
+            full history so you can recall what was discussed there; 'rename' gives a session \
+            a clearer title; 'delete' removes one (never the current session). Use 'list'/'read' \
+            when the user refers to another conversation, and 'rename' once a topic is clear.
+            """,
         "app_navigate": """
             Navigate to pages within the app. Call with no arguments to list available routes first.
             """,

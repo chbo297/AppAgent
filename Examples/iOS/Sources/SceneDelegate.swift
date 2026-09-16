@@ -21,6 +21,18 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         Logger.isEnabled = true
         Logger.minimumLevel = .debug
 
+        // Headless capability self-check for simulator/CI: launch with
+        // `-run-selfcheck` to run every host-introspection + session tool once
+        // and print the report to the log, then skip normal chat wiring. Works
+        // without any provider config (tools execute without the model).
+        if ProcessInfo.processInfo.arguments.contains("-run-selfcheck") {
+            Task { @MainActor in
+                let session = await CapabilitySelfCheck.ephemeralSession()
+                let report = await CapabilitySelfCheck.run(session: session)
+                NSLog("APPAGENT_SELFCHECK_BEGIN\n%@\nAPPAGENT_SELFCHECK_END", report)
+            }
+        }
+
         // 1) Host app's own window (any normal iOS app would do this).
         let host = UIWindow(windowScene: windowScene)
         host.rootViewController = HostTabBarController()
@@ -72,10 +84,13 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 // Resume the most recently updated restored session.
                 overlay = AppAgentOverlay.attach(in: windowScene)
                 overlay.bind(agent: agent, sessionId: latest.id)
+                DemoAgentHolder.currentSessionId = latest.id
             } else {
                 // Fresh install / no history — create a new session.
                 overlay = await AppAgentOverlay.start(in: windowScene, agent: agent)
+                DemoAgentHolder.currentSessionId = agent.allSessions.first?.id
             }
+            DemoAgentHolder.agent = agent
             self.openAPPOverlay = overlay
         }
     }

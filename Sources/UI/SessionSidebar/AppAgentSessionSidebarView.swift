@@ -11,6 +11,7 @@ final class AppAgentSessionSidebarView: UIView {
     var onDismissRequested: (() -> Void)?
     var onSelectItem: ((AppAgentSessionSidebarItem) -> Void)?
     var onRenameItem: ((AppAgentSessionSidebarItem) -> Void)?
+    var onDeleteItem: ((AppAgentSessionSidebarItem) -> Void)?
 
     private(set) var isPresented = false
     let sessionListView = AppAgentSessionListView()
@@ -115,6 +116,9 @@ final class AppAgentSessionSidebarView: UIView {
         }
         sessionListView.onRenameItem = { [weak self] item in
             self?.onRenameItem?(item)
+        }
+        sessionListView.onDeleteItem = { [weak self] item in
+            self?.onDeleteItem?(item)
         }
         addSubview(sessionListView)
     }

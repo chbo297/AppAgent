@@ -16,19 +16,21 @@ public struct SessionManageTool: ToolProtocol {
     public let description = """
         Introspect and manage your own conversation sessions. Choose an 'op':
         - 'list': list every session you own (id, title, message count, created/updated time, \
-        whether it is the current session, and whether it is currently streaming).
+        whether it is the current session, its runtime status, and whether it is currently streaming).
         - 'read': read the full message history and runtime state of one session. \
-        Requires 'session_id'. Returns each message's role and text plus streaming/error state.
+        Requires 'session_id'. Returns each message's role and text plus status/streaming/error state.
         - 'rename': rename a session. Requires 'session_id' and 'title'.
+        - 'delete': delete a session permanently. Requires 'session_id'. You cannot delete \
+        the session you are currently running in.
         Use this to recall what was discussed in other conversations or to organize them.
         """
     public let parameters = Tool.Schema(
         properties: [
             "op": .string(
                 description: "Operation to perform.",
-                enumValues: ["list", "read", "rename"]
+                enumValues: ["list", "read", "rename", "delete"]
             ),
-            "session_id": .string(description: "Target session id. Required for 'read' and 'rename'."),
+            "session_id": .string(description: "Target session id. Required for 'read', 'rename', 'delete'."),
             "title": .string(description: "New title. Required for 'rename'."),
             "max_messages": .integer(
                 description: "For 'read': cap the number of most-recent messages returned (default 50).",
@@ -65,9 +67,24 @@ public struct SessionManageTool: ToolProtocol {
                 return .error("'title' is required and must be non-empty for 'rename'.")
             }
             return await renameSession(id: sid, title: title, agent: agent)
+        case "delete":
+            guard let sid = arguments["session_id"]?.stringValue else {
+                return .error("'session_id' is required for 'delete'.")
+            }
+            return await deleteSession(id: sid, agent: agent, current: session)
         default:
-            return .error("Unknown op: '\(op)'. Use 'list', 'read', or 'rename'.")
+            return .error("Unknown op: '\(op)'. Use 'list', 'read', 'rename', or 'delete'.")
         }
+    }
+
+    // MARK: - Runtime status
+
+    /// A coarse, human-readable runtime status for a session, derived from its
+    /// streaming / error / running state (there is no persisted status enum).
+    private func status(of s: AISession) -> String {
+        if s.uiState.isStreaming || s.isRunning { return "running" }
+        if s.uiState.lastError != nil { return "error" }
+        return "idle"
     }
 
     // MARK: - Ops
@@ -82,6 +99,7 @@ public struct SessionManageTool: ToolProtocol {
                 "created_at": .string(iso.string(from: s.createdAt)),
                 "updated_at": .string(iso.string(from: s.updatedAt)),
                 "is_current": .bool(s.id == current.id),
+                "status": .string(status(of: s)),
                 "is_streaming": .bool(s.uiState.isStreaming)
             ])
         }
@@ -112,6 +130,7 @@ public struct SessionManageTool: ToolProtocol {
             "title": .string(target.title),
             "message_count": .number(Double(all.count)),
             "returned": .number(Double(messages.count)),
+            "status": .string(status(of: target)),
             "is_streaming": .bool(target.uiState.isStreaming),
             "last_error": lastError.map { JSONValue.string($0) } ?? .null,
             "messages": .array(messages)
@@ -128,6 +147,24 @@ public struct SessionManageTool: ToolProtocol {
             "success": .bool(true),
             "session_id": .string(target.id),
             "title": .string(target.title)
+        ]))
+    }
+
+    private func deleteSession(id: String, agent: AIAgent, current: AISession) async -> Tool.Output {
+        guard agent.session(id: id) != nil else {
+            return .error("No session found with id '\(id)'.")
+        }
+        guard id != current.id else {
+            return .error("Cannot delete the current session you are running in. Switch to or create another session first.")
+        }
+        do {
+            try await agent.deleteSession(id)
+        } catch {
+            return .error("Failed to delete session '\(id)': \(error.localizedDescription)")
+        }
+        return .json(.object([
+            "success": .bool(true),
+            "deleted_session_id": .string(id)
         ]))
     }
 }

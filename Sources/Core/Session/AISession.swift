@@ -150,6 +150,12 @@ public final class AISession: @unchecked Sendable {
         if isFirstUserMessage, Self.isDefaultTitle(title),
            let derived = Self.deriveTitle(from: text) {
             title = derived
+            // Persist the freshly derived title right away so the session list
+            // shows a meaningful name even before the first run completes.
+            if let manager = agentMask?.agent?.sessionManager {
+                let snapshot = self
+                Task { try? await manager.saveSession(snapshot) }
+            }
         }
     }
 

@@ -10,6 +10,7 @@ import UIKit
 final class AppAgentSessionListView: UIView {
     var onSelectItem: ((AppAgentSessionSidebarItem) -> Void)?
     var onRenameItem: ((AppAgentSessionSidebarItem) -> Void)?
+    var onDeleteItem: ((AppAgentSessionSidebarItem) -> Void)?
 
     private(set) var items: [AppAgentSessionSidebarItem] = []
 
@@ -137,6 +138,22 @@ extension AppAgentSessionListView: UITableViewDataSource, UITableViewDelegate {
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: false)
         onSelectItem?(items[indexPath.row])
+    }
+
+    func tableView(_ tableView: UITableView,
+                   trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
+        guard indexPath.row < items.count else { return nil }
+        let item = items[indexPath.row]
+        // Only real sessions (with a sessionID) can be deleted; demo placeholders can't.
+        guard item.sessionID != nil else { return nil }
+        let delete = UIContextualAction(style: .destructive, title: "删除") { [weak self] _, _, completion in
+            self?.onDeleteItem?(item)
+            completion(true)
+        }
+        delete.image = UIImage(systemName: "trash")
+        let config = UISwipeActionsConfiguration(actions: [delete])
+        config.performsFirstActionWithFullSwipe = false
+        return config
     }
 }
 
