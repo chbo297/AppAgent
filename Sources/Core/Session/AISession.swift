@@ -141,8 +141,42 @@ public final class AISession: @unchecked Sendable {
 
     /// Add a user message to the conversation history.
     public func addUserMessage(_ text: String) {
+        let isFirstUserMessage = !messages.contains { $0.role == .user }
         messages.append(.user(text))
         updatedAt = Date()
+        // Codex-style auto-naming: derive the session title from the first user
+        // message, but only while the title is still a default placeholder so a
+        // user-chosen (renamed) title is never clobbered.
+        if isFirstUserMessage, Self.isDefaultTitle(title),
+           let derived = Self.deriveTitle(from: text) {
+            title = derived
+        }
+    }
+
+    /// Rename the session. Marks the session dirty so it will be persisted;
+    /// does not change `updatedAt` so renaming never reorders the session list.
+    public func rename(_ newTitle: String) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        title = trimmed
+    }
+
+    /// Placeholder titles that auto-naming is allowed to overwrite.
+    static let defaultTitles: Set<String> = ["New Chat", "New Session", "对话", "未命名会话", ""]
+
+    static func isDefaultTitle(_ title: String) -> Bool {
+        defaultTitles.contains(title.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Derive a concise, single-line title from a user message (≤24 chars).
+    static func deriveTitle(from text: String, maxLength: Int = 24) -> String? {
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.count <= maxLength { return trimmed }
+        return String(trimmed.prefix(maxLength)) + "…"
     }
 
     /// Replace the entire message history.

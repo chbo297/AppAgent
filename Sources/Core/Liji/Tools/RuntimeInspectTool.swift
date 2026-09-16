@@ -17,21 +17,23 @@ public struct RuntimeInspectTool: ToolProtocol {
         - 'method_list': list methods of 'class'
         - 'property_list': list properties/ivars of 'class'
         - 'property_value': read a 'keyPath' value (optional 'class', defaults to top page)
+        - 'property_set': write a 'keyPath' value via KVC using 'value' (optional 'class', defaults to top page)
         - 'invoke': call 'selector' on 'class' with 'argumentsJSON' (a JSON array). Powerful — use carefully.
         """
     public let parameters = Tool.Schema(
         properties: [
             "op": .string(description: "Operation.",
-                          enumValues: ["ui_hierarchy", "class_list", "method_list", "property_list", "property_value", "invoke"]),
-            "class": .string(description: "Class name for method_list/property_list/property_value/invoke."),
+                          enumValues: ["ui_hierarchy", "class_list", "method_list", "property_list", "property_value", "property_set", "invoke"]),
+            "class": .string(description: "Class name for method_list/property_list/property_value/property_set/invoke."),
             "filter": .string(description: "Substring filter for class_list."),
-            "keyPath": .string(description: "Key path for property_value."),
+            "keyPath": .string(description: "Key path for property_value/property_set."),
+            "value": .string(description: "New value (string) to set for property_set."),
             "selector": .string(description: "Selector for invoke."),
             "argumentsJSON": .string(description: "JSON array string of arguments for invoke.")
         ],
         required: ["op"]
     )
-    public let group = "liji-runtime"
+    public let group = "host-runtime"
     public let safetyLevel: Tool.SafetyLevel = .moderate
 
     private let provider: RuntimeInspectProvider
@@ -61,6 +63,14 @@ public struct RuntimeInspectTool: ToolProtocol {
             }
             let value = await provider.propertyValue(keyPath: keyPath, ofClass: className)
             return .text(value ?? "(nil)")
+        case "property_set":
+            guard let keyPath = arguments["keyPath"]?.stringValue else {
+                return .error("'keyPath' is required for property_set")
+            }
+            guard let value = arguments["value"]?.stringValue else {
+                return .error("'value' is required for property_set")
+            }
+            return .text(await provider.setPropertyValue(keyPath: keyPath, value: value, ofClass: className))
         case "invoke":
             guard let className, let selector = arguments["selector"]?.stringValue else {
                 return .error("'class' and 'selector' are required for invoke")

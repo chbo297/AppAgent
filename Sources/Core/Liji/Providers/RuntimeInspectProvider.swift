@@ -20,6 +20,15 @@ public protocol RuntimeInspectProvider: Sendable {
     func propertyList(ofClass className: String) async -> [String]
     /// 读取当前栈顶页面（或指定对象）某 keyPath 的属性内容的字符串描述。
     func propertyValue(keyPath: String, ofClass className: String?) async -> String?
+    /// KVC 写：向当前栈顶页面（或指定对象）的 keyPath 设置新值，返回结果描述。
+    func setPropertyValue(keyPath: String, value: String, ofClass className: String?) async -> String
     /// 反射调用：className 上的 selector，参数以 JSON 数组字符串传入，返回结果描述。
     func invoke(className: String, selector: String, argumentsJSON: String) async -> String
+}
+
+public extension RuntimeInspectProvider {
+    /// 默认不支持 KVC 写，需具体 provider 覆盖实现。
+    func setPropertyValue(keyPath: String, value: String, ofClass className: String?) async -> String {
+        "setPropertyValue is not supported by this runtime provider."
+    }
 }

@@ -9,6 +9,7 @@ import UIKit
 /// Session 侧栏中的内容视图，负责标题、列表渲染和条目选择，不负责进出场动画。
 final class AppAgentSessionListView: UIView {
     var onSelectItem: ((AppAgentSessionSidebarItem) -> Void)?
+    var onRenameItem: ((AppAgentSessionSidebarItem) -> Void)?
 
     private(set) var items: [AppAgentSessionSidebarItem] = []
 
@@ -93,9 +94,22 @@ final class AppAgentSessionListView: UIView {
             AppAgentSessionListCell.self,
             forCellReuseIdentifier: AppAgentSessionListCell.reuseIdentifier
         )
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        tableView.addGestureRecognizer(longPress)
         addSubview(tableView)
 
         applyAppearance()
+    }
+
+    @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        let point = gesture.location(in: tableView)
+        guard let indexPath = tableView.indexPathForRow(at: point),
+              indexPath.row < items.count else { return }
+        let item = items[indexPath.row]
+        // Only real sessions (with a sessionID) can be renamed; demo placeholders can't.
+        guard item.sessionID != nil else { return }
+        onRenameItem?(item)
     }
 
     private func applyAppearance() {

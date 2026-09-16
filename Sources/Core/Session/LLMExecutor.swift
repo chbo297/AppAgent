@@ -267,8 +267,13 @@ public final class LLMExecutor: @unchecked Sendable {
         }
 
         // Installed tools (per-session instances) override shared ones with the same name,
-        // but only if they survive the policy filter.
-        let survivingInstalled = ToolCentral.ToolPolicy.apply(policies, to: Set(session.installedTools.keys))
+        // but only if they survive the policy filter (name + group rules, using each
+        // installed tool's own group).
+        let survivingInstalled = ToolCentral.ToolPolicy.apply(
+            policies,
+            to: Set(session.installedTools.keys),
+            groupOf: { session.installedTools[$0]?.group }
+        )
         for name in survivingInstalled {
             if let tool = session.installedTools[name] {
                 allTools[name] = tool

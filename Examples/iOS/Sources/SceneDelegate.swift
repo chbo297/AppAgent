@@ -59,14 +59,24 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 name: "main",
                 profile: agentProfile,
                 modelPolicy: DemoConfig.modelPolicy,
-                sessionStorage: InMemorySessionStorage()
+                sessionStorage: FileSessionStorage()
             )
             self.agent = agent
 
-            self.openAPPOverlay = await AppAgentOverlay.start(
-                in: windowScene,
-                agent: agent
-            )
+            // Restore sessions persisted from a previous launch so conversation
+            // history survives the app being killed.
+            try? await agent.restoreAll()
+
+            let overlay: AppAgentOverlay
+            if let latest = agent.allSessions.first {
+                // Resume the most recently updated restored session.
+                overlay = AppAgentOverlay.attach(in: windowScene)
+                overlay.bind(agent: agent, sessionId: latest.id)
+            } else {
+                // Fresh install / no history — create a new session.
+                overlay = await AppAgentOverlay.start(in: windowScene, agent: agent)
+            }
+            self.openAPPOverlay = overlay
         }
     }
 

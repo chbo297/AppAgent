@@ -20,8 +20,35 @@ extension AppAgentViewController {
         sessionSidebarView.onSelectItem = { [weak self] item in
             self?.selectSessionSidebarItem(item)
         }
+        sessionSidebarView.onRenameItem = { [weak self] item in
+            self?.promptRenameSession(item)
+        }
         view.addSubview(sessionSidebarView)
         reloadSessionSidebarItems()
+    }
+
+    /// 弹出重命名输入框，提交后重命名会话并立即存盘。
+    private func promptRenameSession(_ item: AppAgentSessionSidebarItem) {
+        guard let sessionID = item.sessionID,
+              let session = agent?.session(id: sessionID) else { return }
+        let alert = UIAlertController(title: "重命名会话", message: nil, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = session.title
+            field.placeholder = "会话名称"
+            field.clearButtonMode = .whileEditing
+            field.accessibilityIdentifier = "rename_session_field"
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { [weak self, weak alert] _ in
+            guard let self, let newTitle = alert?.textFields?.first?.text else { return }
+            session.rename(newTitle)
+            self.reloadSessionSidebarItems()
+            Task { try? await self.agent?.sessionManager.saveSession(session) }
+        })
+        // 侧栏是加在 self.view 上的覆盖层，用最上层 VC 呈现 alert。
+        var presenter: UIViewController = self
+        while let presented = presenter.presentedViewController { presenter = presented }
+        presenter.present(alert, animated: true)
     }
 
     /// 左侧导航按钮的统一入口；重复点击时从当前动画状态反向播放。

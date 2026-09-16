@@ -21,8 +21,13 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "AppAgentObjCSupport",
+            path: "ObjCSupport"
+        ),
+        .target(
             name: "AppAgent",
             dependencies: [
+                "AppAgentObjCSupport",
                 .product(
                     name: "BODragScroll",
                     package: "BODragScroll",

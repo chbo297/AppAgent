@@ -64,6 +64,9 @@ open class AppAgentViewController: UIViewController {
     /// The agent powering this chat.
     public var agent: AIAgent? {
         didSet {
+            // 绑定了真实 agent 就走真实 session/模型；未绑定时回落到本地固定回复，
+            // 让纯 UI 调试无需模型配置也能跑。
+            usesFixedDebugReply = (agent == nil)
             guard isViewLoaded else { return }
             reloadSessionSidebarItems()
         }

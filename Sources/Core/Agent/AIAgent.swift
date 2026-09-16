@@ -200,6 +200,9 @@ public final class AIAgent: @unchecked Sendable {
         if !disabled.contains("session_search") {
             await toolCentral.register(SessionSearchTool())
         }
+        if !disabled.contains("session_manage") {
+            await toolCentral.register(SessionManageTool())
+        }
 
         // System tools
         if !disabled.contains("clipboard") {
@@ -208,6 +211,22 @@ public final class AIAgent: @unchecked Sendable {
         if !disabled.contains("haptic") {
             await toolCentral.register(HapticTool())
         }
+
+        // Phase 5: Host-introspection storage tools (group "host-storage")
+        if !disabled.contains("app_user_defaults") {
+            await toolCentral.register(AppUserDefaultsTool())
+        }
+        if !disabled.contains("app_sandbox_file") {
+            await toolCentral.register(AppSandboxFileTool())
+        }
+
+        // Host runtime introspection (group "host-runtime"). Requires UIKit for the
+        // default provider; hosts on other platforms can register their own.
+        #if canImport(UIKit)
+        if !disabled.contains("app_runtime_inspect") {
+            await toolCentral.register(RuntimeInspectTool(provider: DefaultRuntimeInspectProvider()))
+        }
+        #endif
 
         Logger.info("AIAgent", "registerBuiltInTools: registered built-in tools (disabled: \(disabled))")
     }
