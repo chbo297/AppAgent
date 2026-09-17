@@ -153,8 +153,12 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
         XCTAssertTrue(coordinator.dragScrollView.panelView === coordinator.panelView)
         XCTAssertFalse(coordinator.dragScrollView.clipsToBounds)
-        // 手势内部优先、到边界再联动外层；顶部橡皮筋归卡片，底部归内部列表。
-        XCTAssertEqual(coordinator.dragScrollView.configuration.handoff.mode, .innerFirstAtBoundary)
+        // 组合滚动轴 + 内部区间从触点起算；顶部橡皮筋归卡片，底部归内部列表。
+        XCTAssertEqual(coordinator.dragScrollView.configuration.handoff.mode, .coordinated)
+        XCTAssertEqual(
+            coordinator.dragScrollView.configuration.handoff.innerScrollPlacement,
+            .fromTouchedPosition
+        )
         XCTAssertTrue(coordinator.dragScrollView.configuration.bounce.allowsPanelTopBounce)
         XCTAssertFalse(coordinator.dragScrollView.configuration.bounce.allowsPanelBottomBounce)
         XCTAssertEqual(coordinator.dragScrollView.configuration.bounce.preferredTopOwner, .panel)

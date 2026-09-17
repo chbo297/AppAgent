@@ -40,8 +40,9 @@ final class AppAgentChatPanelCoordinator: NSObject {
         dragScrollView.keyboardDismissMode = .none
 
         var configuration = dragScrollView.configuration
-        // 手势先滑内部列表，内部在该方向滑到底之后再把位移交给面板：内外联动、内部优先。
-        configuration.handoff.mode = .innerFirstAtBoundary
+        // 面板位移与内部 offset 合并成一条组合滚动轴；内部滚动区间从手指按下的位置起算。
+        configuration.handoff.mode = .coordinated
+        configuration.handoff.innerScrollPlacement = .fromTouchedPosition
         // 顶部橡皮筋归外层卡片；底部不让 panel 继续外拉，交给内部列表自己回弹。
         configuration.bounce.allowsPanelTopBounce = true
         configuration.bounce.allowsPanelBottomBounce = false
