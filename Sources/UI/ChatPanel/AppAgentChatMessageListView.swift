@@ -14,6 +14,9 @@ final class AppAgentChatMessageListView: UIView {
 
     private let tableView = UITableView()
     private var appliedBottomInset: CGFloat = 0
+
+    /// 面板可见展示区换算到列表坐标系后的高度；tableView 始终按这个高度布局。
+    private var visibleHeight: CGFloat?
     private var pendingScrollToBottomAnimated: Bool?
 
     /// 交给 BODragScroll 捕获和协调的唯一内部纵向滚动视图。
@@ -31,7 +34,7 @@ final class AppAgentChatMessageListView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        tableView.frame = bounds
+        applyTableViewFrame()
         guard let animated = pendingScrollToBottomAnimated,
               bounds.width > 0,
               bounds.height > 0 else { return }
@@ -123,25 +126,40 @@ final class AppAgentChatMessageListView: UIView {
 
     /// 随面板 displayHeight 更新列表的真实可见区域。
     ///
-    /// BODragScroll 的 panelView 始终保持 full 尺寸，低档位只展示顶部一段；因此需要把未展示的
-    /// panel 高度并入 tableView.bottomInset，`scrollToBottom` 才会停在屏幕当前可见的底边上方。
+    /// BODragScroll 的 panelView 始终保持 full 尺寸，低档位只展示顶部一段。这里直接把可见段高度作为
+    /// tableView 的高度，让 scrollView 视口与展示区一直等高；底部 inset 只保留 inputBar/键盘占位。
     @discardableResult
-    func updateViewport(
-        panelHeight: CGFloat,
-        displayHeight: CGFloat,
-        bottomAvoidingInset: CGFloat
-    ) -> Bool {
-        let hiddenPanelHeight = max(0, panelHeight - displayHeight)
-        let targetBottomInset = max(0, bottomAvoidingInset) + hiddenPanelHeight
-        guard abs(targetBottomInset - appliedBottomInset) > 0.5 else { return false }
+    func updateVisibleArea(visibleHeight: CGFloat, bottomAvoidingInset: CGFloat) -> Bool {
+        let targetVisibleHeight = max(0, visibleHeight)
+        let targetBottomInset = max(0, bottomAvoidingInset)
+        let visibleHeightChanged = abs(
+            targetVisibleHeight - (self.visibleHeight ?? -.greatestFiniteMagnitude)
+        ) > 0.5
+        let bottomInsetChanged = abs(targetBottomInset - appliedBottomInset) > 0.5
+        guard visibleHeightChanged || bottomInsetChanged else { return false }
 
         let wasFollowingLatestMessage = isNearBottom
+        self.visibleHeight = targetVisibleHeight
         appliedBottomInset = targetBottomInset
-        applyInsets()
+        if bottomInsetChanged {
+            applyInsets()
+        }
+        if visibleHeightChanged {
+            // 每帧都要跟手，直接提交 frame，不排一次完整 layout 周期。
+            UIView.performWithoutAnimation { applyTableViewFrame() }
+        }
         if wasFollowingLatestMessage {
             scrollToBottom(animated: false)
         }
         return true
+    }
+
+    /// tableView 高度跟随可见展示区高度；尚未收到展示高度时退化为整块列表区域。
+    private func applyTableViewFrame() {
+        let height = visibleHeight.map { min(bounds.height, $0) } ?? bounds.height
+        let frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
+        guard tableView.frame != frame else { return }
+        tableView.frame = frame
     }
 
     /// 将最新消息移动到当前有效可见区域底部。

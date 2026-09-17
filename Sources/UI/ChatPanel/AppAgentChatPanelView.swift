@@ -9,7 +9,8 @@ import UIKit
 /// 对话流面板的透明根容器。
 ///
 /// 根容器按 `AppAgentChatPanelGeometry.dragHandleAreaHeight` 分成拖拽手柄区和内容区域。内容区域背景负责样式与阴影，viewport
-/// 负责 mask 裁切，实际聊天内容始终按照完整内容区域布局，不依赖 viewport 的临时尺寸。
+/// 负责 mask 裁切，实际聊天内容始终按照完整内容区域布局，不依赖 viewport 的临时尺寸；只有 `listView` 内部的 tableView
+/// 会把自身视口高度对齐到当前展示高度（见 `AppAgentChatMessageListView.updateVisibleArea`）。
 final class AppAgentChatPanelView: UIView {
 
     /// 点击内容区导航栏左侧 Session 列表按钮时触发。

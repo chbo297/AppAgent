@@ -2,7 +2,7 @@
 //  AppAgentRegionDebugViewController.swift
 //  AppAgentUI
 //
-//  调试窗口的 root VC：托管浮动按钮/面板，并按帧把三类响应区域的矩形
+//  调试窗口的 root VC：托管浮动按钮/面板，并按帧把各类响应 / 布局区域的矩形
 //  换算到调试窗口坐标系，用彩色边框画出来。
 //
 
@@ -149,6 +149,9 @@ public final class AppAgentRegionDebugViewController: UIViewController {
             source = target.chatPanelView
         case .inputBarHit:
             source = target.inputBar
+        case .chatListViewport:
+            // 对话流 tableView 的 frame 就是 AppAgentChatMessageListView 判定出来的可视区域。
+            source = target.chatPanelView.listView.participantScrollView
         }
         // 没上窗的视图不会显示，也就不该画框。
         guard source.window != nil else { return nil }

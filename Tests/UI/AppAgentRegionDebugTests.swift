@@ -9,13 +9,35 @@ final class AppAgentRegionDebugTests: XCTestCase {
 
     func testRegionsHaveDistinctTitlesAndColors() {
         let regions = AppAgentInteractionRegion.allCases
-        XCTAssertEqual(regions.count, 4)
-        XCTAssertEqual(Set(regions.map { $0.title }).count, 4)
-        XCTAssertEqual(Set(regions.map { $0.accessibilityIdentifier }).count, 4)
+        XCTAssertEqual(regions.count, 5)
+        XCTAssertEqual(Set(regions.map { $0.title }).count, 5)
+        XCTAssertEqual(Set(regions.map { $0.accessibilityIdentifier }).count, 5)
         XCTAssertEqual(AppAgentInteractionRegion.inputTap.color, .systemRed)
         XCTAssertEqual(AppAgentInteractionRegion.keyboardSwipe.color, .systemYellow)
         XCTAssertEqual(AppAgentInteractionRegion.chatPanelSwipe.color, .systemBlue)
         XCTAssertEqual(AppAgentInteractionRegion.inputBarHit.color, .systemGreen)
+        XCTAssertEqual(AppAgentInteractionRegion.chatListViewport.color, .systemRed)
+    }
+
+    /// 红框「对话列表可视区域」画的就是 tableView 跟随展示高度后的 frame。
+    func testChatListViewportOutlineTracksVisibleHeight() {
+        let container = UIView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let listView = AppAgentChatMessageListView(
+            frame: CGRect(x: 12, y: 100, width: 366, height: 700)
+        )
+        container.addSubview(listView)
+
+        listView.updateVisibleArea(visibleHeight: 280, bottomAvoidingInset: 100)
+        let rect = AppAgentRegionDebugViewController.outlineRect(
+            source: listView.participantScrollView, container: container
+        )
+        XCTAssertEqual(rect, CGRect(x: 12, y: 100, width: 366, height: 280))
+
+        listView.updateVisibleArea(visibleHeight: 640, bottomAvoidingInset: 100)
+        let expandedRect = AppAgentRegionDebugViewController.outlineRect(
+            source: listView.participantScrollView, container: container
+        )
+        XCTAssertEqual(expandedRect, CGRect(x: 12, y: 100, width: 366, height: 640))
     }
 
     func testRectIsNilWithoutTarget() {

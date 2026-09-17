@@ -140,25 +140,56 @@ final class AppAgentChatPanelCoordinator: NSObject {
         )
         let fixedTopAreaHeight = AppAgentChatPanelGeometry.dragHandleAreaHeight
             + AppAgentChatPanelNavigationBar.height
-        let panelListHeight = max(
-            0,
-            geometry.maximumDisplayHeight - fixedTopAreaHeight
-        )
-        // 列表底部 inset 最多补偿到 half 档；面板继续收向 peek 时只改变视觉裁切，不再改变滚动指标。
-        let insetReferenceDisplayHeight = max(clampedDisplayHeight, geometry.halfHeight)
-        let insetReferenceListHeight = max(
-            0,
-            insetReferenceDisplayHeight - fixedTopAreaHeight
-        )
-        let metricsChanged = panelView.listView.updateViewport(
-            panelHeight: panelListHeight,
-            displayHeight: insetReferenceListHeight,
+        // 列表视口跟随实时展示高度；但下限保持 half 档的可视高度，继续收向 peek 时只做视觉裁切，
+        // 不再压缩列表视口（否则 peek 附近视口只剩几十 pt，滚动指标会被反复重算）。
+        let viewportReferenceDisplayHeight = max(clampedDisplayHeight, geometry.halfHeight)
+        let visibleListHeight = max(0, viewportReferenceDisplayHeight - fixedTopAreaHeight)
+        let metricsChanged = panelView.listView.updateVisibleArea(
+            visibleHeight: visibleListHeight,
             bottomAvoidingInset: bottomAvoidingInset
         )
         if metricsChanged {
             dragScrollView.reloadScrollMetrics()
         }
+#if DEBUG
+        logJitterFrame(
+            displayHeight: displayHeight,
+            visibleListHeight: visibleListHeight,
+            metricsChanged: metricsChanged
+        )
+#endif
     }
+
+#if DEBUG
+    /// 临时排查用（不要提交）：抖动定位期间每帧打印面板与内部列表的关键数字。
+    /// 关掉就把 `isJitterLoggingEnabled` 置为 false。
+    static var isJitterLoggingEnabled = true
+
+    private func logJitterFrame(
+        displayHeight: CGFloat,
+        visibleListHeight: CGFloat,
+        metricsChanged: Bool
+    ) {
+        guard Self.isJitterLoggingEnabled else { return }
+        let inner = panelView.listView.participantScrollView
+        func number(_ value: CGFloat) -> String { String(format: "%.1f", value) }
+        print(
+            "[APPAGENT \(String(format: "%.3f", CACurrentMediaTime()))] displayHeightFrame"
+                + " display=\(number(displayHeight))"
+                + " visibleList=\(number(visibleListHeight))"
+                + " metricsChanged=\(metricsChanged)"
+                + " innerBounds=\(number(inner.bounds.height))"
+                + " innerSize=\(number(inner.contentSize.height))"
+                + " innerOff=\(number(inner.contentOffset.y))"
+                + " innerInsetB=\(number(inner.adjustedContentInset.bottom))"
+                + " hostOff=\(number(dragScrollView.contentOffset.y))"
+                + " hostDrag=\(dragScrollView.isDragging ? 1 : 0)"
+                + " hostDec=\(dragScrollView.isDecelerating ? 1 : 0)"
+                + " innerDrag=\(inner.isDragging ? 1 : 0)"
+                + " innerDec=\(inner.isDecelerating ? 1 : 0)"
+        )
+    }
+#endif
 
     /// 【竖向收起接线点】把 BODragScroll 的实时展示高度交给 panel 内部，只更新背景和 viewport 的裁切几何。
     private func updatePanelPresentation(at displayHeight: CGFloat) {

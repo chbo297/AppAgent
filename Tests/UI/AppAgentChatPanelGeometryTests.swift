@@ -110,34 +110,25 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(geometry.clampedDisplayHeight(10_000), geometry.maximumDisplayHeight)
     }
 
-    func testListViewportCompensatesForHiddenFixedPanelHeight() {
+    func testListViewportFollowsVisibleDisplayHeight() {
         let listView = AppAgentChatMessageListView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 700)
         )
 
         XCTAssertTrue(
-            listView.updateViewport(
-                panelHeight: 700,
-                displayHeight: 350,
-                bottomAvoidingInset: 100
-            )
+            listView.updateVisibleArea(visibleHeight: 350, bottomAvoidingInset: 100)
         )
-        XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 450, accuracy: 0.5)
+        // 视口与展示区等高；被裁掉的面板高度不再折进 inset，inset 只保留 inputBar/键盘占位。
+        XCTAssertEqual(listView.participantScrollView.bounds.height, 350, accuracy: 0.5)
+        XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 100, accuracy: 0.5)
         XCTAssertFalse(
-            listView.updateViewport(
-                panelHeight: 700,
-                displayHeight: 350,
-                bottomAvoidingInset: 100
-            )
+            listView.updateVisibleArea(visibleHeight: 350, bottomAvoidingInset: 100)
         )
 
         XCTAssertTrue(
-            listView.updateViewport(
-                panelHeight: 700,
-                displayHeight: 700,
-                bottomAvoidingInset: 100
-            )
+            listView.updateVisibleArea(visibleHeight: 700, bottomAvoidingInset: 100)
         )
+        XCTAssertEqual(listView.participantScrollView.bounds.height, 700, accuracy: 0.5)
         XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 100, accuracy: 0.5)
     }
 
@@ -173,7 +164,15 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(coordinator.dragScrollView.displayHeight, geometry.halfHeight, accuracy: 0.5)
         XCTAssertEqual(
             coordinator.panelView.listView.participantScrollView.contentInset.bottom,
-            102 + geometry.maximumDisplayHeight - geometry.halfHeight,
+            102,
+            accuracy: 0.5
+        )
+        // 列表视口高度 = 当前展示高度减去拖拽手柄区与导航栏。
+        XCTAssertEqual(
+            coordinator.panelView.listView.participantScrollView.bounds.height,
+            geometry.halfHeight
+                - AppAgentChatPanelGeometry.dragHandleAreaHeight
+                - AppAgentChatPanelNavigationBar.height,
             accuracy: 0.5
         )
     }
@@ -198,6 +197,14 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(
             coordinator.panelView.listView.participantScrollView.contentInset.bottom,
             halfDetentBottomInset + 1,
+            accuracy: 0.5
+        )
+        // 视口下限是 half 档可视高度：收到 peek 也不再继续压缩 tableView。
+        XCTAssertEqual(
+            coordinator.panelView.listView.participantScrollView.bounds.height,
+            geometry.halfHeight
+                - AppAgentChatPanelGeometry.dragHandleAreaHeight
+                - AppAgentChatPanelNavigationBar.height,
             accuracy: 0.5
         )
     }

@@ -3,7 +3,7 @@
 //  AppAgentUI
 //
 //  调试浮窗：折叠时是一颗可拖动的 40pt 圆形按钮，点开是一块毛玻璃面板，
-//  里面三个开关分别控制红 / 黄 / 蓝三类响应区域边框的显示。
+//  里面每个开关控制一类响应 / 布局区域边框的显示。
 //  形态参考 BWTimeGallery 的 DebugMapFloatingPanel。
 //
 
@@ -14,7 +14,8 @@ import UIKit
 final class AppAgentRegionDebugPanelView: UIView {
 
     static let collapsedSize = CGSize(width: 40, height: 40)
-    static let expandedSize = CGSize(width: 272, height: 232)
+    /// 高度按开关行数算：每行 31pt + 8pt 间距，加上 header 与内边距。
+    static let expandedSize = CGSize(width: 272, height: 271)
 
     /// 折叠 / 展开切换。
     var onExpansionChange: ((Bool) -> Void)?

@@ -2,9 +2,9 @@
 //  AppAgentRegionDebugOverlay.swift
 //  AppAgentUI
 //
-//  比 AppAgentWindow 更高一层的调试窗口：一颗浮动 debug 按钮 + 四个开关，
-//  分别用红 / 黄 / 蓝 / 绿 1pt 边框把「点击输入区域」「上滑触发键盘区域」
-//  「上滑触发对话列表面板区域」「底部 bar 响应区域」实时框出来。
+//  比 AppAgentWindow 更高一层的调试窗口：一颗浮动 debug 按钮 + 五个开关，
+//  分别用红 / 黄 / 蓝 / 绿 / 红 1pt 边框把「点击输入区域」「上滑触发键盘区域」
+//  「上滑触发对话列表面板区域」「底部 bar 响应区域」「对话列表可视区域」实时框出来。
 //  点击区与上滑唤键盘区是同一块矩形，后者用虚线画，避免看上去像两种尺寸。
 //
 
@@ -12,7 +12,7 @@
 import BOUIKit
 import UIKit
 
-/// 四类可被框出来的交互响应区域。
+/// 五类可被框出来的交互 / 布局区域。
 public enum AppAgentInteractionRegion: CaseIterable {
     /// 点击后弹起键盘的输入区域（已按 bar 白色背景高度纵向扩大）。
     case inputTap
@@ -22,6 +22,8 @@ public enum AppAgentInteractionRegion: CaseIterable {
     case chatPanelSwipe
     /// 底部 bar 自身的响应区域——它遮住下面的对话面板与宿主 app。
     case inputBarHit
+    /// 对话流 tableView 当前的可视区域，等于面板实时展示高度减去手柄区与导航栏。
+    case chatListViewport
 
     var title: String {
         switch self {
@@ -29,6 +31,7 @@ public enum AppAgentInteractionRegion: CaseIterable {
         case .keyboardSwipe: return "上滑触发键盘区域"
         case .chatPanelSwipe: return "上滑触发对话列表面板区域"
         case .inputBarHit: return "底部 bar 响应区域"
+        case .chatListViewport: return "对话列表可视区域"
         }
     }
 
@@ -38,6 +41,8 @@ public enum AppAgentInteractionRegion: CaseIterable {
         case .keyboardSwipe: return .systemYellow
         case .chatPanelSwipe: return .systemBlue
         case .inputBarHit: return .systemGreen
+        // 与点击输入区同为红色，但两者位置不重叠，靠角标文字区分。
+        case .chatListViewport: return .systemRed
         }
     }
 
@@ -47,6 +52,7 @@ public enum AppAgentInteractionRegion: CaseIterable {
         case .keyboardSwipe: return "appagent.regionDebug.keyboardSwipe"
         case .chatPanelSwipe: return "appagent.regionDebug.chatPanelSwipe"
         case .inputBarHit: return "appagent.regionDebug.inputBarHit"
+        case .chatListViewport: return "appagent.regionDebug.chatListViewport"
         }
     }
 }
