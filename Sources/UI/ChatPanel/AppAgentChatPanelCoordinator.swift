@@ -48,11 +48,6 @@ final class AppAgentChatPanelCoordinator: NSObject {
         configuration.bounce.preferredTopOwner = .panel
         configuration.bounce.preferredBottomOwner = .innerScrollView
         dragScrollView.configuration = configuration
-
-        // 列表 inset 在拖动结束后补写时也要让 BODragScroll 重算滚动度量。
-        panelView.listView.onViewportInsetApplied = { [weak self] in
-            self?.dragScrollView.reloadScrollMetrics()
-        }
     }
 
     /// 根据 ViewController 最新环境更新 host、固定面板尺寸和 detent。
@@ -154,12 +149,14 @@ final class AppAgentChatPanelCoordinator: NSObject {
             0,
             insetReferenceDisplayHeight - fixedTopAreaHeight
         )
-        // 度量刷新统一由 listView.onViewportInsetApplied 触发：inset 可能被拖动推迟到手势结束后才落地。
-        panelView.listView.updateViewport(
+        let metricsChanged = panelView.listView.updateViewport(
             panelHeight: panelListHeight,
             displayHeight: insetReferenceListHeight,
             bottomAvoidingInset: bottomAvoidingInset
         )
+        if metricsChanged {
+            dragScrollView.reloadScrollMetrics()
+        }
     }
 
     /// 【竖向收起接线点】把 BODragScroll 的实时展示高度交给 panel 内部，只更新背景和 viewport 的裁切几何。

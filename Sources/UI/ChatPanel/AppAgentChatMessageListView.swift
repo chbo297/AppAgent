@@ -15,18 +15,6 @@ final class AppAgentChatMessageListView: UIView {
     private let tableView = UITableView()
     private var appliedBottomInset: CGFloat = 0
     private var pendingScrollToBottomAnimated: Bool?
-    /// 手指正拖着列表时被推迟的 bottomInset 目标；nil 表示当前不需要补写。
-    private(set) var pendingBottomInset: CGFloat?
-
-    /// inset 真正落地后回调（含拖动结束后的补写），宿主据此刷新 BODragScroll 的滚动度量。
-    var onViewportInsetApplied: (() -> Void)?
-
-    /// 测试注入「是否正在拖动」；生产环境读 tableView.isDragging。
-    var isDraggingProviderForTesting: (() -> Bool)?
-
-    private var isListDragging: Bool {
-        isDraggingProviderForTesting?() ?? tableView.isDragging
-    }
 
     /// 交给 BODragScroll 捕获和协调的唯一内部纵向滚动视图。
     var participantScrollView: UIScrollView { tableView }
@@ -129,8 +117,6 @@ final class AppAgentChatMessageListView: UIView {
         tableView.automaticallyAdjustsScrollIndicatorInsets = false
         tableView.backgroundColor = .clear
         tableView.register(ChatMessageCell.self, forCellReuseIdentifier: ChatMessageCell.reuseIdentifier)
-        // 不接管 delegate（BODragScroll 需要它），只搭一个 target 观察拖动结束。
-        tableView.panGestureRecognizer.addTarget(self, action: #selector(handleListPan(_:)))
         addSubview(tableView)
         applyInsets()
     }
@@ -147,50 +133,15 @@ final class AppAgentChatMessageListView: UIView {
     ) -> Bool {
         let hiddenPanelHeight = max(0, panelHeight - displayHeight)
         let targetBottomInset = max(0, bottomAvoidingInset) + hiddenPanelHeight
-        return applyBottomInset(targetBottomInset)
-    }
+        guard abs(targetBottomInset - appliedBottomInset) > 0.5 else { return false }
 
-    /// 写入 bottomInset。手指正拖着列表时不动 inset（会打断跟手），只记下目标值，
-    /// 等拖动结束后补写；每次真正刷新都会清掉这个标记。
-    @discardableResult
-    private func applyBottomInset(_ target: CGFloat) -> Bool {
-        guard abs(target - appliedBottomInset) > 0.5 else {
-            // 目标已经等于当前值，之前记下的补写请求随之失效。
-            pendingBottomInset = nil
-            return false
-        }
-        if isListDragging {
-            pendingBottomInset = target
-            return false
-        }
-
-        pendingBottomInset = nil
         let wasFollowingLatestMessage = isNearBottom
-        appliedBottomInset = target
+        appliedBottomInset = targetBottomInset
         applyInsets()
         if wasFollowingLatestMessage {
             scrollToBottom(animated: false)
         }
-        onViewportInsetApplied?()
         return true
-    }
-
-    @objc private func handleListPan(_ gesture: UIPanGestureRecognizer) {
-        switch gesture.state {
-        case .ended, .cancelled, .failed:
-            // 拖动结束后隔一个渲染周期再判断：此时 isDragging 已复位，标记位若仍在就补写。
-            DispatchQueue.main.async { [weak self] in
-                self?.flushPendingBottomInsetIfNeeded()
-            }
-        default:
-            break
-        }
-    }
-
-    /// 拖动结束后的补写入口；仍在拖动就继续等下一次结束。
-    func flushPendingBottomInsetIfNeeded() {
-        guard let pending = pendingBottomInset, !isListDragging else { return }
-        applyBottomInset(pending)
     }
 
     /// 将最新消息移动到当前有效可见区域底部。

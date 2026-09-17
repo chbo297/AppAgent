@@ -730,58 +730,6 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         )
     }
 
-    /// 拖动列表期间面板高度变化不应改 inset，只记标记位；拖动结束后补写一次。
-    func testViewportInsetIsDeferredWhileListIsDragging() {
-        let listView = AppAgentChatMessageListView(frame: CGRect(x: 0, y: 0, width: 320, height: 400))
-        listView.setMessages([ChatMessage(role: .assistant, text: "hi")])
-        var appliedCount = 0
-        listView.onViewportInsetApplied = { appliedCount += 1 }
-
-        // 非拖动：立即落地。
-        var isDragging = false
-        listView.isDraggingProviderForTesting = { isDragging }
-        XCTAssertTrue(listView.updateViewport(panelHeight: 400, displayHeight: 300, bottomAvoidingInset: 0))
-        XCTAssertNil(listView.pendingBottomInset)
-        XCTAssertEqual(appliedCount, 1)
-        XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 100, accuracy: 0.5)
-
-        // 拖动中：只记标记位，inset 与回调都不动。
-        isDragging = true
-        XCTAssertFalse(listView.updateViewport(panelHeight: 400, displayHeight: 150, bottomAvoidingInset: 0))
-        XCTAssertEqual(listView.pendingBottomInset ?? -1, 250, accuracy: 0.5)
-        XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 100, accuracy: 0.5)
-        XCTAssertEqual(appliedCount, 1)
-
-        // 仍在拖动时 flush 不生效，标记位保留。
-        listView.flushPendingBottomInsetIfNeeded()
-        XCTAssertEqual(listView.pendingBottomInset ?? -1, 250, accuracy: 0.5)
-
-        // 拖动结束后补写，标记位清空。
-        isDragging = false
-        listView.flushPendingBottomInsetIfNeeded()
-        XCTAssertNil(listView.pendingBottomInset)
-        XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 250, accuracy: 0.5)
-        XCTAssertEqual(appliedCount, 2)
-    }
-
-    /// 拖动中先记下目标、随后目标又回到已应用值时，标记位应作废，不做多余补写。
-    func testPendingInsetIsDroppedWhenTargetReturnsToAppliedValue() {
-        let listView = AppAgentChatMessageListView(frame: CGRect(x: 0, y: 0, width: 320, height: 400))
-        var isDragging = true
-        listView.isDraggingProviderForTesting = { isDragging }
-
-        listView.updateViewport(panelHeight: 400, displayHeight: 200, bottomAvoidingInset: 0)
-        XCTAssertEqual(listView.pendingBottomInset ?? -1, 200, accuracy: 0.5)
-
-        // 面板又回到原位：目标与已应用值一致，pending 作废。
-        listView.updateViewport(panelHeight: 400, displayHeight: 400, bottomAvoidingInset: 0)
-        XCTAssertNil(listView.pendingBottomInset)
-
-        isDragging = false
-        listView.flushPendingBottomInsetIfNeeded()
-        XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 0, accuracy: 0.5)
-    }
-
     private func makeGeometry() -> AppAgentChatPanelGeometry? {
         AppAgentChatPanelGeometry(
             bounds: bounds,
