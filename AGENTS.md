@@ -84,13 +84,13 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 4. `.cacheControl`
 5. AISession 级 promptParts
 
-## 内置工具 (18个)
+## 内置工具
 
-**自动注册 (13个):** clarify, memory, todo, file_read, file_write, file_search, skills_list, skill_view, skill_manage, text_to_speech, delegate_task, session_search, clipboard, haptic
+**自动注册 (19个):** clarify, memory, todo, file_read, file_write, file_search, skills_list, skill_view, skill_manage, text_to_speech, delegate_task, session_search, session_manage, clipboard, haptic, app_user_defaults, app_sandbox_file, app_device_info, app_runtime_inspect（最后一个仅在 `canImport(UIKit)` 时注册默认 provider）
 
-**需宿主 app 注入 Provider (5个):** app_action, app_navigate, app_state, web_search, vision_analyze
+**需宿主 app 注入 Provider / 自行注册 (7个):** app_action, app_navigate, app_state, web_search, vision_analyze, app_hotfix, app_hook_capture
 
-通过 `AIAgentProfile.disabledBuiltInTools` 禁用指定工具。
+通过 `AIAgentProfile.disabledBuiltInTools` 禁用指定工具；工具按 `group` 归类（core / session / host-storage / host-runtime），可用 `ToolPolicy` 的 allowedGroups / excludedGroups 整组开关。
 
 ## 子系统
 
@@ -206,7 +206,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `ToolCentral.swift` | 工具注册中心 actor：共享实例 + ToolFactory；ToolPolicy 过滤；resolveTools |
 | `ToolTypes.swift` | Tool 命名空间 (Schema/SafetyLevel/Output) + ToolProtocol |
 
-### Core/Tools/ — 内置工具实现 (18 files)
+### Core/Tools/ — 内置工具实现 (22 files)
 
 | 文件 | 职责 |
 |------|------|
@@ -228,6 +228,12 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `WebSearchTool.swift` | 通过 WebSearchProvider 执行网络搜索 |
 | `VisionAnalyzeTool.swift` | 通过 VisionAnalyzeProvider 执行图片分析 |
 | `SandboxPathResolver.swift` | 安全路径解析，防止目录遍历攻击 |
+| `SessionManageTool.swift` | 会话管理 9 op：list/read/rename/delete/create/switch/set_model/models/clear |
+| `AppSandboxFileTool.swift` | 沙箱文件 list/read/write/delete（group host-storage） |
+| `AppUserDefaultsTool.swift` | UserDefaults read/write/remove/list（group host-storage） |
+| `AppDeviceInfoTool.swift` | 设备与运行环境：机型/系统/存储/内存/语言时区/电量（group host-runtime） |
+
+> `Core/Liji/Tools/` 另有 4 个：`RuntimeInspectTool`（含 view_tree/view_info/view_set/view_invoke）、`HotfixTool`、`LijiServerTool`、`HookCaptureTool`。
 
 ### Core/Tools/Protocols/ — 宿主 App Provider 协议 (3 files)
 
@@ -279,17 +285,25 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `StableSort.swift` | 按名称稳定排序工具函数 |
 | `AsyncStreamCompat.swift` | AsyncStream.makePair() iOS < 17 兼容垫片 |
 
-### UI/ — UIKit 聊天界面 (3 files)
+### UI/ — UIKit 界面（49 files，按目录看）
 
-| 文件 | 职责 |
+| 目录 / 文件 | 职责 |
 |------|------|
-| `ChatViewController.swift` | 即插即用聊天控制器：绑定 Agent+Session，处理流式显示、键盘、session 切换 |
-| `ChatMessage.swift` | UI 层消息模型 (role, text, status, toolInfo) |
-| `ChatMessageCell.swift` | 气泡样式 UITableViewCell |
+| `UI/AppAgentOverlay.swift` + `AppAgentWindow.swift` | 宿主集成入口：穿透 overlay window（`windowLevel = .normal + 1`）+ 门面 |
+| `UI/AppAgentViewController/` (8 files) | 主控制器与其分片：ChatPanel、输入栏布局/委托、键盘、session 绑定与侧栏、语音输入 |
+| `UI/AppAgentInputBar.swift` + `AppAgentInputBarFramePolicy.swift` + `AppAgentMenuButton/TextField` | 底部胶囊输入栏：布局压缩阶段、pan 手势、扩大后的输入命中区 |
+| `UI/ChatPanel/` (9 files) | BODragScroll 面板：coordinator、几何/detent、消息列表、导航栏、过程区（timeline + view） |
+| `UI/ChatMessage.swift` + `ChatMessageCell.swift` | 消息模型与气泡 cell（正文为可选中 UITextView，附过程区） |
+| `UI/SessionSidebar/` (3 files) | 会话列表侧栏 |
+| `UI/Settings/AppAgentSettingsViewController.swift` | 模型设置：探查、拖拽优先级、可用性实测 |
+| `UI/Debug/` (4 files) | 模型调用调试窗口 + 响应区域调试窗口（👻 悬浮按钮） |
+| `UI/VoiceInputOverlay/` + `AppAgentVoiceRecognitionManager.swift` | 按住说话浮层与识别 |
+| `UI/Liji/` (3 files) | liji 场景面板 |
 
-### Tests/ (2 files)
+### Tests/
 
-| 文件 | 职责 |
-|------|------|
-| `Tests/Core/AppAgentCoreTests.swift` | 62 测试用例，覆盖 JSON、消息、Provider、SSE、存储、Agent、Memory、UIState、Prompt |
-| `Tests/UI/AppAgentUITests.swift` | ChatMessage 创建 + 流式状态测试 |
+`Tests/Core/`：AppAgentCoreTests、AppAgentSettingsTests、AppAgentDebugLogTests、ModelFallbackTests、ReasoningStreamTests、SessionManageTests、HostToolsTests、HookCaptureTests、LijiTests
+
+`Tests/UI/`：AppAgentUITests、AppAgentChatPanelGeometryTests、AppAgentActivityTimelineTests、AppAgentRegionDebugTests、AppAgentInputBarFramePolicyTests、AppAgentVoiceInputCoordinatorTests、RuntimeInspectViewTests、LijiPanelUITests
+
+原生 macOS `swift test` 只跑 Core 部分；UIKit 用例需 Mac Catalyst destination。Catalyst 的 xctest 里创建 `UIWindow` 会抛 `NSApplication has not been created yet`，需要窗口的断言请改写成纯几何/纯视图层级的形式。
