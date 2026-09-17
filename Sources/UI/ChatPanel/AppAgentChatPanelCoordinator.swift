@@ -42,12 +42,11 @@ final class AppAgentChatPanelCoordinator: NSObject {
         var configuration = dragScrollView.configuration
         // 手势先滑内部列表，内部在该方向滑到底之后再把位移交给面板：内外联动、内部优先。
         configuration.handoff.mode = .innerFirstAtBoundary
-        // 橡皮筋只归外层卡片：内部列表 bounces = false（见 AppAgentChatMessageListView），
-        // 两个方向的 bounce 都指定给 panel。
+        // 顶部橡皮筋归外层卡片；底部不让 panel 继续外拉，交给内部列表自己回弹。
         configuration.bounce.allowsPanelTopBounce = true
-        configuration.bounce.allowsPanelBottomBounce = true
+        configuration.bounce.allowsPanelBottomBounce = false
         configuration.bounce.preferredTopOwner = .panel
-        configuration.bounce.preferredBottomOwner = .panel
+        configuration.bounce.preferredBottomOwner = .innerScrollView
         dragScrollView.configuration = configuration
     }
 

@@ -153,13 +153,12 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
         XCTAssertTrue(coordinator.dragScrollView.panelView === coordinator.panelView)
         XCTAssertFalse(coordinator.dragScrollView.clipsToBounds)
-        // 手势内部优先、到边界再联动外层；橡皮筋只归外层卡片，内部列表自己不 bounce。
+        // 手势内部优先、到边界再联动外层；顶部橡皮筋归卡片，底部归内部列表。
         XCTAssertEqual(coordinator.dragScrollView.configuration.handoff.mode, .innerFirstAtBoundary)
         XCTAssertTrue(coordinator.dragScrollView.configuration.bounce.allowsPanelTopBounce)
-        XCTAssertTrue(coordinator.dragScrollView.configuration.bounce.allowsPanelBottomBounce)
+        XCTAssertFalse(coordinator.dragScrollView.configuration.bounce.allowsPanelBottomBounce)
         XCTAssertEqual(coordinator.dragScrollView.configuration.bounce.preferredTopOwner, .panel)
-        XCTAssertEqual(coordinator.dragScrollView.configuration.bounce.preferredBottomOwner, .panel)
-        XCTAssertFalse(coordinator.panelView.listView.participantScrollView.bounces)
+        XCTAssertEqual(coordinator.dragScrollView.configuration.bounce.preferredBottomOwner, .innerScrollView)
         // 滑动列表与拖动面板都不联动收键盘。
         XCTAssertEqual(coordinator.panelView.listView.participantScrollView.keyboardDismissMode, .none)
         XCTAssertEqual(coordinator.dragScrollView.keyboardDismissMode, .none)
