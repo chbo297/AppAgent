@@ -738,9 +738,15 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(all.count, 1)
         XCTAssertEqual(all.first?.content, "User likes Swift")
 
-        try await storage.remove(id: entry.id)
+        let removed = try await storage.remove(id: entry.id)
+        XCTAssertTrue(removed)
         let afterRemove = try await storage.loadAll()
         XCTAssertTrue(afterRemove.isEmpty)
+
+        // Removing an id that is not there must report that nothing happened,
+        // otherwise `memory` tells the model it deleted an entry it never had.
+        let removedAgain = try await storage.remove(id: entry.id)
+        XCTAssertFalse(removedAgain)
     }
 
     func testMemoryStoreAddAndSearch() async throws {

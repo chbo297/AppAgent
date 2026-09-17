@@ -18,8 +18,9 @@ public protocol MemoryStorage: Sendable {
     /// Append a single entry to storage.
     func append(_ entry: MemoryEntry) async throws
 
-    /// Remove an entry by ID.
-    func remove(id: String) async throws
+    /// Remove an entry by ID. Returns `true` when an entry was actually removed.
+    @discardableResult
+    func remove(id: String) async throws -> Bool
 }
 
 /// In-memory storage for testing.
@@ -40,7 +41,9 @@ public actor InMemoryMemoryStorage: MemoryStorage {
         entries.append(entry)
     }
 
-    public func remove(id: String) async throws {
+    public func remove(id: String) async throws -> Bool {
+        let before = entries.count
         entries.removeAll { $0.id == id }
+        return entries.count != before
     }
 }

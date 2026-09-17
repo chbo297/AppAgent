@@ -95,7 +95,9 @@ public struct MemoryTool: ToolProtocol {
             guard let id = arguments["id"]?.stringValue, !id.isEmpty else {
                 return .error("Missing required parameter: id (for action 'remove')")
             }
-            try await memoryStore.removeLongTerm(id: id)
+            guard try await memoryStore.removeLongTerm(id: id) else {
+                return .error("No memory entry with id '\(id)'. Use action 'search' to look up ids first.")
+            }
             return .json(.object([
                 "success": .bool(true),
                 "message": .string("Memory entry '\(id)' removed")

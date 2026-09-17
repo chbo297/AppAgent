@@ -53,38 +53,48 @@ public struct RuntimeInspectTool: ToolProtocol {
         self.provider = provider
     }
 
+    /// The provider reports failures as sentinel strings. Surface those as tool
+    /// errors so the model cannot mistake "(class not found: X)" for an answer.
+    private func output(_ text: String) -> Tool.Output {
+        let failurePrefixes = [
+            "(class not found", "(no view at path", "(selector ", "(no target)",
+            "(no windows)", "(no key window)", "Invoke failed:", "Failed to set "
+        ]
+        return failurePrefixes.contains(where: { text.hasPrefix($0) }) ? .error(text) : .text(text)
+    }
+
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
         let op = arguments["op"]?.stringValue ?? ""
         let className = arguments["class"]?.stringValue
         switch op {
         case "ui_hierarchy":
-            return .text(await provider.uiHierarchy())
+            return output(await provider.uiHierarchy())
         case "view_tree":
             let depth = arguments["maxDepth"]?.numberValue.map { Int($0) } ?? 12
-            return .text(await provider.viewTree(maxDepth: depth))
+            return output(await provider.viewTree(maxDepth: depth))
         case "view_info":
             guard let path = arguments["path"]?.stringValue else { return .error("'path' is required for view_info") }
-            return .text(await provider.viewInfo(path: path))
+            return output(await provider.viewInfo(path: path))
         case "view_set":
             guard let path = arguments["path"]?.stringValue else { return .error("'path' is required for view_set") }
             guard let key = arguments["key"]?.stringValue else { return .error("'key' is required for view_set") }
             guard let value = arguments["value"]?.stringValue else { return .error("'value' is required for view_set") }
-            return .text(await provider.setViewValue(path: path, key: key, value: value))
+            return output(await provider.setViewValue(path: path, key: key, value: value))
         case "view_invoke":
             guard let path = arguments["path"]?.stringValue else { return .error("'path' is required for view_invoke") }
             guard let selector = arguments["selector"]?.stringValue else { return .error("'selector' is required for view_invoke") }
             let argsJSON = arguments["argumentsJSON"]?.stringValue ?? "[]"
-            return .text(await provider.invokeOnView(path: path, selector: selector, argumentsJSON: argsJSON))
+            return output(await provider.invokeOnView(path: path, selector: selector, argumentsJSON: argsJSON))
 
         case "class_list":
             let list = await provider.classList(matching: arguments["filter"]?.stringValue)
             return .text(list.joined(separator: "\n"))
         case "method_list":
             guard let className else { return .error("'class' is required for method_list") }
-            return .text((await provider.methodList(ofClass: className)).joined(separator: "\n"))
+            return output((await provider.methodList(ofClass: className)).joined(separator: "\n"))
         case "property_list":
             guard let className else { return .error("'class' is required for property_list") }
-            return .text((await provider.propertyList(ofClass: className)).joined(separator: "\n"))
+            return output((await provider.propertyList(ofClass: className)).joined(separator: "\n"))
         case "property_value":
             guard let keyPath = arguments["keyPath"]?.stringValue else {
                 return .error("'keyPath' is required for property_value")
@@ -98,13 +108,13 @@ public struct RuntimeInspectTool: ToolProtocol {
             guard let value = arguments["value"]?.stringValue else {
                 return .error("'value' is required for property_set")
             }
-            return .text(await provider.setPropertyValue(keyPath: keyPath, value: value, ofClass: className))
+            return output(await provider.setPropertyValue(keyPath: keyPath, value: value, ofClass: className))
         case "invoke":
             guard let className, let selector = arguments["selector"]?.stringValue else {
                 return .error("'class' and 'selector' are required for invoke")
             }
             let argsJSON = arguments["argumentsJSON"]?.stringValue ?? "[]"
-            return .text(await provider.invoke(className: className, selector: selector, argumentsJSON: argsJSON))
+            return output(await provider.invoke(className: className, selector: selector, argumentsJSON: argsJSON))
         default:
             return .error("unknown op: \(op)")
         }

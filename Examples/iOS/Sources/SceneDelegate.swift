@@ -23,22 +23,21 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         Logger.minimumLevel = .debug
 
         // Headless capability self-check for simulator/CI: launch with
-        // `-run-selfcheck` to run every host-introspection + session tool once
-        // and print the report to the log, then skip normal chat wiring. Works
-        // without any provider config (tools execute without the model).
-        if ProcessInfo.processInfo.arguments.contains("-run-selfcheck") {
-            Task { @MainActor in
-                let session = await CapabilitySelfCheck.ephemeralSession()
-                let report = await CapabilitySelfCheck.run(session: session)
-                NSLog("APPAGENT_SELFCHECK_BEGIN\n%@\nAPPAGENT_SELFCHECK_END", report)
-            }
-        }
+        // `-run-selfcheck` to run every tool once, write the report to
+        // Documents/selfcheck-report.txt and emit it to the log. It runs *after*
+        // the overlay is mounted (see the end of the setup task below) so the
+        // view-hierarchy dump covers the SDK's own overlay window too, and the
+        // "no API key" alert is suppressed so it does not pollute that dump.
+        // Works without any provider config — tools execute without the model.
+        let isSelfCheck = ProcessInfo.processInfo.arguments.contains("-run-selfcheck")
 
         // 1) Host app's own window (any normal iOS app would do this).
         let host = UIWindow(windowScene: windowScene)
-        host.rootViewController = HostTabBarController()
+        let tabs = HostTabBarController()
+        host.rootViewController = tabs
         host.makeKeyAndVisible()
         self.hostWindow = host
+        DemoAgentHolder.hostTabBarController = tabs
 
         // 2) SDK chat UI – mounted in its own independent overlay window.
         Task { @MainActor in
@@ -47,7 +46,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             let settings = AppAgentSettingsStore.loadOrDefault()
             await ModelProviderCentral.`default`.register(settings: settings)
 
-            if !settings.hasUsableAPIKey, let presenter = host.rootViewController {
+            if !settings.hasUsableAPIKey, !isSelfCheck, let presenter = host.rootViewController {
                 showAlert(
                     on: presenter,
                     title: "尚未配置 API Key",
@@ -96,6 +95,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 target: overlay.viewController
             )
             #endif
+
+            if isSelfCheck {
+                let session = await CapabilitySelfCheck.ephemeralSession()
+                _ = await CapabilitySelfCheck.run(session: session)
+            }
         }
     }
 

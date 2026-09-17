@@ -21,14 +21,25 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     public func uiHierarchy() async -> String {
         await MainActor.run {
-            guard let window = Self.keyWindow() else { return "(no key window)" }
-            var out = "Window: \(type(of: window)) frame=\(window.frame)\n"
-            if let root = window.rootViewController {
-                out += "RootViewController:\n"
-                Self.describe(viewController: root, indent: 1, into: &out)
+            let windows = Self.allWindows()
+            guard !windows.isEmpty else { return "(no windows)" }
+            // 一个 app 常常有多个 window（本 SDK 的对话 UI 就挂在独立 overlay window
+            // 上），只看 keyWindow 会整层漏掉，所以按 windowLevel 全量列出。
+            var out = ""
+            for window in windows {
+                out += "Window: \(type(of: window)) frame=\(window.frame)"
+                out += " level=\(window.windowLevel.rawValue)"
+                out += window.isKeyWindow ? " [key]" : ""
+                out += window.isHidden ? " [hidden]" : ""
+                out += "\n"
+                if let root = window.rootViewController {
+                    out += "RootViewController:\n"
+                    Self.describe(viewController: root, indent: 1, into: &out)
+                }
+                out += "View tree:\n"
+                Self.describe(view: window, indent: 0, into: &out)
+                out += "\n"
             }
-            out += "\nView tree:\n"
-            Self.describe(view: window, indent: 0, into: &out)
             return out
         }
     }
@@ -58,7 +69,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     // MARK: - Methods
 
     public func methodList(ofClass className: String) async -> [String] {
-        guard let cls: AnyClass = NSClassFromString(className) else { return ["(class not found: \(className))"] }
+        guard let cls = Self.resolveClass(className) else { return ["(class not found: \(className))"] }
         var result: [String] = []
         result.append(contentsOf: Self.methods(of: cls, isClassMethod: false))
         if let meta: AnyClass = object_getClass(cls) {
@@ -70,7 +81,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     // MARK: - Properties / ivars
 
     public func propertyList(ofClass className: String) async -> [String] {
-        guard let cls: AnyClass = NSClassFromString(className) else { return ["(class not found: \(className))"] }
+        guard let cls = Self.resolveClass(className) else { return ["(class not found: \(className))"] }
         var out: [String] = []
         var pCount: UInt32 = 0
         if let props = class_copyPropertyList(cls, &pCount) {
@@ -140,7 +151,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     public func invoke(className: String, selector: String, argumentsJSON: String) async -> String {
         await MainActor.run {
-            guard NSClassFromString(className) != nil else {
+            guard let cls = Self.resolveClass(className) else {
                 return "(class not found: \(className))"
             }
             let sel = NSSelectorFromString(selector)
@@ -148,7 +159,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             let target: NSObject?
             if let top = Self.kvcTarget(className: className) as? NSObject, top.responds(to: sel) {
                 target = top
-            } else if let clsObj = NSClassFromString(className) as AnyObject as? NSObject, clsObj.responds(to: sel) {
+            } else if let clsObj = cls as AnyObject as? NSObject, clsObj.responds(to: sel) {
                 target = clsObj
             } else {
                 return "(selector \(selector) not found on \(className) instance/class)"
@@ -213,9 +224,36 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     // MARK: - Helpers
 
     static func keyWindow() -> UIWindow? {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let windows = scenes.flatMap { $0.windows }
+        let windows = allWindows()
         return windows.first { $0.isKeyWindow } ?? windows.first
+    }
+
+    /// Every window across every connected window scene, ordered back-to-front.
+    static func allWindows() -> [UIWindow] {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+    }
+
+    /// Resolve a class by name, tolerating Swift's module-qualified runtime names.
+    ///
+    /// `NSClassFromString("HostTabBarController")` fails for Swift classes because
+    /// their Objective-C name is `"<Module>.HostTabBarController"`. The agent only
+    /// ever knows the short name, so fall back to scanning the class list for a
+    /// unique `*.name` match.
+    static func resolveClass(_ name: String) -> AnyClass? {
+        if let cls: AnyClass = NSClassFromString(name) { return cls }
+        let suffix = "." + name
+        let count = objc_getClassList(nil, 0)
+        guard count > 0 else { return nil }
+        let buffer = UnsafeMutablePointer<AnyClass>.allocate(capacity: Int(count))
+        defer { buffer.deallocate() }
+        let realCount = objc_getClassList(AutoreleasingUnsafeMutablePointer<AnyClass>(buffer), count)
+        for i in 0..<Int(realCount) {
+            if NSStringFromClass(buffer[i]).hasSuffix(suffix) { return buffer[i] }
+        }
+        return nil
     }
 
     static func topViewController() -> UIViewController? {
@@ -232,8 +270,9 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     /// KVC 目标：指定类名且栈顶页面正是该类实例则用之，否则回落到类对象；未指定类名则用栈顶页面。
     static func kvcTarget(className: String?) -> AnyObject? {
         guard let className, !className.isEmpty else { return topViewController() }
-        if let top = topViewController(), NSStringFromClass(type(of: top)) == className { return top }
-        return NSClassFromString(className) as AnyObject?
+        guard let cls = resolveClass(className) else { return nil }
+        if let top = topViewController(), type(of: top) == cls { return top }
+        return cls as AnyObject
     }
 
     static func boxedValue(from string: String) -> Any {

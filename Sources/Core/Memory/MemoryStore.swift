@@ -51,10 +51,14 @@ public actor MemoryStore {
     }
 
     /// Remove a long-term memory entry by ID.
-    public func removeLongTerm(id: String) async throws {
-        guard config.longTermEnabled else { return }
-        try await storage.remove(id: id)
-        cachedEntries = nil
+    /// Returns `false` when long-term memory is off or no entry matched, so the
+    /// caller never reports a deletion that did not happen.
+    @discardableResult
+    public func removeLongTerm(id: String) async throws -> Bool {
+        guard config.longTermEnabled else { return false }
+        let removed = try await storage.remove(id: id)
+        if removed { cachedEntries = nil }
+        return removed
     }
 
     // MARK: - Hot Memory

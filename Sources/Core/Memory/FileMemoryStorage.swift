@@ -52,9 +52,12 @@ public actor FileMemoryStorage: MemoryStorage {
         try await save(entries)
     }
 
-    public func remove(id: String) async throws {
+    public func remove(id: String) async throws -> Bool {
         var entries = try await loadAll()
+        let before = entries.count
         entries.removeAll { $0.id == id }
+        guard entries.count != before else { return false }
         try await save(entries)
+        return true
     }
 }

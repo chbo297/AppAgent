@@ -10,12 +10,29 @@ iOS/macOS AIAgent SDK，为应用提供嵌入式 AI AIAgent 能力。Core 零第
 
 ```bash
 swift build
-swift test        # 原生 macOS Core：68 tests
+swift test        # 原生 macOS Core：133 tests
 xcodebuild -project Examples/iOS/AppAgentDemo.xcodeproj -scheme AppAgentDemo -configuration Debug -destination 'generic/platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO build
-xcodebuild -scheme AppAgent -configuration Debug -destination 'platform=macOS,variant=Mac Catalyst,name=My Mac' test  # Core + UIKit：102 tests
+xcodebuild -scheme AppAgent -configuration Debug -destination 'platform=macOS,variant=Mac Catalyst,name=My Mac' test  # Core + UIKit
+Scripts/simulator-selfcheck.sh   # iOS 模拟器上把全部工具跑一遍（见下）
 ```
 
 Demo App 在 `Examples/iOS/AppAgentDemo.xcodeproj`，支持 iOS 和 Mac Catalyst；需要先复制 `Resources/config.json.example` 为 `Resources/config.json` 并填入配置。
+
+## 模拟器能力自检（工具回归的主力手段）
+
+`Examples/iOS/Sources/CapabilitySelfCheck.swift` 在真机/模拟器运行时里**直连每个工具的 `execute`**（不经过 LLM），逐项判定通过与否。单元测试拿不到 UIKit 运行时，这里能，所以验证工具改动优先走它。
+
+```bash
+Scripts/simulator-selfcheck.sh                 # 自动挑一个已启动的 iPhone 模拟器
+Scripts/simulator-selfcheck.sh <device-udid>
+SKIP_BUILD=1 Scripts/simulator-selfcheck.sh    # 复用上次构建
+```
+
+- 脚本每一步都套了 `gtimeout`（需 `brew install coreutils`）：卡住会直接失败并打印最近日志，不会挂住终端。app 内部每个检查项另有 8s 预算，超时记为失败后继续跑完剩余项。
+- 产物：`Documents/selfcheck-report.txt`（逐项 ✓/✗ + `total=/ok=/fail=` 汇总，脚本拷到 `/tmp/selfcheck-report.txt`）、`Documents/selfcheck-ui-hierarchy.txt`（未截断的全窗口 `ui_hierarchy` + `view_tree`，看布局/样式用）。脚本以 `fail=0` 决定退出码。
+- 自检在 overlay 挂载**之后**才跑，所以层级里能看到宿主 window + `AppAgentWindow` + `AppAgentRegionDebugWindow` 三层；`-run-selfcheck` 同时抑制「尚未配置 API Key」弹窗，避免污染 dump。
+- 首页「能力自检」按钮在 app 内弹出同一份报告。
+- 加新工具时**一并在 `CapabilitySelfCheck` 加一条检查**，用三种期望之一：`.ok`（必须成功）、`.errorContains(...)`（必须以某个错误拒绝）、`.completes`（只要求不挂死，用于依赖真实模型或宿主 UI 的项）。
 
 ## 架构概览
 
