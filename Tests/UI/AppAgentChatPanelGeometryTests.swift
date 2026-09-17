@@ -10,12 +10,15 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     private let safeAreaInsets = UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)
     private let inputBarExpandedFrame = CGRect(x: 12, y: 762, width: 369, height: 56)
 
-    func testViewControllerUsesFixedReplyByDefaultDuringUIDebugging() {
-        XCTAssertTrue(AppAgentViewController().usesFixedDebugReply)
+    /// 生产默认走真实 session → agent → 模型（77ec512 起关闭了固定假回复）。
+    func testViewControllerUsesRealSessionByDefault() {
+        XCTAssertFalse(AppAgentViewController().usesFixedDebugReply)
     }
 
-    func testFixedDebugReplyIsAppendedImmediately() {
+    /// 固定假回复只在宿主显式打开时生效（脱离模型联调 UI 用）。
+    func testFixedDebugReplyIsAppendedImmediatelyWhenExplicitlyEnabled() {
         let viewController = AppAgentViewController()
+        viewController.usesFixedDebugReply = true
         viewController.loadViewIfNeeded()
 
         viewController.dispatchOutgoingMessage(text: "测试消息")
@@ -27,6 +30,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(viewController.chatMessages[1].text, "收到了")
         XCTAssertEqual(viewController.chatMessages[1].status, .complete)
     }
+
 
     func testRegularGeometryProducesExpectedPanelAndDetents() throws {
         let geometry = try XCTUnwrap(makeGeometry())
@@ -698,6 +702,25 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(viewController.sessionSidebarView.sessionListView.items.count, 4)
         XCTAssertEqual(viewController.sessionSidebarView.sessionListView.frame.width, bounds.width * 0.5, accuracy: 0.001)
         viewController.hideSessionSidebar(animated: false)
+    }
+
+    /// 容器「命中自己就穿透」现在由 BOUIKit 的 bo_skipsSelfInHitTest 提供，
+    /// 这条用例同时验证该依赖是否接线成功。
+    func testContainerPassesSelfHitsThroughButKeepsSubviews() {
+        let container = AppAgentChatPanelContainerView(
+            frame: CGRect(x: 0, y: 0, width: 300, height: 200)
+        )
+        let child = UIView(frame: CGRect(x: 100, y: 100, width: 80, height: 40))
+        container.installContentView(child)
+
+        XCTAssertNil(
+            container.hitTest(CGPoint(x: 10, y: 10), with: nil),
+            "空白区域应穿透给宿主 app"
+        )
+        XCTAssertTrue(
+            container.hitTest(CGPoint(x: 140, y: 120), with: nil) === child,
+            "子视图仍要能接住触摸"
+        )
     }
 
     private func makeGeometry() -> AppAgentChatPanelGeometry? {

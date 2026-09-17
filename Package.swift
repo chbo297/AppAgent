@@ -17,6 +17,10 @@ let package = Package(
         .package(
             url: "https://github.com/chbo297/BODragScroll.git",
             from: "2.0.0"
+        ),
+        .package(
+            url: "https://github.com/chbo297/BOUIKit.git",
+            from: "0.1.1"
         )
     ],
     targets: [
@@ -32,7 +36,9 @@ let package = Package(
                     name: "BODragScroll",
                     package: "BODragScroll",
                     condition: .when(platforms: [.iOS, .macCatalyst])
-                )
+                ),
+                // UIKit hit-testing 便利层；在 macOS 上编译为空模块，无需平台条件。
+                .product(name: "BOUIKit", package: "BOUIKit")
             ],
             path: "Sources"
         ),

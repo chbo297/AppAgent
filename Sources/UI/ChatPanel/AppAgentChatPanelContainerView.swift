@@ -4,6 +4,7 @@
 //
 
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 
 /// ChatPanel 外层容器的一次纯布局结果。
@@ -125,6 +126,13 @@ final class AppAgentChatPanelContainerView: UIView {
         }
     }
 
+    /// 事件透明容器：命中落在容器自身（透出宿主 app 内容的空白区域）时穿透到下层，
+    /// 命中任意子视图（ChatPanel 内容、可交互控件）时保留子视图的事件响应。
+    /// 由 BOUIKit 的 `bo_skipsSelfInHitTest` 提供，见 setup()。
+    func installHitTestPassthrough() {
+        bo_skipsSelfInHitTest = true
+    }
+
     func apply(_ layout: AppAgentChatPanelContainerLayout, animation: AppAgentInputBarFrameAnimation) {
         let contentTargetFrame = layout.dragScrollFrame
         let targetFrameChanged = !frame.isApproximatelyEqual(to: layout.containerFrame)
@@ -168,6 +176,7 @@ final class AppAgentChatPanelContainerView: UIView {
         backgroundColor = .clear
         clipsToBounds = false
         isAccessibilityElement = false
+        installHitTestPassthrough()
     }
 
     private func applyAlpha(_ targetAlpha: CGFloat, animation: AppAgentInputBarFrameAnimation) {

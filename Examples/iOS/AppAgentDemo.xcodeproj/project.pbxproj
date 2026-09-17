@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A1B2C3D4E5F6A7B800000081 /* BODragScroll in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D4E5F6A7B800000083 /* BODragScroll */; };
+		A1B2C3D4E5F6A7B800000084 /* BOUIKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D4E5F6A7B800000086 /* BOUIKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -45,6 +46,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1B2C3D4E5F6A7B800000081 /* BODragScroll in Frameworks */,
+				A1B2C3D4E5F6A7B800000084 /* BOUIKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -94,6 +96,7 @@
 			name = AppAgentDemo;
 			packageProductDependencies = (
 				A1B2C3D4E5F6A7B800000083 /* BODragScroll */,
+				A1B2C3D4E5F6A7B800000086 /* BOUIKit */,
 			);
 			productName = AppAgentDemo;
 			productReference = A1B2C3D4E5F6A7B800000003 /* AppAgentDemo.app */;
@@ -120,6 +123,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A1B2C3D4E5F6A7B800000082 /* XCLocalSwiftPackageReference "../../../BODragScroll" */,
+				A1B2C3D4E5F6A7B800000085 /* XCRemoteSwiftPackageReference "BOUIKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1B2C3D4E5F6A7B800000011 /* Products */;
@@ -161,6 +165,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 8ED2N2GBR7;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../ObjCSupport/include";
 				"INFOPLIST_KEY_LSApplicationCategoryType[sdk=macosx*]" = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AppAgentDemo needs microphone access to record voice input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "AppAgentDemo needs speech recognition access to transcribe voice input.";
@@ -169,6 +174,7 @@
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -181,7 +187,6 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Sources/AppAgentDemo-Bridging-Header.h";
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../ObjCSupport/include";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -196,6 +201,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 8ED2N2GBR7;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../ObjCSupport/include";
 				"INFOPLIST_KEY_LSApplicationCategoryType[sdk=macosx*]" = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AppAgentDemo needs microphone access to record voice input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "AppAgentDemo needs speech recognition access to transcribe voice input.";
@@ -204,6 +210,7 @@
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -216,7 +223,6 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Sources/AppAgentDemo-Bridging-Header.h";
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../ObjCSupport/include";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -371,10 +377,26 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		A1B2C3D4E5F6A7B800000085 /* XCRemoteSwiftPackageReference "BOUIKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/chbo297/BOUIKit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.1.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		A1B2C3D4E5F6A7B800000083 /* BODragScroll */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = BODragScroll;
+		};
+		A1B2C3D4E5F6A7B800000086 /* BOUIKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B2C3D4E5F6A7B800000085 /* XCRemoteSwiftPackageReference "BOUIKit" */;
+			productName = BOUIKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

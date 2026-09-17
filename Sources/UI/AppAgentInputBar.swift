@@ -437,6 +437,39 @@ public final class AppAgentInputBar: UIView {
 
     // MARK: - Layout
 
+    /// 输入区的实际命中区域：横向仍是输入区本身，竖直方向扩到整条 bar 的白色背景那么高。
+    /// 「点击输入框弹键盘」和「上滑唤起键盘」都以此为准，因此 bar 内输入区上下的空白
+    /// 也能命中，不用精确戳中 36pt 高的胶囊。
+    /// 输入区隐藏或随 bar 收窄淡出时返回 `.null`，表示当前没有可命中的输入区。
+    public var extendedInputAreaHitRect: CGRect {
+        guard !inputAreaContainer.isHidden,
+              inputAreaContainer.alpha > 0.01,
+              inputAreaContainer.frame.width > 0,
+              bounds.height > 0 else { return .null }
+        return CGRect(
+            x: inputAreaContainer.frame.minX,
+            y: bounds.minY,
+            width: inputAreaContainer.frame.width,
+            height: bounds.height
+        )
+    }
+
+    /// 把落在扩大后输入区、但原本只命中 bar 背景的触点，转交给输入区内的真实控件。
+    public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard let hit = super.hitTest(point, with: event) else { return nil }
+        // 只接管「打在 bar 白色背景上」的触点，menuButton / plusButton / inputSourceButton
+        // 等控件的命中一律原样返回。
+        guard hit === self, isUserInteractionEnabled else { return hit }
+
+        let extended = extendedInputAreaHitRect
+        guard !extended.isNull, extended.contains(point) else { return hit }
+
+        // 触点在输入区上下的空白里，先把 y 夹进输入区自身 bounds 再做一次命中。
+        var local = convert(point, to: inputAreaContainer)
+        local.y = min(max(0, local.y), max(0, inputAreaContainer.bounds.height - 0.5))
+        return inputAreaContainer.hitTest(local, with: event) ?? hit
+    }
+
     public override func layoutSubviews() {
         super.layoutSubviews()
 
@@ -1153,7 +1186,9 @@ extension AppAgentInputBar: UIGestureRecognizerDelegate {
             return .menuButton
         }
 
-        if inputAreaContainer.frame.contains(point) {
+        // 与点击命中保持一致：上滑唤起键盘的起始区域同样扩到整条 bar 那么高。
+        let extended = extendedInputAreaHitRect
+        if !extended.isNull, extended.contains(point) {
             return .inputArea
         }
 

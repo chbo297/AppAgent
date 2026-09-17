@@ -128,6 +128,13 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 - 两个仓库的改动、测试、提交和版本发布必须分别管理；不要把 BODragScroll 源码混入 AppAgent 提交。若 AppAgent 依赖尚未发布的 BODragScroll API，先提交并发布/打标 BODragScroll，再更新 AppAgent 的 SwiftPM/CocoaPods 版本声明并发布 AppAgent。
 - AppAgent 正式发布必须通过 SwiftPM/CocoaPods 引入 BODragScroll，不能依赖本机兄弟目录；禁止提交 `Packages/` 中的本地符号链接或其他机器相关路径。
 
+## BOUIKit（UIView hit-testing 便利层）
+
+- 依赖 [`chbo297/BOUIKit`](https://github.com/chbo297/BOUIKit)（SwiftPM `from: "0.1.1"`，源码仓在同级 `../BOUIKit`），提供 `bo_hitAreaOutsets`、`bo_skipsSelfInHitTest`、`bo_pointInsideJudge`、`bo_hitTestHook`。同一个包也被 BWTimeGallery 使用。
+- 它通过 `method_exchangeImplementations` 换掉 `UIView.point(inside:with:)` 与 `hitTest(_:with:)`，首次设置有效配置时惰性安装，作用域是整个进程；集成文档需向宿主 app 说明这一点。
+- 在 macOS 上编译为空模块，因此 AppAgent target 无条件依赖即可；`Sources/UI` 里使用时照常放在 `#if canImport(UIKit)` 内。
+- 已接入点：`AppAgentChatPanelContainerView` 的「命中自己就穿透」用 `bo_skipsSelfInHitTest`。其余手写 hit-testing（`AppAgentWindow`、`AppAgentInputBar` 输入区扩大、语音面板路径命中、调试窗口）暂未迁移。
+
 ## 文件导航快速索引
 
 "我要做 X 就去看 Y"：

@@ -37,6 +37,9 @@ final class AppAgentChatPanelCoordinator: NSObject {
         dragScrollView.eventDelegate = self
 
         var configuration = dragScrollView.configuration
+        // 内部优先：手指按在消息列表上时只滚列表，面板手势不参与；只有按在非滚动区域
+        // （导航栏、输入栏背景、空白处）才拖动面板。
+        configuration.handoff.mode = .innerFirst
         // panel 到达最小展示高度后不再继续向更小方向产生 bounce。
         configuration.bounce.allowsPanelTopBounce = false
         // panel 到达顶部安全区下沿后不再继续向更大方向产生 bounce。
