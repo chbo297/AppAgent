@@ -28,11 +28,14 @@ public final class AISession: @unchecked Sendable {
     /// Also carries a weak back-reference to the source AIAgent via `agentMask.agent`.
     public let agentMask: AIAgentMask?
 
-    /// The model provider for this session. Set at creation time.
-    public let provider: (any ModelProvider)?
+    /// The model provider for this session. Resolved at creation time; can be re-pointed at
+    /// runtime via `switchModel(...)`（切换只影响随后发起的 run）。
+    @Locked
+    public private(set) var provider: (any ModelProvider)?
 
-    /// The model ID for this session (e.g., "Claude Opus 4.6"). Set at creation time.
-    public let modelId: String?
+    /// The model ID for this session (e.g., "Claude Opus 4.6").
+    @Locked
+    public private(set) var modelId: String?
 
     @Locked
     public private(set) var installedTools: [String: any ToolProtocol]
@@ -95,8 +98,8 @@ public final class AISession: @unchecked Sendable {
         self._title = TrackedLocked(wrappedValue: title, isEqual: ==)
         self._messages = TrackedLocked(wrappedValue: messages)
         self.agentMask = agentMask
-        self.provider = provider
-        self.modelId = modelId
+        self._provider = Locked(wrappedValue: provider)
+        self._modelId = Locked(wrappedValue: modelId)
         self._installedTools = Locked(wrappedValue: installedTools)
         self._toolPolicy = Locked(wrappedValue: nil)
         self.uiState = SessionUIState()
@@ -206,6 +209,32 @@ public final class AISession: @unchecked Sendable {
     public func clearHistory() {
         messages = []
         updatedAt = Date()
+    }
+
+    /// 切换本会话使用的模型（`"providerName/modelId"` 引用，由 providerCentral 解析）。
+    /// 只影响之后发起的 run；正在进行的 run 继续用原模型。
+    /// - Returns: 解析并切换成功返回 true；引用无法解析返回 false。
+    @discardableResult
+    public func switchModel(reference: String) async -> Bool {
+        guard let central = agentMask?.agent?.providerCentral,
+              let resolved = await central.resolve(modelReference: reference) else {
+            Logger.warning("AISession", "switchModel: 无法解析模型引用 \(reference)")
+            return false
+        }
+        provider = resolved.provider
+        modelId = resolved.modelId
+        updatedAt = Date()
+        uiState.set(SessionUIState.activeModelKey, value: reference)
+        Logger.info("AISession", "switchModel: sessionId=\(id) → \(reference)")
+        AppAgentDebugLog.shared.record(
+            .info,
+            message: "会话切换模型 → \(reference)",
+            sessionId: id,
+            provider: resolved.provider.name,
+            apiProtocol: resolved.provider.apiProtocol.rawValue,
+            modelId: resolved.modelId
+        )
+        return true
     }
 
     /// Cancel the current agent run.

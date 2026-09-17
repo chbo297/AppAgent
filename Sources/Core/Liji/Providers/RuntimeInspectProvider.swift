@@ -24,11 +24,39 @@ public protocol RuntimeInspectProvider: Sendable {
     func setPropertyValue(keyPath: String, value: String, ofClass className: String?) async -> String
     /// 反射调用：className 上的 selector，参数以 JSON 数组字符串传入，返回结果描述。
     func invoke(className: String, selector: String, argumentsJSON: String) async -> String
+
+    // MARK: 按路径寻址单个视图（"0/2/1"，root 为 keyWindow）
+
+    /// 带可寻址路径的视图树，便于后续按路径读改单个视图。
+    func viewTree(maxDepth: Int) async -> String
+    /// 某路径视图的详细信息（类名、frame、层级关系、常用属性）。
+    func viewInfo(path: String) async -> String
+    /// 改某路径视图：frame/bounds/center/alpha/hidden/backgroundColor/text/cornerRadius 走类型化解析，
+    /// 其它 key 走 KVC。返回结果描述。
+    func setViewValue(path: String, key: String, value: String) async -> String
+    /// 对某路径视图反射调用选择器（removeFromSuperview / setNeedsLayout 等结构性修改）。
+    func invokeOnView(path: String, selector: String, argumentsJSON: String) async -> String
 }
 
 public extension RuntimeInspectProvider {
     /// 默认不支持 KVC 写，需具体 provider 覆盖实现。
     func setPropertyValue(keyPath: String, value: String, ofClass className: String?) async -> String {
         "setPropertyValue is not supported by this runtime provider."
+    }
+
+    func viewTree(maxDepth: Int) async -> String {
+        await uiHierarchy()
+    }
+
+    func viewInfo(path: String) async -> String {
+        "viewInfo is not supported by this runtime provider."
+    }
+
+    func setViewValue(path: String, key: String, value: String) async -> String {
+        "setViewValue is not supported by this runtime provider."
+    }
+
+    func invokeOnView(path: String, selector: String, argumentsJSON: String) async -> String {
+        "invokeOnView is not supported by this runtime provider."
     }
 }

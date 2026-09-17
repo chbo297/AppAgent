@@ -223,7 +223,13 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
             ? String(effectiveBaseURL.dropLast())
             : effectiveBaseURL
 
-        guard let url = URL(string: "\(base)/v1/messages") else {
+        // Gateways (OneAPI etc.) are usually configured with a base that already ends in /v1 —
+        // don't append a second one.
+        let endpoint = base.hasSuffix("/v1/messages")
+            ? base
+            : (base.hasSuffix("/v1") ? "\(base)/messages" : "\(base)/v1/messages")
+
+        guard let url = URL(string: endpoint) else {
             throw ModelError.invalidURL
         }
 

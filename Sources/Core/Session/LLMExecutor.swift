@@ -97,6 +97,7 @@ public final class LLMExecutor: @unchecked Sendable {
 
             // Reset UI state before validation so early errors surface consistently.
             session.uiState.resetStreamingText()
+            session.uiState.resetReasoningText()
             session.uiState.setError(nil)
             session.uiState.setStreaming(true)
 
@@ -287,7 +288,30 @@ public final class LLMExecutor: @unchecked Sendable {
         return StableSort.byName(filtered) { $0.name }
     }
 
+    // MARK: - Model Fallback
+
+    /// 区分「provider + 模型」的稳定键。注意 `AnthropicProvider.name` 恒为 "anthropic"，
+    /// 同一接口下的 OpenAI / Anthropic 两个 provider 只能靠协议与 baseURL 区分。
+    private static func modelKey(_ provider: any ModelProvider, _ modelId: String) -> String {
+        "\(provider.name)|\(provider.apiProtocol.rawValue)|\(provider.baseURL)|\(modelId)"
+    }
+
+    /// 按 modelPolicy（primary + fallbacks）顺序取第一个尚未尝试过的可解析模型。
+    private func resolveNextModel(
+        agent: AIAgent,
+        policyRefs: [String],
+        tried: Set<String>
+    ) async -> (ref: String, provider: any ModelProvider, modelId: String)? {
+        for ref in policyRefs {
+            guard let resolved = await agent.providerCentral.resolve(modelReference: ref) else { continue }
+            guard !tried.contains(Self.modelKey(resolved.provider, resolved.modelId)) else { continue }
+            return (ref, resolved.provider, resolved.modelId)
+        }
+        return nil
+    }
+
     // MARK: - Run Loop
+
 
     private func runLoop(
         runID: UUID,
@@ -303,6 +327,13 @@ public final class LLMExecutor: @unchecked Sendable {
         var iteration = 0
         var retryCount = 0
         var loopDetector = ToolLoopDetector()
+
+        // 运行期模型回退：当前模型不可用（或重试用尽）时，按 modelPolicy 的顺序
+        // 换下一个还没试过的模型，继续同一轮对话，不打断用户。
+        var provider = provider
+        var modelId = modelId
+        let policyRefs: [String] = agent.modelPolicy.map { [$0.primary] + $0.fallbacks } ?? []
+        var triedModelKeys: Set<String> = [Self.modelKey(provider, modelId)]
 
         func finishWithError(_ error: Error, messages: [AIAgentMessage]) {
             if self.isActiveRun(runID) {
@@ -381,6 +412,16 @@ public final class LLMExecutor: @unchecked Sendable {
                 modelId: modelId
             )
             Logger.debug("LLMExecutor", "streamCompletion requested: provider=\(provider.name), model=\(modelId), messageCount=\(currentMessages.count), toolCount=\(toolSegments.count)")
+            AppAgentDebugLog.shared.record(
+                .request,
+                message: "发起模型请求（消息 \(currentMessages.count) 条，工具 \(toolSegments.count) 个）",
+                sessionId: session.id,
+                provider: provider.name,
+                apiProtocol: provider.apiProtocol.rawValue,
+                modelId: modelId,
+                iteration: iteration
+            )
+            let streamStart = Date()
 
             // Consume the stream
             var assistantText = ""
@@ -398,6 +439,13 @@ public final class LLMExecutor: @unchecked Sendable {
                             session.uiState.appendStreamingText(delta)
                         }
 
+                    case .reasoningDelta(let delta):
+                        // 思考过程只用于展示：进 uiState 与事件流，不写入消息历史。
+                        continuation.yield(.reasoningContent(delta))
+                        if self.isActiveRun(runID) {
+                            session.uiState.appendReasoningText(delta)
+                        }
+
                     case .toolCall(let call):
                         toolCalls.append(call)
                         continuation.yield(.toolCallStarted(call))
@@ -410,6 +458,16 @@ public final class LLMExecutor: @unchecked Sendable {
                     }
                 }
                 Logger.info("LLMExecutor", "streamConsumed: textLength=\(assistantText.count), toolCalls=\(toolCalls.count)[\(toolCalls.map(\.name).joined(separator: ", "))], stopReason=\(stopReason)")
+                AppAgentDebugLog.shared.record(
+                    .success,
+                    message: "模型返回完成（文本 \(assistantText.count) 字，工具调用 \(toolCalls.count) 次，stop=\(stopReason)）",
+                    sessionId: session.id,
+                    provider: provider.name,
+                    apiProtocol: provider.apiProtocol.rawValue,
+                    modelId: modelId,
+                    iteration: iteration,
+                    durationMs: Int(Date().timeIntervalSince(streamStart) * 1000)
+                )
                 retryCount = 0
             } catch is CancellationError {
                 let error = AIAgentError.cancelled
@@ -419,16 +477,63 @@ public final class LLMExecutor: @unchecked Sendable {
             } catch {
                 let classified = ErrorClassifier.classify(error)
                 Logger.error("LLMExecutor", "streamError: iteration=\(iteration), reason=\(classified.reason), retryable=\(classified.retryable), retryCount=\(retryCount)/\(retryPolicy.maxRetries), error=\(error)")
+                AppAgentDebugLog.shared.record(
+                    .failure,
+                    message: classified.message,
+                    sessionId: session.id,
+                    provider: provider.name,
+                    apiProtocol: provider.apiProtocol.rawValue,
+                    modelId: modelId,
+                    iteration: iteration,
+                    reason: classified.reason.rawValue,
+                    statusCode: classified.statusCode,
+                    durationMs: Int(Date().timeIntervalSince(streamStart) * 1000)
+                )
 
                 if classified.retryable && retryCount < retryPolicy.maxRetries {
                     retryCount += 1
                     let delay = retryPolicy.delay(for: retryCount - 1)
                     Logger.info("LLMExecutor", "retrying in \(String(format: "%.1f", delay))s (attempt \(retryCount)/\(retryPolicy.maxRetries))")
+                    AppAgentDebugLog.shared.record(
+                        .retry,
+                        message: String(format: "%.1fs 后重试（%d/%d）", delay, retryCount, retryPolicy.maxRetries),
+                        sessionId: session.id,
+                        provider: provider.name,
+                        apiProtocol: provider.apiProtocol.rawValue,
+                        modelId: modelId,
+                        iteration: iteration,
+                        attempt: retryCount,
+                        reason: classified.reason.rawValue
+                    )
                     do {
                         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     } catch {
                         finishWithError(AIAgentError.cancelled, messages: currentMessages)
                         return
+                    }
+                    continue
+                }
+
+                // 重试用尽、或本来就不该重试（401/404/额度等）：换下一个可用模型继续本轮。
+                if let next = await self.resolveNextModel(agent: agent, policyRefs: policyRefs, tried: triedModelKeys) {
+                    let from = "\(modelId)@\(provider.apiProtocol.rawValue)"
+                    triedModelKeys.insert(Self.modelKey(next.provider, next.modelId))
+                    provider = next.provider
+                    modelId = next.modelId
+                    retryCount = 0
+                    Logger.info("LLMExecutor", "model fallback: \(from) → \(next.ref) (reason=\(classified.reason))")
+                    AppAgentDebugLog.shared.record(
+                        .fallback,
+                        message: "模型不可用，切换 \(from) → \(next.ref)",
+                        sessionId: session.id,
+                        provider: next.provider.name,
+                        apiProtocol: next.provider.apiProtocol.rawValue,
+                        modelId: next.modelId,
+                        iteration: iteration,
+                        reason: classified.reason.rawValue
+                    )
+                    if self.isActiveRun(runID) {
+                        session.uiState.set(SessionUIState.activeModelKey, value: next.ref)
                     }
                     continue
                 }

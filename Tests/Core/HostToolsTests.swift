@@ -187,4 +187,63 @@ final class HostToolsTests: XCTestCase {
         agent.enableToolGroups([ToolGroups.hostRuntime])
         XCTAssertNil(agent.toolPolicy?.excludedGroups)
     }
+
+    // MARK: - app_device_info
+
+    func testDeviceInfoAllSectionsPresent() async throws {
+        let tool = AppDeviceInfoTool()
+        let output = try await tool.execute(arguments: [:], session: makeSession())
+        guard let object = json(output)?.objectValue else {
+            return XCTFail("expected json object, got \(output)")
+        }
+        XCTAssertEqual(
+            Set(object.keys),
+            ["device", "os", "app", "storage", "memory", "locale", "power"]
+        )
+    }
+
+    func testDeviceInfoSingleSectionOnly() async throws {
+        let tool = AppDeviceInfoTool()
+        let output = try await tool.execute(arguments: ["section": .string("storage")], session: makeSession())
+        guard let object = json(output)?.objectValue else {
+            return XCTFail("expected json object, got \(output)")
+        }
+        XCTAssertEqual(Set(object.keys), ["storage"])
+        let storage = object["storage"]?.objectValue
+        // Free/total must be real numbers, and free can never exceed total.
+        let free = storage?["free_bytes"]?.numberValue ?? -1
+        let total = storage?["total_bytes"]?.numberValue ?? -1
+        XCTAssertGreaterThan(free, 0)
+        XCTAssertGreaterThanOrEqual(total, free)
+        XCTAssertNotNil(storage?["free_readable"]?.stringValue)
+    }
+
+    func testDeviceInfoRejectsUnknownSection() async throws {
+        let tool = AppDeviceInfoTool()
+        let output = try await tool.execute(arguments: ["section": .string("cpu")], session: makeSession())
+        XCTAssertTrue(errorText(output)?.contains("Unknown section") ?? false, "\(output)")
+    }
+
+    func testDeviceInfoReadsMachineAndFootprint() {
+        // sysctl + mach lookups are the two non-Foundation reads; make sure they work here.
+        XCTAssertNotNil(AppDeviceInfoTool.sysctlString("hw.machine") ?? AppDeviceInfoTool.sysctlString("hw.model"))
+        XCTAssertNil(AppDeviceInfoTool.sysctlString("no.such.sysctl.key"))
+        let footprint = AppDeviceInfoTool.appFootprintBytes()
+        XCTAssertNotNil(footprint)
+        XCTAssertGreaterThan(footprint ?? 0, 0)
+    }
+
+    func testDeviceInfoIsRegisteredAsSafeHostRuntimeTool() async {
+        let tool = AppDeviceInfoTool()
+        XCTAssertEqual(tool.name, "app_device_info")
+        XCTAssertEqual(tool.group, ToolGroups.hostRuntime)
+        XCTAssertEqual(tool.safetyLevel, .safe)
+
+        let central = ToolCentral()
+        await central.register(tool)
+        let resolved = await central.resolveTools(
+            policies: [ToolCentral.ToolPolicy(allowedGroups: [ToolGroups.hostRuntime])]
+        )
+        XCTAssertEqual(Set(resolved.keys), ["app_device_info"])
+    }
 }

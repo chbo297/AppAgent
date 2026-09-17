@@ -119,4 +119,96 @@ final class SessionManageTests: XCTestCase {
         ], on: s1)
         XCTAssertNotNil(result["error"]?.stringValue)
     }
+
+    // MARK: - 会话控制：新建 / 切换 / 换模型 / 清空
+
+    func testCreateSessionAddsAnotherSession() async throws {
+        let agent = await makeAgent()
+        let s1 = await agent.createSession(title: "First")
+
+        let result = try await run(["op": .string("create"), "title": .string("由工具新建")], on: s1)
+        XCTAssertEqual(result["success"]?.boolValue, true)
+        let newID = try XCTUnwrap(result["session_id"]?.stringValue)
+        XCTAssertEqual(agent.session(id: newID)?.title, "由工具新建")
+        XCTAssertEqual(agent.allSessions.count, 2)
+    }
+
+    func testSwitchRequiresHostHandlerAndReportsSuccess() async throws {
+        let agent = await makeAgent()
+        let s1 = await agent.createSession(title: "First")
+        let s2 = await agent.createSession(title: "Second")
+
+        // 宿主未安装切换钩子：明确报错而不是假装成功。
+        let denied = try await run(["op": .string("switch"), "session_id": .string(s2.id)], on: s1)
+        XCTAssertNotNil(denied["error"]?.stringValue)
+
+        // 安装钩子后返回成功，并把请求的 session id 透传给宿主。
+        let box = ActivationBox()
+        agent.activateSessionHandler = { id in
+            box.requested = id
+            return true
+        }
+        let accepted = try await run(["op": .string("switch"), "session_id": .string(s2.id)], on: s1)
+        XCTAssertEqual(accepted["success"]?.boolValue, true)
+        XCTAssertEqual(box.requested, s2.id)
+    }
+
+    func testSetModelFailsForUnknownReference() async throws {
+        let agent = await makeAgent()
+        let s1 = await agent.createSession(title: "First")
+
+        let result = try await run([
+            "op": .string("set_model"),
+            "model": .string("nope/none")
+        ], on: s1)
+        XCTAssertNotNil(result["error"]?.stringValue)
+    }
+
+    func testModelsListsPolicyAndRegisteredModels() async throws {
+        let central = ModelProviderCentral()
+        await central.register(
+            name: "pa",
+            provider: AnthropicProvider(
+                baseURL: "https://example.com/v1",
+                apiKey: "k",
+                apiProtocol: .openaiCompletions,
+                models: [ModelSpec(id: "A"), ModelSpec(id: "B")]
+            )
+        )
+        let agent = AIAgent(
+            id: "models-op",
+            profile: AIAgentProfile(autoPersist: false, registerBuiltInTools: false),
+            providerCentral: central,
+            modelPolicy: ModelPolicy(primary: "pa/A", fallbacks: ["pa/B"]),
+            memoryStorage: InMemoryMemoryStorage(),
+            sessionStorage: InMemorySessionStorage()
+        )
+        let session = await agent.createSession(title: "t")
+
+        let result = try await run(["op": .string("models")], on: session)
+        XCTAssertEqual(result["count"]?.numberValue, 2)
+        XCTAssertEqual(result["policy_primary"]?.stringValue, "pa/A")
+        XCTAssertEqual(result["policy_fallbacks"]?.arrayValue?.first?.stringValue, "pa/B")
+        let refs = (result["models"]?.arrayValue ?? []).compactMap { $0["reference"]?.stringValue }
+        XCTAssertEqual(Set(refs), Set(["pa/A", "pa/B"]))
+    }
+
+    func testClearWipesHistoryButKeepsSession() async throws {
+        let agent = await makeAgent()
+        let s1 = await agent.createSession(title: "First")
+        let target = await agent.createSession(title: "Target")
+        target.addUserMessage("one")
+        target.addUserMessage("two")
+
+        let result = try await run(["op": .string("clear"), "session_id": .string(target.id)], on: s1)
+        XCTAssertEqual(result["success"]?.boolValue, true)
+        XCTAssertEqual(result["removed_messages"]?.numberValue, 2)
+        XCTAssertEqual(agent.session(id: target.id)?.messages.count, 0)
+    }
 }
+
+/// 记录宿主收到的激活请求（闭包里不能直接改局部变量）。
+private final class ActivationBox: @unchecked Sendable {
+    var requested: String?
+}
+

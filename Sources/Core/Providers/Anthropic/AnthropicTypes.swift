@@ -136,9 +136,11 @@ struct SSEDelta: Decodable {
     let type: String
     let text: String?
     let partialJson: String?
+    /// 扩展思考增量（`thinking_delta`）。
+    let thinking: String?
 
     enum CodingKeys: String, CodingKey {
-        case type, text
+        case type, text, thinking
         case partialJson = "partial_json"
     }
 }

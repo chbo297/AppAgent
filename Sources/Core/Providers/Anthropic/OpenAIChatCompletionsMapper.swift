@@ -139,6 +139,9 @@ enum OpenAIChatCompletionsMapper {
         }
 
         for choice in chunk.choices {
+            if let reasoning = choice.delta.reasoningContent ?? choice.delta.reasoning, !reasoning.isEmpty {
+                events.append(.reasoningDelta(reasoning))
+            }
             if let content = choice.delta.content, !content.isEmpty {
                 events.append(.textDelta(content))
             }
@@ -314,10 +317,14 @@ private struct OpenAIChoice: Decodable {
 private struct OpenAIDelta: Decodable {
     let content: String?
     let toolCalls: [OpenAIToolCallDelta]?
+    /// 推理模型的思考增量：DeepSeek / OneAPI 系用 `reasoning_content`，部分网关用 `reasoning`。
+    let reasoningContent: String?
+    let reasoning: String?
 
     enum CodingKeys: String, CodingKey {
-        case content
+        case content, reasoning
         case toolCalls = "tool_calls"
+        case reasoningContent = "reasoning_content"
     }
 }
 

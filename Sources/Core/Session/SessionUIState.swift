@@ -18,12 +18,16 @@ import Foundation
 /// The `onChange` callback is always dispatched to the main queue.
 public final class SessionUIState: @unchecked Sendable {
 
+    /// 自定义状态键：当前实际使用的模型引用（运行期回退后会更新）。
+    public static let activeModelKey = "activeModelRef"
+
     private let lock = ReadersWriterLock()
 
     // MARK: - Built-in State (backing)
 
     private var _isStreaming: Bool = false
     private var _streamingText: String = ""
+    private var _reasoningText: String = ""
     private var _lastError: Error?
 
     // MARK: - Custom State (backing)
@@ -41,6 +45,9 @@ public final class SessionUIState: @unchecked Sendable {
 
     /// The text being accumulated during the current streaming response.
     public var streamingText: String { lock.read { _streamingText } }
+
+    /// 本轮累计的「思考过程」文本（推理模型才有；仅用于展示）。
+    public var reasoningText: String { lock.read { _reasoningText } }
 
     /// The last error encountered, if any.
     public var lastError: Error? { lock.read { _lastError } }
@@ -77,6 +84,18 @@ public final class SessionUIState: @unchecked Sendable {
 
     func resetStreamingText() {
         lock.writeSync { _streamingText = "" }
+    }
+
+    func appendReasoningText(_ delta: String) {
+        let callback = lock.writeSync { () -> ((String) -> Void)? in
+            _reasoningText += delta
+            return _onChange
+        }
+        dispatchCallback(callback, key: "reasoningText")
+    }
+
+    func resetReasoningText() {
+        lock.writeSync { _reasoningText = "" }
     }
 
     func setError(_ error: Error?) {

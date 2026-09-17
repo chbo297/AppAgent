@@ -198,6 +198,10 @@ enum AnthropicMapper {
             if parsed.delta.type == "text_delta", let text = parsed.delta.text {
                 return [.textDelta(text)]
             }
+            // 扩展思考：thinking_delta 只用于展示「思考过程」，不参与历史。
+            if parsed.delta.type == "thinking_delta", let thinking = parsed.delta.thinking {
+                return [.reasoningDelta(thinking)]
+            }
             if parsed.delta.type == "input_json_delta", let json = parsed.delta.partialJson {
                 activeToolCalls[parsed.index]?.jsonAccumulator += json
             }

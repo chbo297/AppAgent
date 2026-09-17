@@ -40,6 +40,11 @@ public final class AIAgent: @unchecked Sendable {
     @Locked
     public var modelPolicy: ModelPolicy?
 
+    /// 宿主 UI 注入的「切换到某个会话」钩子。核心没有 current session 概念（那是 UI 概念），
+    /// 由 `AppAgentViewController` 安装；未安装时 `session_manage` 的 `switch` 会明确报未支持。
+    @Locked
+    public var activateSessionHandler: (@Sendable (String) -> Bool)?
+
     /// Provider central for this agent. Defaults to `.default` if not overridden at init.
     @Locked
     public var providerCentral: ModelProviderCentral
@@ -108,6 +113,7 @@ public final class AIAgent: @unchecked Sendable {
         self._toolCentral = Locked(wrappedValue: toolCentral)
         self._providerCentral = Locked(wrappedValue: providerCentral)
         self._modelPolicy = Locked(wrappedValue: modelPolicy)
+        self._activateSessionHandler = Locked(wrappedValue: nil)
         self._toolPolicy = Locked(wrappedValue: toolPolicy)
         self._delegate = WeakLocked(wrappedValue: nil)
         self.memoryStore = MemoryStore(config: profile.memoryConfig, storage: memoryStorage)
@@ -218,6 +224,9 @@ public final class AIAgent: @unchecked Sendable {
         }
         if !disabled.contains("app_sandbox_file") {
             await toolCentral.register(AppSandboxFileTool())
+        }
+        if !disabled.contains("app_device_info") {
+            await toolCentral.register(AppDeviceInfoTool())
         }
 
         // Host runtime introspection (group "host-runtime"). Requires UIKit for the

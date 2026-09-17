@@ -98,6 +98,9 @@ public struct ModelSpec: Sendable, Codable {
 public enum ProviderStreamEvent: Sendable {
     /// A chunk of text from the assistant.
     case textDelta(String)
+    /// A chunk of the model's reasoning / thinking summary (Anthropic thinking_delta,
+    /// OpenAI-compatible `reasoning_content`). Display-only — never fed back as history.
+    case reasoningDelta(String)
     /// The assistant wants to call a tool.
     case toolCall(AIAgentMessage.ToolCall)
     /// The stream has ended. `stopReason` indicates why.

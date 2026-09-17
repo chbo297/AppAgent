@@ -11,6 +11,8 @@ public enum AIAgentEvent: Sendable {
     case started(turn: Int)
     /// A chunk of streaming content from the assistant.
     case streamingContent(String)
+    /// A chunk of the model's reasoning / thinking summary（仅用于展示「思考过程」，不进历史）。
+    case reasoningContent(String)
     /// The assistant is requesting a tool call.
     case toolCallStarted(AIAgentMessage.ToolCall)
     /// A tool finished executing successfully.
