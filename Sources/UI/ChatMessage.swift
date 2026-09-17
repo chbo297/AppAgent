@@ -25,14 +25,27 @@ public struct ChatMessage {
     public let timestamp: Date
     /// Optional tool call summary for displaying in conversation history.
     public var toolInfo: String?
+    /// 本轮的「思考 / 执行过程」时间线（assistant 消息才有）。
+    public var activity: AppAgentActivityTimeline?
+    /// 过程区是否展开：进行中的最新一轮默认展开，结束后自动折叠成摘要。
+    public var isActivityExpanded: Bool
 
-    public init(role: Role, text: String, status: Status = .complete, toolInfo: String? = nil) {
+    public init(
+        role: Role,
+        text: String,
+        status: Status = .complete,
+        toolInfo: String? = nil,
+        activity: AppAgentActivityTimeline? = nil,
+        isActivityExpanded: Bool = false
+    ) {
         self.id = UUID()
         self.role = role
         self.text = text
         self.status = status
         self.timestamp = Date()
         self.toolInfo = toolInfo
+        self.activity = activity
+        self.isActivityExpanded = isActivityExpanded
     }
 }
 #endif

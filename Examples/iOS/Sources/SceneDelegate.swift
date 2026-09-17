@@ -9,6 +9,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     var hostWindow: UIWindow?
     var openAPPOverlay: AppAgentOverlay?
+    var regionDebugOverlay: AppAgentRegionDebugOverlay?
     var agent: AIAgent?
 
     func scene(
@@ -41,21 +42,16 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         // 2) SDK chat UI – mounted in its own independent overlay window.
         Task { @MainActor in
-            guard DemoConfig.loaded != nil, DemoConfig.hasUsableProviderConfig else {
-                if let presenter = host.rootViewController {
-                    showAlert(
-                        on: presenter,
-                        title: "配置未完成",
-                        message: "请复制示例配置并填入 API key:\ncp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json\n\n然后重新运行 demo。"
-                    )
-                }
-                return
-            }
+            // AppAgent 默认接口为 OneAPI；用户可在会话列表右上角的「设置」里填写自己的 API Key、
+            // 拉取并勾选模型。已保存过设置则用保存值，否则回落到 OneAPI 默认（apiKey 为空）。
+            let settings = AppAgentSettingsStore.loadOrDefault()
+            await ModelProviderCentral.`default`.register(settings: settings)
 
-            for entry in DemoConfig.allProviders {
-                await ModelProviderCentral.`default`.register(
-                    name: entry.name,
-                    provider: entry.provider
+            if !settings.hasUsableAPIKey, let presenter = host.rootViewController {
+                showAlert(
+                    on: presenter,
+                    title: "尚未配置 API Key",
+                    message: "AppAgent 默认使用 OneAPI 接口。请点开对话面板会话列表右上角的「设置」填写 API Key、拉取并勾选模型后即可开始对话。"
                 )
             }
 
@@ -70,7 +66,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             let agent = await AIAgentCentral.default.create(
                 name: "main",
                 profile: agentProfile,
-                modelPolicy: DemoConfig.modelPolicy,
+                modelPolicy: settings.modelPolicy,
                 sessionStorage: FileSessionStorage()
             )
             self.agent = agent
@@ -92,6 +88,14 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
             DemoAgentHolder.agent = agent
             self.openAPPOverlay = overlay
+
+            #if DEBUG
+            // 比 AppAgent overlay 再高一层的调试窗口：👻 按钮里可以开关三类响应区域的边框。
+            self.regionDebugOverlay = AppAgentRegionDebugOverlay.attach(
+                in: windowScene,
+                target: overlay.viewController
+            )
+            #endif
         }
     }
 

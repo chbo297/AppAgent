@@ -67,6 +67,12 @@ open class AppAgentViewController: UIViewController {
             // 绑定了真实 agent 就走真实 session/模型；未绑定时回落到本地固定回复，
             // 让纯 UI 调试无需模型配置也能跑。
             usesFixedDebugReply = (agent == nil)
+            // 让 session_manage 的 'switch' 能真正切换当前展示的会话（核心不认识 current session）。
+            oldValue?.activateSessionHandler = nil
+            agent?.activateSessionHandler = { [weak self] sessionId in
+                DispatchQueue.main.async { self?.switchSession(to: sessionId) }
+                return true
+            }
             guard isViewLoaded else { return }
             reloadSessionSidebarItems()
         }
@@ -81,6 +87,10 @@ open class AppAgentViewController: UIViewController {
 
     /// The currently displayed session ID.
     public private(set) var currentSessionId: String?
+
+    /// 最近一轮的「思考 / 执行过程」快照：会话结束后从 session 重建列表时用它复原过程区，
+    /// 并按 sessionID 绑定，避免切会话时把上一轮的过程带过去。
+    var lastTurnActivity: (sessionID: String, timeline: AppAgentActivityTimeline, expanded: Bool)?
 
     /// Convenience: the current session object.
     public var currentSession: AISession? {

@@ -65,12 +65,15 @@ final class AppAgentChatPanelNavigationBar: UIView {
             height: buttonSize
         )
 
-        let titleMinX = sessionListButton.frame.maxX + 8
-        let titleMaxX = newSessionButton.frame.minX - 8
+        // 让标题相对整条导航栏水平居中：左右各预留两侧内容中较宽的一侧宽度，
+        // 使标题 frame 关于 bounds.midX 对称，避免因左 1 / 右 2 个按钮而偏移。
+        let leftContentWidth = sessionListButton.frame.maxX
+        let rightContentWidth = bounds.width - newSessionButton.frame.minX
+        let titleSideInset = max(leftContentWidth, rightContentWidth) + 8
         titleLabel.frame = CGRect(
-            x: titleMinX,
+            x: titleSideInset,
             y: 0,
-            width: max(0, titleMaxX - titleMinX),
+            width: max(0, bounds.width - titleSideInset * 2),
             height: bounds.height
         )
 

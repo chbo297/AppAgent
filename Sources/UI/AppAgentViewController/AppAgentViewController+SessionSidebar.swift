@@ -26,11 +26,51 @@ extension AppAgentViewController {
         sessionSidebarView.onDeleteItem = { [weak self] item in
             self?.promptDeleteSession(item)
         }
+        sessionSidebarView.onSettingsTapped = { [weak self] in
+            self?.presentSettings()
+        }
+        sessionSidebarView.onDebugTapped = { [weak self] in
+            self?.presentDebugConsole()
+        }
         view.addSubview(sessionSidebarView)
         reloadSessionSidebarItems()
     }
 
+    /// 打开 AppAgent 层级内的设置面板（用 overlay 窗口最上层 VC 呈现）。
+    /// 保存后应用新配置，并新建一个会话让改动立即生效（会话 provider 创建后不可变）。
+    private func presentSettings() {
+        let settingsVC = AppAgentSettingsViewController()
+        settingsVC.onSave = { [weak self] settings in
+            guard let self, let agent = self.agent else { return }
+            Task { @MainActor in
+                await agent.applyEndpointSettings(settings)
+                let session = await agent.createSession(title: "对话")
+                self.switchSession(to: session.id)
+            }
+        }
+        let nav = UINavigationController(rootViewController: settingsVC)
+        nav.modalPresentationStyle = .formSheet
+
+        hideSessionSidebar(animated: false)
+        var presenter: UIViewController = self
+        while let presented = presenter.presentedViewController { presenter = presented }
+        presenter.present(nav, animated: true)
+    }
+
+    /// 打开调试窗口：实时看模型接口的失败 / 重试 / 回退记录，并可导出。
+    private func presentDebugConsole() {
+        let debugVC = AppAgentDebugViewController()
+        let nav = UINavigationController(rootViewController: debugVC)
+        nav.modalPresentationStyle = .formSheet
+
+        hideSessionSidebar(animated: false)
+        var presenter: UIViewController = self
+        while let presented = presenter.presentedViewController { presenter = presented }
+        presenter.present(nav, animated: true)
+    }
+
     /// 弹出重命名输入框，提交后重命名会话并立即存盘。
+
     private func promptRenameSession(_ item: AppAgentSessionSidebarItem) {
         guard let sessionID = item.sessionID,
               let session = agent?.session(id: sessionID) else { return }

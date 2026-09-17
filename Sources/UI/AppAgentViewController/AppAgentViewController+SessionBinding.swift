@@ -24,6 +24,15 @@ extension AppAgentViewController {
             chatMessages.append(ChatMessage(role: .assistant, text: streamText, status: .streaming))
         }
 
+        // 复原最近一轮的过程区（只认当前会话的快照）。
+        if let snapshot = lastTurnActivity,
+           snapshot.sessionID == session.id,
+           !snapshot.timeline.isEmpty,
+           let index = chatMessages.lastIndex(where: { $0.role == .assistant }) {
+            chatMessages[index].activity = snapshot.timeline
+            chatMessages[index].isActivityExpanded = snapshot.expanded
+        }
+
         if isViewLoaded {
             chatPanelView.listView.setMessages(chatMessages)
         }
@@ -82,7 +91,6 @@ extension AppAgentViewController {
         case "isStreaming":
             if !session.uiState.isStreaming {
                 reloadFromSession()
-                inputBar.setInputEnabled(true)
             }
 
         case "lastError":
@@ -95,7 +103,6 @@ extension AppAgentViewController {
                     text: "Error: \(error.localizedDescription)",
                     status: .error
                 )
-                inputBar.setInputEnabled(true)
             }
 
         default:
@@ -115,11 +122,19 @@ extension AppAgentViewController {
             return
         }
 
+        // 模型运行中不禁用输入栏：用户可以继续输入、切换输入方式或打开菜单。
         inputBar.clearText()
-        inputBar.setInputEnabled(false)
 
         let userMessage = ChatMessage(role: .user, text: trimmed)
-        let assistantMessage = ChatMessage(role: .assistant, text: "", status: .streaming)
+        // 过程区：本轮的思考 / 工具执行时间线，进行中默认展开（参考 Codex CLI / ChatGPT app）。
+        var timeline = AppAgentActivityTimeline()
+        let assistantMessage = ChatMessage(
+            role: .assistant,
+            text: "",
+            status: .streaming,
+            activity: timeline,
+            isActivityExpanded: true
+        )
         chatMessages.append(userMessage)
         chatMessages.append(assistantMessage)
         chatPanelView.listView.append(
@@ -131,11 +146,86 @@ extension AppAgentViewController {
 
         let stream = session.sendMessage(trimmed)
         currentStreamTask = Task { @MainActor in
-            for await _ in stream {
-                // Events are handled via uiState.onChange binding
+            for await event in stream {
+                switch event {
+                case .reasoningContent(let delta):
+                    timeline.appendThinking(delta)
+                    self.applyActivity(timeline)
+
+                case .toolCallStarted(let call):
+                    timeline.startTool(
+                        id: call.id,
+                        name: call.name,
+                        argumentsPreview: Self.preview(of: call.arguments)
+                    )
+                    self.applyActivity(timeline)
+
+                case .toolCallCompleted(let id, let result):
+                    timeline.finishTool(id: id, resultPreview: Self.preview(of: result))
+                    self.applyActivity(timeline)
+
+                case .toolCallFailed(let id, let name, let error):
+                    timeline.failTool(id: id, name: name, message: error.localizedDescription)
+                    self.applyActivity(timeline)
+
+                case .completed, .error:
+                    // 本轮结束：过程折叠成「已思考 x 秒 · N 步」摘要，气泡里展示最终结果。
+                    timeline.finish()
+                    self.applyActivity(timeline, expanded: false)
+
+                default:
+                    break
+                }
+            }
+            if timeline.isRunning {
+                timeline.finish()
+                self.applyActivity(timeline, expanded: false)
             }
         }
     }
+
+    /// 把最新时间线写回当前流式消息并刷新那一行。
+    private func applyActivity(_ timeline: AppAgentActivityTimeline, expanded: Bool? = nil) {
+        guard let index = chatMessages.indices.last else { return }
+        chatMessages[index].activity = timeline
+        if let expanded = expanded {
+            chatMessages[index].isActivityExpanded = expanded
+        }
+        if let sessionID = currentSessionId {
+            lastTurnActivity = (
+                sessionID: sessionID,
+                timeline: timeline,
+                expanded: expanded ?? chatMessages[index].isActivityExpanded
+            )
+        }
+        chatPanelView.listView.updateLastActivity(timeline, expanded: expanded)
+    }
+
+    /// 工具参数 / 结果的一行预览（过长截断，避免过程区吃掉整屏）。
+    static func preview(of arguments: [String: JSONValue]) -> String {
+        guard !arguments.isEmpty else { return "" }
+        let text = arguments
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(Self.compact(String(describing: $0.value)))" }
+            .joined(separator: ", ")
+        return Self.compact(text)
+    }
+
+    static func preview(of output: Tool.Output) -> String {
+        switch output {
+        case .text(let text): return Self.compact(text)
+        case .json(let value): return Self.compact(String(describing: value))
+        case .error(let message): return "错误：\(Self.compact(message))"
+        }
+    }
+
+    private static func compact(_ text: String, limit: Int = 160) -> String {
+        let single = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return single.count <= limit ? single : String(single.prefix(limit)) + "…"
+    }
 }
+
 
 #endif

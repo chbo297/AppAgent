@@ -80,6 +80,28 @@ final class AppAgentChatMessageListView: UIView {
         }
     }
 
+    /// 更新最后一条消息的「思考 / 执行过程」时间线并按需切换展开态。
+    func updateLastActivity(_ timeline: AppAgentActivityTimeline, expanded: Bool? = nil) {
+        guard !messages.isEmpty else { return }
+        let wasFollowingLatestMessage = isNearBottom
+        messages[messages.count - 1].activity = timeline
+        if let expanded = expanded {
+            messages[messages.count - 1].isActivityExpanded = expanded
+        }
+        let indexPath = IndexPath(row: messages.count - 1, section: 0)
+        tableView.reloadRows(at: [indexPath], with: .none)
+        if wasFollowingLatestMessage {
+            scrollToBottom(animated: false)
+        }
+    }
+
+    /// 折叠 / 展开某条消息的过程区（点击折叠行触发）。
+    func toggleActivityExpanded(messageID: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        messages[index].isActivityExpanded.toggle()
+        tableView.reloadRows(at: [IndexPath(row: index, section: 0)], with: .none)
+    }
+
     // MARK: - 内部
 
     private func setup() {
@@ -165,7 +187,11 @@ extension AppAgentChatMessageListView: UITableViewDataSource {
             withIdentifier: ChatMessageCell.reuseIdentifier,
             for: indexPath
         ) as! ChatMessageCell
-        cell.configure(with: messages[indexPath.row])
+        let message = messages[indexPath.row]
+        cell.configure(with: message)
+        cell.onToggleActivity = { [weak self] in
+            self?.toggleActivityExpanded(messageID: message.id)
+        }
         return cell
     }
 }

@@ -11,13 +11,18 @@ final class AppAgentSessionListView: UIView {
     var onSelectItem: ((AppAgentSessionSidebarItem) -> Void)?
     var onRenameItem: ((AppAgentSessionSidebarItem) -> Void)?
     var onDeleteItem: ((AppAgentSessionSidebarItem) -> Void)?
+    var onSettingsTapped: (() -> Void)?
+    var onDebugTapped: (() -> Void)?
 
     private(set) var items: [AppAgentSessionSidebarItem] = []
 
     private static let titleAreaHeight: CGFloat = 52
     private static let rowHeight: CGFloat = 60
+    private static let settingsButtonSize: CGFloat = 32
 
     private let titleLabel = UILabel()
+    private let settingsButton = UIButton(type: .system)
+    private let debugButton = UIButton(type: .system)
     private let separatorView = UIView()
     private let tableView = UITableView()
 
@@ -36,10 +41,28 @@ final class AppAgentSessionListView: UIView {
 
         let safeTop = max(0, safeAreaInsets.top)
         let safeBottom = max(0, safeAreaInsets.bottom)
+
+        let buttonSize = Self.settingsButtonSize
+        settingsButton.frame = CGRect(
+            x: max(0, bounds.width - 16 - buttonSize),
+            y: safeTop + (Self.titleAreaHeight - buttonSize) / 2,
+            width: buttonSize,
+            height: buttonSize
+        )
+        settingsButton.layer.cornerRadius = buttonSize / 2
+
+        debugButton.frame = CGRect(
+            x: max(0, settingsButton.frame.minX - 8 - buttonSize),
+            y: settingsButton.frame.minY,
+            width: buttonSize,
+            height: buttonSize
+        )
+        debugButton.layer.cornerRadius = buttonSize / 2
+
         titleLabel.frame = CGRect(
             x: 16,
             y: safeTop,
-            width: max(0, bounds.width - 32),
+            width: max(0, debugButton.frame.minX - 8 - 16),
             height: Self.titleAreaHeight
         )
 
@@ -82,6 +105,20 @@ final class AppAgentSessionListView: UIView {
         titleLabel.textAlignment = .natural
         addSubview(titleLabel)
 
+        let symbolConfig = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        settingsButton.setImage(UIImage(systemName: "gearshape", withConfiguration: symbolConfig), for: .normal)
+        settingsButton.accessibilityLabel = "设置"
+        settingsButton.addTarget(self, action: #selector(didTapSettings), for: .touchUpInside)
+        addSubview(settingsButton)
+
+        let debugIcon = UIImage(systemName: "ladybug", withConfiguration: symbolConfig)
+            ?? UIImage(systemName: "ant", withConfiguration: symbolConfig)
+            ?? UIImage(systemName: "exclamationmark.triangle", withConfiguration: symbolConfig)
+        debugButton.setImage(debugIcon, for: .normal)
+        debugButton.accessibilityLabel = "调试"
+        debugButton.addTarget(self, action: #selector(didTapDebug), for: .touchUpInside)
+        addSubview(debugButton)
+
         separatorView.isUserInteractionEnabled = false
         addSubview(separatorView)
 
@@ -102,6 +139,14 @@ final class AppAgentSessionListView: UIView {
         applyAppearance()
     }
 
+    @objc private func didTapSettings() {
+        onSettingsTapped?()
+    }
+
+    @objc private func didTapDebug() {
+        onDebugTapped?()
+    }
+
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began else { return }
         let point = gesture.location(in: tableView)
@@ -116,6 +161,10 @@ final class AppAgentSessionListView: UIView {
     private func applyAppearance() {
         backgroundColor = AppAgentAppearance.inputBarBackground
         titleLabel.textColor = AppAgentAppearance.primaryText
+        settingsButton.tintColor = AppAgentAppearance.icon
+        settingsButton.backgroundColor = AppAgentAppearance.voicePressedBackground
+        debugButton.tintColor = AppAgentAppearance.icon
+        debugButton.backgroundColor = AppAgentAppearance.voicePressedBackground
         separatorView.backgroundColor = AppAgentAppearance.inputBarBorder
         tableView.reloadData()
     }
