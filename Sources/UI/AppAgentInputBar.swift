@@ -195,7 +195,7 @@ public final class AppAgentInputBar: UIView {
     }
 
     /// pan 手势的起手区域，用于决定同一组手势位移应该触发 menu resize/move、输入区焦点还是普通 bar 行为。
-    private enum InputBarPanStartRegion {
+    enum InputBarPanStartRegion {
         case bar
         case menuButton
         case inputArea
@@ -1179,6 +1179,11 @@ extension AppAgentInputBar: UIGestureRecognizerDelegate {
     private func isTouch(_ touch: UITouch, insideViewHierarchyOf view: UIView) -> Bool {
         guard let touchedView = touch.view else { return false }
         return touchedView === view || touchedView.isDescendant(of: view)
+    }
+
+    /// 供测试断言上滑起手区域：与 `hitTest` 共用同一个 `extendedInputAreaHitRect`。
+    func panStartRegionForTesting(at point: CGPoint) -> InputBarPanStartRegion {
+        startRegion(for: point)
     }
 
     private func startRegion(for point: CGPoint) -> InputBarPanStartRegion {

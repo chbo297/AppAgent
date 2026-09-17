@@ -25,7 +25,8 @@ public final class AppAgentRegionDebugViewController: UIViewController {
         view.backgroundColor = .clear
 
         for region in AppAgentInteractionRegion.allCases {
-            let outline = AppAgentRegionOutlineView(region: region)
+            // 上滑唤键盘区与点击区完全同尺寸，用虚线区分。
+            let outline = AppAgentRegionOutlineView(region: region, isDashed: region == .keyboardSwipe)
             outline.isHidden = true
             view.addSubview(outline)
             outlines[region] = outline
@@ -141,7 +142,7 @@ public final class AppAgentRegionDebugViewController: UIViewController {
         var rectInSource: CGRect?
         switch region {
         case .inputTap, .keyboardSwipe:
-            // 命中区已按 bar 白色背景纵向扩大，所以画的是扩大后的矩形，而不是输入区胶囊。
+            // 两者是同一块命中区：点击弹键盘和上滑唤键盘都以 extendedInputAreaHitRect 为准。
             source = target.inputBar
             rectInSource = target.inputBar.extendedInputAreaHitRect
         case .chatPanelSwipe:
@@ -151,18 +152,12 @@ public final class AppAgentRegionDebugViewController: UIViewController {
         }
         // 没上窗的视图不会显示，也就不该画框。
         guard source.window != nil else { return nil }
-        return Self.outlineRect(
-            for: region,
-            source: source,
-            container: view,
-            rectInSource: rectInSource
-        )
+        return Self.outlineRect(source: source, container: view, rectInSource: rectInSource)
     }
 
     /// 纯几何部分：可见性判断 + 坐标换算，不依赖窗口，便于单测。
     /// `rectInSource` 为 nil 时用 `source.bounds`。
     static func outlineRect(
-        for region: AppAgentInteractionRegion,
         source: UIView,
         container: UIView,
         rectInSource: CGRect? = nil
@@ -171,10 +166,7 @@ public final class AppAgentRegionDebugViewController: UIViewController {
         let sourceRect = rectInSource ?? source.bounds
         guard !sourceRect.isNull, !sourceRect.isEmpty else { return nil }
 
-        var rect = container.convert(sourceRect, from: source)
-        // 红黄两框是同一块区域（上滑唤键盘用的就是点击输入区），
-        // 黄框内缩 3pt 以便两者同时打开时都能看清。
-        if region == .keyboardSwipe { rect = rect.insetBy(dx: 3, dy: 3) }
+        let rect = container.convert(sourceRect, from: source)
         guard !rect.isNull, rect.width > 1, rect.height > 1 else { return nil }
         return rect
     }

@@ -133,7 +133,10 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 - 依赖 [`chbo297/BOUIKit`](https://github.com/chbo297/BOUIKit)（SwiftPM `from: "0.1.1"`，源码仓在同级 `../BOUIKit`），提供 `bo_hitAreaOutsets`、`bo_skipsSelfInHitTest`、`bo_pointInsideJudge`、`bo_hitTestHook`。同一个包也被 BWTimeGallery 使用。
 - 它通过 `method_exchangeImplementations` 换掉 `UIView.point(inside:with:)` 与 `hitTest(_:with:)`，首次设置有效配置时惰性安装，作用域是整个进程；集成文档需向宿主 app 说明这一点。
 - 在 macOS 上编译为空模块，因此 AppAgent target 无条件依赖即可；`Sources/UI` 里使用时照常放在 `#if canImport(UIKit)` 内。
-- 已接入点：`AppAgentChatPanelContainerView` 的「命中自己就穿透」用 `bo_skipsSelfInHitTest`。其余手写 hit-testing（`AppAgentWindow`、`AppAgentInputBar` 输入区扩大、语音面板路径命中、调试窗口）暂未迁移。
+- **约定：需要调整命中区就用 BOUIKit，不要再手写 `hitTest` / `point(inside:)`**，除非判定本身有复杂逻辑（路径命中、按状态重定向到别的子视图等）。
+- 已接入点：`AppAgentWindow` 与 `AppAgentRegionDebugWindow` 的穿透、`AppAgentChatPanelContainerView` 的「命中自己就穿透」用 `bo_skipsSelfInHitTest`；`AppAgentRegionDebugPanelView` 折叠态外扩用 `bo_hitAreaOutsets`。
+- 仍保留手写 override 的三处（都属于复杂判定）：`AppAgentInputBar.hitTest` 把 bar 空白处的触点重定向给输入区；`AppAgentVoiceBottomPanelView` / `AppAgentVoiceActionZoneView` 用贝塞尔路径判定命中。
+- 输入区命中：`AppAgentInputBar.extendedInputAreaHitRect` 是「点击弹键盘」和「上滑唤键盘」**共用**的同一块矩形（横向为输入区、纵向撑满 bar 白色背景）。改一处即两者同步，`Tests/UI/AppAgentRegionDebugTests.swift` 有用例锁住这一点。
 
 ## 文件导航快速索引
 

@@ -4,6 +4,7 @@ import UIKit
 @testable import AppAgent
 
 /// 响应区域调试窗口的几何换算，以及消息正文可选中/可复制的配置。
+@MainActor
 final class AppAgentRegionDebugTests: XCTestCase {
 
     func testRegionsHaveDistinctTitlesAndColors() {
@@ -33,21 +34,15 @@ final class AppAgentRegionDebugTests: XCTestCase {
         let inputStandIn = UIView(frame: CGRect(x: 8, y: 380, width: 300, height: 44))
         panelStandIn.addSubview(inputStandIn)
 
-        let inputRect = AppAgentRegionDebugViewController.outlineRect(
-            for: .inputTap, source: inputStandIn, container: container
-        )
+        let inputRect = AppAgentRegionDebugViewController.outlineRect(source: inputStandIn, container: container)
         // 子视图坐标要被换算到 container 坐标系：12+8 / 400+380。
         XCTAssertEqual(inputRect, CGRect(x: 20, y: 780, width: 300, height: 44))
 
-        // 黄框是红框内缩 3pt，两者同时打开时才不会完全重叠。
-        let keyboardRect = AppAgentRegionDebugViewController.outlineRect(
-            for: .keyboardSwipe, source: inputStandIn, container: container
-        )
-        XCTAssertEqual(keyboardRect, inputRect?.insetBy(dx: 3, dy: 3))
+        // 上滑唤键盘区与点击区必须是同一块矩形（调试里靠虚线区分，不靠尺寸）。
+        let keyboardRect = AppAgentRegionDebugViewController.outlineRect(source: inputStandIn, container: container)
+        XCTAssertEqual(keyboardRect, inputRect)
 
-        let panelRect = AppAgentRegionDebugViewController.outlineRect(
-            for: .chatPanelSwipe, source: panelStandIn, container: container
-        )
+        let panelRect = AppAgentRegionDebugViewController.outlineRect(source: panelStandIn, container: container)
         XCTAssertEqual(panelRect, panelStandIn.frame)
     }
 
@@ -57,16 +52,12 @@ final class AppAgentRegionDebugTests: XCTestCase {
         container.addSubview(source)
 
         source.isHidden = true
-        XCTAssertNil(AppAgentRegionDebugViewController.outlineRect(
-            for: .inputTap, source: source, container: container
-        ))
+        XCTAssertNil(AppAgentRegionDebugViewController.outlineRect(source: source, container: container))
 
         source.isHidden = false
         // 面板收起时是靠容器 alpha 归零的，所以祖先透明也必须算不可见。
         container.alpha = 0
-        XCTAssertNil(AppAgentRegionDebugViewController.outlineRect(
-            for: .inputTap, source: source, container: container
-        ))
+        XCTAssertNil(AppAgentRegionDebugViewController.outlineRect(source: source, container: container))
     }
 
     func testOutlineViewDoesNotSwallowTouches() {
@@ -75,11 +66,18 @@ final class AppAgentRegionDebugTests: XCTestCase {
         XCTAssertEqual(outline.layer.borderWidth, 1)
     }
 
-    func testCollapsedPanelOnlyHitsButtonArea() {
+    func testCollapsedPanelUsesBOUIKitHitOutsets() {
         let panel = AppAgentRegionDebugPanelView()
         panel.bounds = CGRect(origin: .zero, size: AppAgentRegionDebugPanelView.collapsedSize)
-        XCTAssertTrue(panel.point(inside: CGPoint(x: 20, y: 20), with: nil))
-        XCTAssertFalse(panel.point(inside: CGPoint(x: 120, y: 20), with: nil))
+
+        // 折叠态外扩 2pt（BOUIKit 正值扩大），展开态按实际边界。
+        XCTAssertEqual(panel.bo_hitAreaOutsets, UIEdgeInsets(top: 2, left: 2, bottom: 2, right: 2))
+        XCTAssertTrue(panel.point(inside: CGPoint(x: -1, y: 20), with: nil))
+        XCTAssertFalse(panel.point(inside: CGPoint(x: -5, y: 20), with: nil))
+
+        panel.setExpanded(true, notify: false)
+        XCTAssertEqual(panel.bo_hitAreaOutsets, .zero)
+        panel.setExpanded(false, notify: false)
         XCTAssertFalse(panel.isExpanded)
         for region in AppAgentInteractionRegion.allCases {
             XCTAssertFalse(panel.isOn(region), "\(region.title) 默认应关闭")
@@ -137,17 +135,35 @@ final class AppAgentRegionDebugTests: XCTestCase {
         bar.frame.origin = CGPoint(x: 12, y: 760)
 
         let inputRect = AppAgentRegionDebugViewController.outlineRect(
-            for: .inputTap, source: bar, container: container,
-            rectInSource: bar.extendedInputAreaHitRect
+            source: bar, container: container, rectInSource: bar.extendedInputAreaHitRect
         )
         XCTAssertEqual(inputRect?.height, bar.bounds.height, "红框高度 = bar 白色背景高度")
 
         // 绿框是整条 bar 自身的响应区域。
-        let barRect = AppAgentRegionDebugViewController.outlineRect(
-            for: .inputBarHit, source: bar, container: container
-        )
+        let barRect = AppAgentRegionDebugViewController.outlineRect(source: bar, container: container)
         XCTAssertEqual(barRect, bar.frame)
         XCTAssertTrue(barRect?.contains(inputRect ?? .null) ?? false, "输入命中区应落在 bar 响应区内")
+    }
+
+    /// 「上滑触发键盘」的起始区域判定必须和「点击输入」用同一块矩形。
+    func testKeyboardSwipeRegionMatchesInputTapRegion() {
+        let bar = AppAgentInputBar()
+        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBar.barHeight)
+        bar.layoutIfNeeded()
+
+        let hit = bar.extendedInputAreaHitRect
+        XCTAssertFalse(hit.isNull)
+        // 扩大区内任意高度（含上下留白）都应判定为 inputArea 起手，与点击命中区完全一致。
+        for y in [hit.minY + 1, hit.midY, hit.maxY - 1] {
+            let point = CGPoint(x: hit.midX, y: y)
+            XCTAssertEqual(
+                bar.panStartRegionForTesting(at: point), .inputArea,
+                "扩大区内 y=\(y) 应算输入区起手"
+            )
+        }
+        // 左侧 menuButton 仍然优先，不被输入区吞掉。
+        let menuPoint = CGPoint(x: bar.menuButton.frame.midX, y: bar.menuButton.frame.midY)
+        XCTAssertEqual(bar.panStartRegionForTesting(at: menuPoint), .menuButton)
     }
 
     func testMessageTextIsSelectableAndCopyable() {

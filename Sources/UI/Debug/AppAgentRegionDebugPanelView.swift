@@ -8,6 +8,7 @@
 //
 
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 
 final class AppAgentRegionDebugPanelView: UIView {
@@ -43,18 +44,14 @@ final class AppAgentRegionDebugPanelView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// 折叠态只在按钮范围内（外扩 2pt）吃手势，其余位置一律穿透。
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        let hitBounds = isExpanded ? bounds : bounds.insetBy(dx: -2, dy: -2)
-        return hitBounds.contains(point)
-    }
-
     func isOn(_ region: AppAgentInteractionRegion) -> Bool {
         switches[region]?.isOn ?? false
     }
 
     func setExpanded(_ expanded: Bool, notify: Bool = true) {
         isExpanded = expanded
+        // 折叠态把命中范围外扩 2pt（BOUIKit 正值扩大），展开态按面板实际边界。
+        bo_hitAreaOutsets = expanded ? .zero : UIEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
         collapsedButton.isHidden = expanded
         expandedEffectView.isHidden = !expanded
         dragGesture.isEnabled = !expanded

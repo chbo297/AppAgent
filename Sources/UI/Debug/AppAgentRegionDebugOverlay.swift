@@ -2,12 +2,14 @@
 //  AppAgentRegionDebugOverlay.swift
 //  AppAgentUI
 //
-//  比 AppAgentWindow 更高一层的调试窗口：一颗浮动 debug 按钮 + 三个开关，
-//  分别用红 / 黄 / 蓝 1pt 边框把「点击输入区域」「上滑触发键盘区域」
-//  「上滑触发对话列表面板区域」实时框出来。
+//  比 AppAgentWindow 更高一层的调试窗口：一颗浮动 debug 按钮 + 四个开关，
+//  分别用红 / 黄 / 蓝 / 绿 1pt 边框把「点击输入区域」「上滑触发键盘区域」
+//  「上滑触发对话列表面板区域」「底部 bar 响应区域」实时框出来。
+//  点击区与上滑唤键盘区是同一块矩形，后者用虚线画，避免看上去像两种尺寸。
 //
 
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 
 /// 四类可被框出来的交互响应区域。
@@ -82,25 +84,37 @@ public final class AppAgentRegionDebugOverlay {
     public func hide() { window.isHidden = true }
 }
 
-/// 除调试按钮/面板本身以外全部穿透的窗口。
+/// 除调试按钮/面板本身以外全部穿透的窗口（穿透由 BOUIKit 的 `bo_skipsSelfInHitTest` 提供）。
 final class AppAgentRegionDebugWindow: UIWindow {
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        let hit = super.hitTest(point, with: event)
-        if hit === self || hit === rootViewController?.view { return nil }
-        return hit
+    override var rootViewController: UIViewController? {
+        didSet {
+            bo_skipsSelfInHitTest = true
+            rootViewController?.view.bo_skipsSelfInHitTest = true
+        }
     }
 }
 
-/// 单个区域的 1pt 边框 + 角标。
+/// 单个区域的 1pt 边框 + 角标。`isDashed` 用虚线，便于两个同尺寸的区域叠在一起时区分。
 final class AppAgentRegionOutlineView: UIView {
     private let nameLabel = UILabel()
+    private let dashedBorder: CAShapeLayer?
 
-    init(region: AppAgentInteractionRegion) {
+    init(region: AppAgentInteractionRegion, isDashed: Bool = false) {
+        dashedBorder = isDashed ? CAShapeLayer() : nil
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         backgroundColor = .clear
-        layer.borderWidth = 1
-        layer.borderColor = region.color.cgColor
+
+        if let dashedBorder {
+            dashedBorder.fillColor = nil
+            dashedBorder.strokeColor = region.color.cgColor
+            dashedBorder.lineWidth = 1
+            dashedBorder.lineDashPattern = [4, 3]
+            layer.addSublayer(dashedBorder)
+        } else {
+            layer.borderWidth = 1
+            layer.borderColor = region.color.cgColor
+        }
 
         nameLabel.text = region.title
         nameLabel.font = .systemFont(ofSize: 9, weight: .semibold)
@@ -111,13 +125,22 @@ final class AppAgentRegionOutlineView: UIView {
         addSubview(nameLabel)
         NSLayoutConstraint.activate([
             nameLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
-            nameLabel.topAnchor.constraint(equalTo: topAnchor),
-            nameLabel.heightAnchor.constraint(equalToConstant: 12)
+            nameLabel.heightAnchor.constraint(equalToConstant: 12),
+            // 虚线框（上滑区）把角标挂到底边，避免和实线框（点击区）的角标重叠。
+            isDashed
+                ? nameLabel.bottomAnchor.constraint(equalTo: bottomAnchor)
+                : nameLabel.topAnchor.constraint(equalTo: topAnchor)
         ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        dashedBorder?.frame = bounds
+        dashedBorder?.path = UIBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5)).cgPath
     }
 }
 

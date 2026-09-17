@@ -4,10 +4,14 @@
 //
 
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 
 /// A full-screen passthrough window. Only subviews that handle touches
 /// receive interaction; taps on empty areas pass through to the window below.
+///
+/// 穿透由 BOUIKit 的 `bo_skipsSelfInHitTest` 实现：window 与 rootViewController.view
+/// 命中自己时都返回 nil，触摸落到下层窗口；命中任意子视图时照常响应。
 public class AppAgentWindow: UIWindow {
 
     /// Convenience initializer that wires up an overlay window:
@@ -22,14 +26,12 @@ public class AppAgentWindow: UIWindow {
         self.isHidden = false
     }
 
-    public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        let hit = super.hitTest(point, with: event)
-        // If the hit view is the window itself or its root view controller's view,
-        // return nil so touches pass through to the underlying window.
-        if hit === self || hit === rootViewController?.view {
-            return nil
+    public override var rootViewController: UIViewController? {
+        didSet {
+            // window 自身与根视图都不接触摸，只让业务子视图响应。
+            bo_skipsSelfInHitTest = true
+            rootViewController?.view.bo_skipsSelfInHitTest = true
         }
-        return hit
     }
 }
 
