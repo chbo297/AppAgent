@@ -153,8 +153,16 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
         XCTAssertTrue(coordinator.dragScrollView.panelView === coordinator.panelView)
         XCTAssertFalse(coordinator.dragScrollView.clipsToBounds)
-        XCTAssertFalse(coordinator.dragScrollView.configuration.bounce.allowsPanelTopBounce)
-        XCTAssertFalse(coordinator.dragScrollView.configuration.bounce.allowsPanelBottomBounce)
+        // 手势内部优先、到边界再联动外层；橡皮筋只归外层卡片，内部列表自己不 bounce。
+        XCTAssertEqual(coordinator.dragScrollView.configuration.handoff.mode, .innerFirstAtBoundary)
+        XCTAssertTrue(coordinator.dragScrollView.configuration.bounce.allowsPanelTopBounce)
+        XCTAssertTrue(coordinator.dragScrollView.configuration.bounce.allowsPanelBottomBounce)
+        XCTAssertEqual(coordinator.dragScrollView.configuration.bounce.preferredTopOwner, .panel)
+        XCTAssertEqual(coordinator.dragScrollView.configuration.bounce.preferredBottomOwner, .panel)
+        XCTAssertFalse(coordinator.panelView.listView.participantScrollView.bounces)
+        // 滑动列表与拖动面板都不联动收键盘。
+        XCTAssertEqual(coordinator.panelView.listView.participantScrollView.keyboardDismissMode, .none)
+        XCTAssertEqual(coordinator.dragScrollView.keyboardDismissMode, .none)
         XCTAssertEqual(coordinator.dragScrollView.minimumDisplayHeight ?? -1, geometry.peekHeight, accuracy: 0.5)
         XCTAssertEqual(coordinator.dragScrollView.detentHeights, geometry.detentHeights)
         XCTAssertEqual(coordinator.panelView.bounds.size.width, geometry.panelSize.width, accuracy: 0.5)

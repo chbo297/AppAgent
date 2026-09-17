@@ -111,7 +111,10 @@ final class AppAgentChatMessageListView: UIView {
         tableView.allowsSelection = false
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 60
-        tableView.keyboardDismissMode = .interactive
+        // 滑动消息列表不联动收键盘（系统能力 keyboardDismissMode），键盘只由输入栏手势与点击控制。
+        tableView.keyboardDismissMode = .none
+        // 内部列表自身不做顶部/底部橡皮筋：到边界即把位移交给外层面板（bounce 归外层卡片）。
+        tableView.bounces = false
         tableView.contentInsetAdjustmentBehavior = .never
         tableView.automaticallyAdjustsScrollIndicatorInsets = false
         tableView.backgroundColor = .clear

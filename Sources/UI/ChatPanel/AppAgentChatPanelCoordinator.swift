@@ -36,15 +36,18 @@ final class AppAgentChatPanelCoordinator: NSObject {
         dragScrollView.behaviorProvider = self
         dragScrollView.eventDelegate = self
 
+        // 拖动面板不联动收键盘（BODragScrollView 也是 UIScrollView，默认 .none，这里显式声明意图）。
+        dragScrollView.keyboardDismissMode = .none
+
         var configuration = dragScrollView.configuration
-        // 内部优先：手指按在消息列表上时只滚列表，面板手势不参与；只有按在非滚动区域
-        // （导航栏、输入栏背景、空白处）才拖动面板。
-        configuration.handoff.mode = .innerFirst
-        // panel 到达最小展示高度后不再继续向更小方向产生 bounce。
-        configuration.bounce.allowsPanelTopBounce = false
-        // panel 到达顶部安全区下沿后不再继续向更大方向产生 bounce。
-        configuration.bounce.allowsPanelBottomBounce = false
-//        configuration.movement.defaultStyle = .viewAnimation
+        // 手势先滑内部列表，内部在该方向滑到底之后再把位移交给面板：内外联动、内部优先。
+        configuration.handoff.mode = .innerFirstAtBoundary
+        // 橡皮筋只归外层卡片：内部列表 bounces = false（见 AppAgentChatMessageListView），
+        // 两个方向的 bounce 都指定给 panel。
+        configuration.bounce.allowsPanelTopBounce = true
+        configuration.bounce.allowsPanelBottomBounce = true
+        configuration.bounce.preferredTopOwner = .panel
+        configuration.bounce.preferredBottomOwner = .panel
         dragScrollView.configuration = configuration
     }
 
