@@ -161,6 +161,13 @@ public final class AISessionManager: @unchecked Sendable {
 
     /// Restore all sessions from storage.
     public func restoreAll() async throws {
+        // 内置工具的注册是 AIAgent.init 丢出去的异步 Task，没就绪就解析工具表会拿到
+        // 「注册到一半」的残缺集合（靠后注册的 web_fetch / screenshot 会缺），而模型
+        // 看到的清单是实时全集，于是出现「清单里有、执行时 Tool not found」。
+        // `AIAgent.restoreAll` 已经等过一次，但这个方法是 public、也可能被直接调用，
+        // 所以闸门放在这里才真的守得住（`ensureReady` 幂等）。
+        await agent?.ensureReady()
+
         let snapshots = try await storage.loadAll()
         let mask = agent?.buildMask()
 
@@ -168,9 +175,14 @@ public final class AISessionManager: @unchecked Sendable {
         let resolved = await agent?.resolveProvider()
 
         for snapshot in snapshots {
+            // 和 createSession 走同一条策略链：恢复出来的会话不该比新建的多拿工具。
+            var policies: [ToolCentral.ToolPolicy] = []
+            if let agentPolicy = mask?.toolPolicy {
+                policies.append(agentPolicy)
+            }
             var installedTools: [String: any ToolProtocol] = [:]
             if let registry = mask?.toolCentral ?? agent?.toolCentral {
-                installedTools = await registry.resolveTools()
+                installedTools = await registry.resolveTools(policies: policies)
             }
 
             let session = AISession(

@@ -53,6 +53,15 @@ public struct SessionManageTool: ToolProtocol {
     public let group = "session"
     public let safetyLevel: Tool.SafetyLevel = .safe
 
+    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        switch arguments["op"]?.stringValue {
+        case "list", "read", "models": return .safe
+        case "create", "rename", "switch", "set_model": return .moderate
+        case "clear", "delete": return .sensitive     // 会丢对话历史
+        default: return .moderate
+        }
+    }
+
     public init() {}
 
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {

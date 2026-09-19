@@ -326,19 +326,13 @@ public enum AppAgentModelDiscovery {
         }
     }
 
-    /// URLSession 请求（iOS 13+ 兼容：dataTask + continuation）。
+    /// URLSession 请求。用 `data(for:)` 而不是手写 dataTask + continuation：前者
+    /// 响应 Task 取消，`withTimeout` 里输掉的那一路才能真的把请求带走。
     private static func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
-            let task = URLSession.shared.dataTask(with: request) { data, response, error in
-                if let error = error {
-                    continuation.resume(throwing: DiscoveryError.transport(error.localizedDescription))
-                } else if let data = data, let response = response {
-                    continuation.resume(returning: (data, response))
-                } else {
-                    continuation.resume(throwing: DiscoveryError.transport("empty response"))
-                }
-            }
-            task.resume()
+        do {
+            return try await URLSession.shared.data(for: request)
+        } catch {
+            throw DiscoveryError.transport(error.localizedDescription)
         }
     }
 

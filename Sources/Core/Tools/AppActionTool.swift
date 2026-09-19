@@ -19,6 +19,7 @@ public struct AppActionTool: ToolProtocol {
     public let parameters = Tool.Schema(
         properties: [
             "action": .string(description: "Action name to execute. Omit to list available actions."),
+            "_why": .string(description: "One sentence on why this action is needed. Shown to the user when they are asked to approve."),
             "parameters": .object(
                 description: "Key-value parameters for the action."
             )

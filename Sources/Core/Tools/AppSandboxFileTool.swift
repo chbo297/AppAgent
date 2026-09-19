@@ -14,9 +14,12 @@ import Foundation
 public struct AppSandboxFileTool: ToolProtocol {
     public let name = "app_sandbox_file"
     public let description = """
-        Browse and edit files inside the host app's sandbox (the app's home
-        directory). All paths are relative to the sandbox root; absolute paths
-        and '..' escapes are rejected. Choose an 'op':
+        Browse and edit files anywhere in the host app's sandbox — its whole home \
+        directory, so Library, Caches and tmp as well as Documents. All paths are \
+        relative to the sandbox root; absolute paths and '..' escapes are rejected. \
+        For ordinary working files prefer file_read / file_write / file_search, which are \
+        scoped to Documents; reach for this one when you need the app's own storage \
+        (preferences plists, databases, caches). Choose an 'op':
         - 'list': list entries under 'path' (default root). Marks directories.
         - 'read': read the UTF-8 contents of the file at 'path'.
         - 'write': write 'content' to 'path' (creates intermediate dirs).
@@ -25,6 +28,7 @@ public struct AppSandboxFileTool: ToolProtocol {
     public let parameters = Tool.Schema(
         properties: [
             "op": .string(description: "Operation.", enumValues: ["list", "read", "write", "delete"]),
+            "_why": .string(description: "One sentence on why this is needed. Shown to the user when they are asked to approve; supply it for 'delete'."),
             "path": .string(description: "Sandbox-relative path. Empty/omitted means the sandbox root (list only)."),
             "content": .string(description: "File contents to write for 'write'.")
         ],
@@ -32,6 +36,17 @@ public struct AppSandboxFileTool: ToolProtocol {
     )
     public let group = "host-storage"
     public let safetyLevel: Tool.SafetyLevel = .sensitive
+
+    /// Browsing the sandbox is harmless; deleting from it is not. Without this split
+    /// one approval for `list` would carry over to `delete`.
+    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        switch arguments["op"]?.stringValue {
+        case "list", "read": return .safe
+        case "write": return .moderate
+        case "delete": return .sensitive
+        default: return .sensitive
+        }
+    }
 
     private let root: URL
 

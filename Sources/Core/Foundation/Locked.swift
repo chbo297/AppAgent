@@ -59,6 +59,17 @@ public final class Locked<Value: Sendable>: @unchecked Sendable {
         get { _lock.withLock { _value } }
         set { _lock.withLock { _value = newValue } }
     }
+
+    /// 在一次临界区内完成读-改-写。
+    ///
+    /// `value += 1` 走的是 get 再 set 两次加锁，中间别的线程能插进来，计数器就会丢号。
+    /// 需要原子自增 / 原子追加时用这个，不要用复合赋值。
+    public func mutate<Result>(_ body: (inout Value) -> Result) -> Result {
+        _lock.withLock { body(&_value) }
+    }
+
+    /// `$value` 拿到 wrapper 自身，这样调用方能写 `$counter.mutate { $0 += 1 }`。
+    public var projectedValue: Locked<Value> { self }
 }
 
 // MARK: - WeakLocked

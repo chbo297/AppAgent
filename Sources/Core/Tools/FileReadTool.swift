@@ -11,8 +11,9 @@ import Foundation
 public struct FileReadTool: ToolProtocol {
     public let name = "file_read"
     public let description = """
-        Read a text file within the app sandbox. Returns content with line numbers. \
-        Use offset and limit for large files.
+        Read a text file from the agent's workspace (the app's Documents directory). \
+        Returns content with line numbers. Use offset and limit for large files. \
+        For anything outside Documents — Library, tmp, Caches — use app_sandbox_file instead.
         """
     public let parameters = Tool.Schema(
         properties: [

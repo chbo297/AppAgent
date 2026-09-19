@@ -49,6 +49,15 @@ public struct HookCaptureTool: ToolProtocol {
     public let group = "host-runtime"
     public let safetyLevel: Tool.SafetyLevel = .moderate
 
+    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        switch arguments["op"]?.stringValue {
+        case "status", "read": return .safe
+        case "start", "stop", "stop_all": return .moderate
+        case "clear": return .sensitive      // 删抓包文件不可逆
+        default: return .moderate
+        }
+    }
+
     public init() {}
 
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {

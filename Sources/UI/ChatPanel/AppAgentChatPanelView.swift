@@ -25,6 +25,9 @@ final class AppAgentChatPanelView: UIView {
     /// 聊天内容区，消息的追加和流式更新由宿主直接操作。
     let listView = AppAgentChatMessageListView()
 
+    /// 「等用户拍板」的卡片。只在面板内部呈现，不新建 window、不遮挡宿主界面。
+    let decisionCard = AppAgentDecisionCardView()
+
     /// 内容区顶部导航栏，与拖拽手柄区相互独立。
     let navigationBar = AppAgentChatPanelNavigationBar()
 
@@ -134,6 +137,7 @@ final class AppAgentChatPanelView: UIView {
             // 导航栏和消息列表始终按完整 contentArea 布局；viewport 变化时只裁切，不重排内容。
             navigationBar.frame = layout.navigationBarFrame
             listView.frame = layout.messageListFrame
+            layoutDecisionCard()
         }
 
         // 【竖向收起形状应用点】背景和 viewport mask 共用同一条路径，只计算一次，保证边缘完全重合。
@@ -150,6 +154,58 @@ final class AppAgentChatPanelView: UIView {
         viewportMaskLayer.frame = viewportView.bounds
         viewportMaskLayer.path = shapePath
         CATransaction.commit()
+    }
+
+    /// 决策卡片底部要额外让出的高度：面板 viewport 会延伸到 inputBar 之下，
+    /// 不让这一段卡片底部的按钮会被输入栏压住（实测踩过）。由 VC 用 inputBar 几何写入。
+    var decisionCardBottomInset: CGFloat = 0 {
+        didSet {
+            guard decisionCardBottomInset != oldValue else { return }
+            layoutDecisionCard()
+        }
+    }
+
+    /// 卡片贴**可见区**（viewport）底边，左右留边，底部再让开 inputBar。
+    ///
+    /// 注意别拿 `layout.messageListFrame` 定位：消息列表按完整 contentArea 布局、由
+    /// viewport 裁切，它的底边通常在可见区外面，卡片会被裁掉看不见（踩过）。
+    private func layoutDecisionCard() {
+        guard !decisionCard.isHidden else { return }
+        let inset: CGFloat = 12
+        let bounds = viewportView.bounds
+        let width = bounds.width - inset * 2
+        let available = bounds.height - inset * 2 - decisionCardBottomInset
+        guard width > 0, available > 0 else { return }
+        let height = min(decisionCard.height(fittingWidth: width), available)
+        decisionCard.frame = CGRect(x: bounds.minX + inset,
+                                    y: bounds.maxY - height - inset - decisionCardBottomInset,
+                                    width: width,
+                                    height: height)
+    }
+
+    /// 呈现一张决策卡片。返回 false 表示现在没法呈现（还没布局过），交回决策中心兜底。
+    @discardableResult
+    func presentDecision(_ request: DecisionRequest,
+                         onSelect: @escaping (DecisionOutcome) -> Void) -> Bool {
+        guard viewportView.bounds.width > 0, viewportView.bounds.height > 0 else {
+            Logger.info("AppAgentChatPanelView",
+                        "decisionCardCannotPresent: viewport=\(viewportView.bounds)")
+            return false
+        }
+        decisionCard.configure(with: request)
+        decisionCard.onSelect = { [weak self] outcome in
+            self?.dismissDecision()
+            onSelect(outcome)
+        }
+        decisionCard.isHidden = false
+        viewportView.bringSubviewToFront(decisionCard)
+        layoutDecisionCard()
+        return true
+    }
+
+    func dismissDecision() {
+        decisionCard.isHidden = true
+        decisionCard.onSelect = nil
     }
 
     private func setup() {
@@ -175,6 +231,8 @@ final class AppAgentChatPanelView: UIView {
         contentAreaView.addSubview(viewportView)
         viewportView.addSubview(listView)
         viewportView.addSubview(navigationBar)
+        decisionCard.isHidden = true
+        viewportView.addSubview(decisionCard)
 
         navigationBar.onSessionListRequested = { [weak self] in
             self?.onSessionListRequested?()

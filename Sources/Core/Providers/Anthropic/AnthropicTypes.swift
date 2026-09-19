@@ -95,14 +95,74 @@ struct AnthropicToolResultBlock: Codable, Sendable {
     let type: String
     let toolUseId: String
     let content: String
+    /// 附带的图片。Anthropic 的 `tool_result.content` 可以是 block 数组，
+    /// 图片能直接挂在结果里；OpenAI 两个协议都不行，见各自 mapper。
+    let images: [AnthropicImageBlock]
 
     enum CodingKeys: String, CodingKey {
         case type, content
         case toolUseId = "tool_use_id"
     }
 
-    init(toolUseId: String, content: String) {
-        self.type = "tool_result"; self.toolUseId = toolUseId; self.content = content
+    init(toolUseId: String, content: String, images: [AnthropicImageBlock] = []) {
+        self.type = "tool_result"; self.toolUseId = toolUseId
+        self.content = content; self.images = images
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decode(String.self, forKey: .type)
+        self.toolUseId = try container.decode(String.self, forKey: .toolUseId)
+        self.content = (try? container.decode(String.self, forKey: .content)) ?? ""
+        self.images = []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(toolUseId, forKey: .toolUseId)
+        // 没有图片时保持字符串形式：wire 更短，也和历史行为一致。
+        if images.isEmpty {
+            try container.encode(content, forKey: .content)
+        } else {
+            var blocks: [AnthropicToolResultContentBlock] = [.text(AnthropicTextBlock(text: content))]
+            blocks.append(contentsOf: images.map { .image($0) })
+            try container.encode(blocks, forKey: .content)
+        }
+    }
+}
+
+/// `tool_result.content` 数组里的元素：文字或图片。
+enum AnthropicToolResultContentBlock: Encodable, Sendable {
+    case text(AnthropicTextBlock)
+    case image(AnthropicImageBlock)
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .text(let block): try block.encode(to: encoder)
+        case .image(let block): try block.encode(to: encoder)
+        }
+    }
+}
+
+/// `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}`
+struct AnthropicImageBlock: Encodable, Sendable {
+    let type = "image"
+    let source: Source
+
+    struct Source: Encodable, Sendable {
+        let type = "base64"
+        let mediaType: String
+        let data: String
+
+        enum CodingKeys: String, CodingKey {
+            case type, data
+            case mediaType = "media_type"
+        }
+    }
+
+    init(base64: String, mediaType: String) {
+        self.source = Source(mediaType: mediaType, data: base64)
     }
 }
 

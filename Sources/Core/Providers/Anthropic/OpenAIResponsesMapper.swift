@@ -71,11 +71,30 @@ enum OpenAIResponsesMapper {
             case .toolResult(let resultPart):
                 // function_call_output is a top-level input item, not nested in a role message.
                 flushContent()
+                var output = resultPart.content
+                if !resultPart.images.isEmpty {
+                    output += "\n[\(resultPart.images.count) image(s) attached in the next input item]"
+                }
                 result.append([
                     "type": "function_call_output",
                     "call_id": resultPart.toolCallId,
-                    "output": resultPart.content
+                    "output": output
                 ])
+                // `function_call_output.output` 也只吃字符串，所以图片跟在后面一条
+                // user message 里，用 Responses API 的 input_image。
+                if !resultPart.images.isEmpty {
+                    var parts: [[String: Any]] = [[
+                        "type": "input_text",
+                        "text": "Image(s) returned by tool call \(resultPart.toolCallId)."
+                    ]]
+                    for image in resultPart.images {
+                        parts.append([
+                            "type": "input_image",
+                            "image_url": "data:\(image.mediaType);base64,\(image.base64)"
+                        ])
+                    }
+                    result.append(["role": "user", "content": parts])
+                }
             case .toolUse:
                 break
             }

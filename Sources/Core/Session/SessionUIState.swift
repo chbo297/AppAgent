@@ -21,6 +21,9 @@ public final class SessionUIState: @unchecked Sendable {
     /// 自定义状态键：当前实际使用的模型引用（运行期回退后会更新）。
     public static let activeModelKey = "activeModelRef"
 
+    /// `onChange` 在「等用户决定」状态变化时带的 key。
+    public static let pendingDecisionKey = "pendingDecision"
+
     private let lock = ReadersWriterLock()
 
     // MARK: - Built-in State (backing)
@@ -29,6 +32,11 @@ public final class SessionUIState: @unchecked Sendable {
     private var _streamingText: String = ""
     private var _reasoningText: String = ""
     private var _lastError: Error?
+    /// 还在等用户拍板的请求**栈**。
+    ///
+    /// 不是单槽：safe 级工具并发跑，两个 `clarify` / 两次授权可以同时在等。单槽的话
+    /// 先答完的那个会把「还有人在等」这个阻塞态直接清掉，宿主据此判断就错了。
+    private var _pendingDecisions: [DecisionRequest] = []
 
     // MARK: - Custom State (backing)
 
@@ -51,6 +59,16 @@ public final class SessionUIState: @unchecked Sendable {
 
     /// The last error encountered, if any.
     public var lastError: Error? { lock.read { _lastError } }
+
+    // MARK: - Pending Decision (awaiting user)
+
+    /// 会话里的「等用户决定」状态：正在被问的那一个（入栈顺序里最早、还没被答复的）。
+    ///
+    /// 与 UI 一致：面板贴的也是队首那张卡。非 nil 时执行流正 await 用户拍板。
+    public var pendingDecision: DecisionRequest? { lock.read { _pendingDecisions.first } }
+
+    /// 当前有多少个请求在等用户拍板。
+    public var pendingDecisionCount: Int { lock.read { _pendingDecisions.count } }
 
     /// UI layer sets this callback to respond to state changes.
     /// The key parameter indicates which state changed.
@@ -108,8 +126,36 @@ public final class SessionUIState: @unchecked Sendable {
         }
     }
 
-    // MARK: - Custom State (public, tools can read/write)
+    // MARK: - Pending Decision Updates (public — tools set these while awaiting the user)
 
+    /// 进入「等用户决定」态。`AISession.requestDecision` 在问人之前调用。
+    public func setPendingDecision(_ decision: DecisionRequest) {
+        let callback = lock.writeSync { () -> ((String) -> Void)? in
+            _pendingDecisions.append(decision)
+            return _onChange
+        }
+        dispatchCallback(callback, key: Self.pendingDecisionKey)
+    }
+
+    /// 用户已决定（或工具放弃等待），退出阻塞态。
+    ///
+    /// 传上原来的 request，多个请求并发在等时才摘得准；**显式传了但没命中就什么都不做**
+    /// （宁可漏摘也不能把别人还在等的那一条摘掉）。缺省（nil）时摘最后入栈的那个。
+    public func clearPendingDecision(_ decision: DecisionRequest? = nil) {
+        let callback = lock.writeSync { () -> ((String) -> Void)? in
+            guard !_pendingDecisions.isEmpty else { return nil }
+            if let decision = decision {
+                guard let index = _pendingDecisions.lastIndex(of: decision) else { return nil }
+                _pendingDecisions.remove(at: index)
+            } else {
+                _pendingDecisions.removeLast()
+            }
+            return _onChange
+        }
+        dispatchCallback(callback, key: Self.pendingDecisionKey)
+    }
+
+    // MARK: - Custom State (public, tools can read/write)
     /// Set a custom state value.
     public func set<T>(_ key: String, value: T) {
         let callback = lock.writeSync { () -> ((String) -> Void)? in
@@ -131,6 +177,23 @@ public final class SessionUIState: @unchecked Sendable {
             return _onChange
         }
         dispatchCallback(callback, key: key)
+    }
+
+    /// 往「字符串数组」型的自定义状态里原子地补一项（已存在则不动），返回补完之后的全量。
+    ///
+    /// 为什么要单独一个方法：`get` 出来 + 追加 + `set` 回去这三步之间不是临界区。
+    /// safe 级工具是并发执行的，两次授权「本会话都允许」互相覆盖，其中一次就白点了
+    /// （下一次同样的操作还会再问一遍）。授权名单只增不减，所以合并即可。
+    @discardableResult
+    public func appendUnique(_ value: String, forKey key: String) -> [String] {
+        let (callback, merged) = lock.writeSync { () -> (((String) -> Void)?, [String]) in
+            var list = _customState[key] as? [String] ?? []
+            if !list.contains(value) { list.append(value) }
+            _customState[key] = list
+            return (_onChange, list)
+        }
+        dispatchCallback(callback, key: key)
+        return merged
     }
 
     // MARK: - Private

@@ -42,6 +42,12 @@ struct AppAgentChatPanelGeometry: Equatable {
     /// ChatPanel 的最大展示高度：拖拽手柄区可占用顶部安全区，内容区域不越过安全区下沿。
     let maximumDisplayHeight: CGFloat
 
+    /// 内部消息列表的底部 inset：展开态 inputBar 白色背景顶部到屏幕底部的高度。
+    ///
+    /// 只由安全区和 bar 高度决定，因此在整个生命周期内固定：键盘弹出时 inputBar 与 ChatPanel 容器
+    /// 会一起上移，列表不需要再改 inset；面板拖动过程中列表滚动指标也因此不会被反复重算。
+    let listBottomInset: CGFloat
+
     /// 根据控制器、安全区和 inputBar 展开宽度生成合法几何；无有效空间时返回 nil。
     init?(
         bounds: CGRect,
@@ -60,14 +66,13 @@ struct AppAgentChatPanelGeometry: Equatable {
         let panelWidth = min(bounds.width, max(0, preferredWidth))
         guard panelWidth > 0 else { return nil }
 
+        let listBottomInset = min(
+            maximumDisplayHeight,
+            max(0, safeAreaInsets.bottom + AppAgentInputBar.barHeight)
+        )
         let peekHeight = min(
             maximumDisplayHeight,
-            max(
-                0,
-                safeAreaInsets.bottom
-                    + AppAgentInputBar.barHeight
-                    + Self.dragHandleAreaHeight
-            )
+            max(0, listBottomInset + Self.dragHandleAreaHeight)
         )
         let halfHeight = min(
             maximumDisplayHeight,
@@ -78,6 +83,7 @@ struct AppAgentChatPanelGeometry: Equatable {
         self.peekHeight = peekHeight
         self.halfHeight = halfHeight
         self.maximumDisplayHeight = maximumDisplayHeight
+        self.listBottomInset = listBottomInset
     }
 
     /// 交给 BODragScroll 的已排序、去重档位，避免紧凑窗口中多个业务档位重合。

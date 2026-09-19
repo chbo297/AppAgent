@@ -92,34 +92,37 @@ public final class ChatMessageCell: UITableViewCell {
     }
 
     public func configure(with message: ChatMessage) {
-        messageTextView.text = message.text.isEmpty ? "..." : message.text
+        let baseFont = UIFont.systemFont(ofSize: 15)
 
         // Deactivate both, then activate the correct one
         leadingConstraint.isActive = false
         trailingConstraint.isActive = false
 
+        var textColor = AppAgentAppearance.primaryText
         switch message.role {
         case .user:
             trailingConstraint.isActive = true
             bubbleView.backgroundColor = AppAgentAppearance.userBubbleBackground
-            messageTextView.textColor = .white
+            textColor = .white
             // 深色气泡上用白色选择手柄/放大镜，否则几乎看不见。
             messageTextView.tintColor = .white
         case .assistant:
             leadingConstraint.isActive = true
             bubbleView.backgroundColor = AppAgentAppearance.assistantBubbleBackground
-            messageTextView.textColor = AppAgentAppearance.primaryText
             messageTextView.tintColor = nil
         }
 
         if message.status == .error {
             bubbleView.backgroundColor = AppAgentAppearance.errorBackground
-            messageTextView.textColor = AppAgentAppearance.errorText
+            textColor = AppAgentAppearance.errorText
             messageTextView.tintColor = nil
         }
 
+        applyText(message, baseFont: baseFont, color: textColor)
+
         // 过程区：只有 assistant 且确实有过程时才显示。
-        if let activity = message.activity, !activity.isEmpty {
+        // role 判定不能省：过程区挂到用户气泡上是明显的错（注释曾经说了但代码没做）。
+        if message.role == .assistant, let activity = message.activity, !activity.isEmpty {
             activityView.isHidden = false
             activityView.configure(with: activity, expanded: message.isActivityExpanded)
         } else {
@@ -131,6 +134,26 @@ public final class ChatMessageCell: UITableViewCell {
             && message.text.isEmpty
             && !(message.activity?.isEmpty ?? true)
         bubbleRow.isHidden = hideEmptyStreamingBubble
+    }
+
+    /// agent 的回复按 markdown 渲染；用户自己的话保持原样，不做任何解释。
+    private func applyText(_ message: ChatMessage, baseFont: UIFont, color: UIColor) {
+        let source = message.text.isEmpty ? "..." : message.text
+        switch message.role {
+        case .user:
+            messageTextView.attributedText = NSAttributedString(string: source, attributes: [
+                .font: baseFont,
+                .foregroundColor: color
+            ])
+        case .assistant:
+            messageTextView.attributedText = AppAgentMarkdown.attributed(
+                source, baseFont: baseFont, color: color
+            )
+        }
+        messageTextView.linkTextAttributes = [
+            .foregroundColor: messageTextView.tintColor ?? AppAgentAppearance.primaryText,
+            .underlineStyle: NSUnderlineStyle.single.rawValue
+        ]
     }
 }
 

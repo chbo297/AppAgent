@@ -63,7 +63,7 @@ public enum LijiServerError: Error, Sendable {
     case decoding(String)
 }
 
-/// liji_server 客户端。所有方法 async，iOS 13 兼容（continuation 包装 dataTask）。
+/// liji_server 客户端。所有方法 async（URLSession 的 async API，响应 Task 取消）。
 public final class LijiServerClient: @unchecked Sendable {
     private let baseURL: String
     private let devUser: String?
@@ -104,21 +104,20 @@ public final class LijiServerClient: @unchecked Sendable {
         return req
     }
 
+    /// 用 `data(for:)` 而不是手写 dataTask + continuation：前者响应 Task 取消
+    /// （最低支持已是 iOS 15 / macOS 12，那层兼容垫片不再需要）。
     private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        try await withCheckedThrowingContinuation { cont in
-            let task = session.dataTask(with: request) { data, response, error in
-                if let error {
-                    cont.resume(throwing: LijiServerError.transport(error.localizedDescription))
-                    return
-                }
-                guard let http = response as? HTTPURLResponse else {
-                    cont.resume(throwing: LijiServerError.transport("no HTTP response"))
-                    return
-                }
-                cont.resume(returning: (data ?? Data(), http))
-            }
-            task.resume()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw LijiServerError.transport(error.localizedDescription)
         }
+        guard let http = response as? HTTPURLResponse else {
+            throw LijiServerError.transport("no HTTP response")
+        }
+        return (data, http)
     }
 
     private func decodeJSON<T: Decodable>(_ type: T.Type, _ request: URLRequest) async throws -> T {

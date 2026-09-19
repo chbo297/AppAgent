@@ -51,6 +51,19 @@ public struct AIAgentProfile: Sendable {
     /// Single tool execution timeout in seconds. Default: 60s.
     public var toolTimeout: TimeInterval
 
+    /// Agent-wide cap on how many UTF-8 bytes one tool result may hand the model.
+    /// Oversized results are truncated with a hint to narrow the query, so a single
+    /// chatty call (a deep `ui_hierarchy`, an unfiltered `class_list`) cannot eat the
+    /// context window. A tool raises its own ceiling via `ToolProtocol.outputMaxBytes`.
+    /// Default: 8 KB.
+    public var toolOutputMaxBytes: Int = 8192
+
+    /// Whether the agent may change runtime state at all. `.readOnly` refuses every
+    /// call whose per-call safety level is above `.safe` before it executes — the
+    /// iOS stand-in for Codex's `sandbox_mode`. Ship read-only and open it up for
+    /// debug builds or an explicit user opt-in. Default: `.allowed`.
+    public var toolMutationPolicy: Tool.MutationPolicy = .allowed
+
     // MARK: - Persistence
 
     /// Whether to auto-persist sessions after each completed agent run. Default: true.

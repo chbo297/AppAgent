@@ -27,13 +27,13 @@ final class AppAgentRegionDebugTests: XCTestCase {
         )
         container.addSubview(listView)
 
-        listView.updateVisibleArea(visibleHeight: 280, bottomAvoidingInset: 100)
+        listView.updateVisibleArea(visibleHeight: 280, bottomInset: 100)
         let rect = AppAgentRegionDebugViewController.outlineRect(
             source: listView.participantScrollView, container: container
         )
         XCTAssertEqual(rect, CGRect(x: 12, y: 100, width: 366, height: 280))
 
-        listView.updateVisibleArea(visibleHeight: 640, bottomAvoidingInset: 100)
+        listView.updateVisibleArea(visibleHeight: 640, bottomInset: 100)
         let expandedRect = AppAgentRegionDebugViewController.outlineRect(
             source: listView.participantScrollView, container: container
         )

@@ -29,6 +29,7 @@ final class SessionManageTests: XCTestCase {
         case .json(let v): return v
         case .text(let t): return .string(t)
         case .error(let e): return .object(["error": .string(e)])
+        case .image(let image): return .object(["image": .string(image.caption)])
         }
     }
 

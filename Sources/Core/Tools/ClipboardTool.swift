@@ -34,6 +34,10 @@ public struct ClipboardTool: ToolProtocol {
     public let group: String = "system"
     public let safetyLevel: Tool.SafetyLevel = .moderate
 
+    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        arguments["action"]?.stringValue == "read" ? .safe : .moderate
+    }
+
     public init() {}
 
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {

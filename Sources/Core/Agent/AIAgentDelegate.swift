@@ -5,6 +5,10 @@
 
 import Foundation
 
+/// 逐次授权的结果。历史名字，语义已并入 `DecisionOutcome`；保留一个 typealias
+/// 免得宿主代码里到处改名。
+public typealias ToolAuthorization = DecisionOutcome
+
 /// Delegate protocol for agent lifecycle callbacks.
 public protocol AIAgentDelegate: AnyObject, Sendable {
     /// Called when a new session is created.
@@ -23,15 +27,15 @@ public protocol AIAgentDelegate: AnyObject, Sendable {
     /// Called when a session encounters an error.
     func aiAgent(_ aiAgent: AIAgent, session: AISession, didEncounterError error: Error)
 
-    /// Called when a tool with `sensitive` or `dangerous` safety level is about to execute.
-    /// Return `true` to allow execution, `false` to reject (tool returns an error to the LLM).
-    func aiAgent(_ aiAgent: AIAgent, session: AISession, shouldExecuteTool name: String,
-               safetyLevel: Tool.SafetyLevel, arguments: [String: JSONValue]) async -> Bool
-
-    /// Called when the ClarifyTool needs user input.
-    /// Return the user's answer string.
+    /// 宿主**策略**钩子：在问用户之前，宿主有没有意见。
+    ///
+    /// 这是一个非交互的判断，不要在这里弹 UI —— 呈现由 AppAgent 自己的面板负责
+    /// （`DecisionResponder`）。用它来表达与用户意愿无关的硬性规则，例如企业策略
+    /// 「内网一律禁止，连问都不要问」。
+    ///
+    /// 返回 `nil`（默认）= 没有意见，交给用户决定。
     func aiAgent(_ aiAgent: AIAgent, session: AISession,
-               needsClarification question: String, choices: [String]?) async -> String?
+                 policyFor request: DecisionRequest) async -> DecisionOutcome?
 }
 
 // Default no-op implementations.
@@ -42,15 +46,10 @@ extension AIAgentDelegate {
     public func aiAgent(_ aiAgent: AIAgent, session: AISession, didRejectRun error: Error) {}
     public func aiAgent(_ aiAgent: AIAgent, session: AISession, didEncounterError error: Error) {}
 
-    /// Default: allow all tool executions.
-    public func aiAgent(_ aiAgent: AIAgent, session: AISession, shouldExecuteTool name: String,
-                      safetyLevel: Tool.SafetyLevel, arguments: [String: JSONValue]) async -> Bool {
-        true
-    }
-
-    /// Default: return nil (tool reports no answer to LLM).
+    /// 默认：没有意见。注意这里**不是**「默认放行」——没有意见意味着继续往下问用户，
+    /// 而没人能问时 `AISession.requestDecision` 兜底拒绝。
     public func aiAgent(_ aiAgent: AIAgent, session: AISession,
-                      needsClarification question: String, choices: [String]?) async -> String? {
+                        policyFor request: DecisionRequest) async -> DecisionOutcome? {
         nil
     }
 }

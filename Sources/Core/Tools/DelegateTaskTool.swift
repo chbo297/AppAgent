@@ -58,7 +58,9 @@ public struct DelegateTaskTool: ToolProtocol {
 
         // Create a temporary sub-session (not persisted), with incremented depth.
         // Use empty tools — reinstallTools() will create independent instances.
-        // Inherit the parent session's mask so the sub-session operates under the same frozen config.
+        // Inherit the parent session's mask so the sub-session operates under the same frozen config,
+        // and inherit provider/modelId: a session without them fails every run in LLMExecutor with
+        // "No provider configured", which made delegate_task useless no matter what the model asked.
         let subAgentId = session.agentMask?.agent?.id ?? "sub"
         let subSessionId = "\(subAgentId)_sub_\(UUID().uuidString.prefix(8).lowercased())"
         let subSession = AISession(
@@ -66,6 +68,8 @@ public struct DelegateTaskTool: ToolProtocol {
             title: "Subtask: \(goal.prefix(50))",
             agentMask: session.agentMask,
             installedTools: [:],
+            provider: session.provider,
+            modelId: session.modelId,
             delegationDepth: session.delegationDepth + 1
         )
 

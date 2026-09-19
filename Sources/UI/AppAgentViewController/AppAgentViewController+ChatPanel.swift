@@ -28,6 +28,11 @@ extension AppAgentViewController {
         chatPanelView.onNewSessionRequested = { [weak self] in
             self?.startNewSession()
         }
+        // 过程区展开态由 ViewController 持有：列表每轮结束都会整体重建，
+        // 只有把「用户点开了哪一轮」记在这边才不会被重建擦掉。
+        chatPanelView.listView.onActivityToggled = { [weak self] message in
+            self?.handleActivityToggled(message)
+        }
     }
 
     /// 新建一个会话并切换过去；未绑定 agent 时无操作。
@@ -45,8 +50,7 @@ extension AppAgentViewController {
         chatPanelCoordinator.updateLayout(
             bounds: view.bounds,
             safeAreaInsets: view.safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame,
-            bottomAvoidingInset: chatPanelBottomAvoidingInset
+            inputBarExpandedFrame: inputBarExpandedFrame
         )
         applyChatPanelContainerLayout(
             inputBarFrame: inputBar.frame,
@@ -69,6 +73,10 @@ extension AppAgentViewController {
             inputBarExpandedFrame: inputBarExpandedFrame
         )
         chatPanelContainer.apply(layout, animation: animation)
+
+        // 决策卡片要停在 inputBar 上方：面板 viewport 会一直延伸到 inputBar 底下那一段。
+        let panelBottomInView = chatPanelContainer.frame.maxY
+        chatPanelView.decisionCardBottomInset = max(0, panelBottomInView - inputBarFrame.minY + 8)
     }
 
     /// inputBar 展开态相对无键盘底部位置实际上移的距离；其他输入框触发键盘时结果为 0。
@@ -91,20 +99,6 @@ extension AppAgentViewController {
     func revealChatPanelForNewMessagesIfNeeded() {
         guard chatPanelCoordinator.isAtPeekDetent else { return }
         setChatPanelDetent(.half, animated: true)
-    }
-
-    /// 列表底部避让：ChatPanel 已随自身 inputBar 上移时只保留安全区，否则继续避让外部键盘。
-    func updateChatPanelListInsets() {
-        chatPanelCoordinator.updateBottomAvoidingInset(chatPanelBottomAvoidingInset)
-    }
-
-    private var chatPanelBottomAvoidingInset: CGFloat {
-        let bottomOcclusion = shouldInputBarAvoidKeyboard
-            ? view.safeAreaInsets.bottom
-            : max(view.safeAreaInsets.bottom, observedKeyboardHeight)
-        return bottomOcclusion
-            + AppAgentInputBar.barHeight
-            + 12
     }
 
     // MARK: - 消息通路

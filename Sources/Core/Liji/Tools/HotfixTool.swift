@@ -19,7 +19,9 @@ public struct HotfixTool: ToolProtocol {
         """
     public let parameters = Tool.Schema(
         properties: [
-            "op": .string(description: "Operation.", enumValues: ["list", "apply", "toggle", "remove"]),
+            "op": .string(description: "Operation.",
+                          enumValues: ["list", "apply", "toggle", "remove"]),
+            "_why": .string(description: "One sentence on why this is needed. Shown to the user when they are asked to approve; supply it for 'apply'."),
             "name": .string(description: "Patch slot name."),
             "javascript": .string(description: "JS patch source for apply."),
             "applyMode": .string(description: "instant | restart", enumValues: ["instant", "restart"]),
@@ -30,6 +32,17 @@ public struct HotfixTool: ToolProtocol {
     )
     public let group = "liji-hotfix"
     public let safetyLevel: Tool.SafetyLevel = .sensitive
+
+    /// `apply` 会在运行时执行任意 JS 改 UI/逻辑，风险等级和「列一下装了哪些补丁」
+    /// 完全不在一个量级。
+    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        switch arguments["op"]?.stringValue {
+        case "list": return .safe
+        case "toggle", "remove": return .moderate
+        case "apply": return .dangerous
+        default: return .sensitive
+        }
+    }
 
     private let provider: HotfixProvider
 
@@ -56,12 +69,15 @@ public struct HotfixTool: ToolProtocol {
             let mode = arguments["applyMode"]?.stringValue ?? "restart"
             let summary = arguments["summary"]?.stringValue ?? ""
             let result = await provider.apply(name: name, javascript: js, applyMode: mode, summary: summary)
-            return .json(.object([
+            let payload = JSONValue.object([
                 "success": .bool(result.success),
                 "applyMode": .string(result.applyMode),
                 "needsRestart": .bool(result.needsRestart),
                 "message": .string(result.message)
-            ]))
+            ])
+            // 打补丁失败（JS 报错等）必须以 .error 收场：包成 .json 交回去的话
+            // 这次调用在过程区里是「成功」，模型也容易把 success:false 读漏。
+            return result.success ? .json(payload) : .error("hotfix apply failed: \(result.message)")
         case "toggle":
             guard let name = arguments["name"]?.stringValue else {
                 return .error("'name' is required for toggle")
@@ -69,13 +85,15 @@ public struct HotfixTool: ToolProtocol {
             var enabled = true
             if case .bool(let b)? = arguments["enabled"] { enabled = b }
             let ok = await provider.setEnabled(name: name, enabled: enabled)
-            return .json(.object(["success": .bool(ok), "enabled": .bool(enabled)]))
+            guard ok else { return .error("no patch named '\(name)' (or re-enabling it failed).") }
+            return .json(.object(["success": .bool(true), "enabled": .bool(enabled)]))
         case "remove":
             guard let name = arguments["name"]?.stringValue else {
                 return .error("'name' is required for remove")
             }
             let ok = await provider.remove(name: name)
-            return .json(.object(["success": .bool(ok)]))
+            guard ok else { return .error("no patch named '\(name)' to remove.") }
+            return .json(.object(["success": .bool(true)]))
         default:
             return .error("unknown op: \(op)")
         }

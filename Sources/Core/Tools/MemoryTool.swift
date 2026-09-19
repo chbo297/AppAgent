@@ -42,6 +42,15 @@ public struct MemoryTool: ToolProtocol {
     public let group: String = "core"
     public let safetyLevel: Tool.SafetyLevel = .safe
 
+    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        switch arguments["action"]?.stringValue {
+        case "search": return .safe
+        case "add": return .moderate
+        case "remove": return .sensitive
+        default: return .moderate
+        }
+    }
+
     public init() {}
 
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {

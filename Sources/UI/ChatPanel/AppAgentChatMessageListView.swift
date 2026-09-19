@@ -12,6 +12,11 @@ final class AppAgentChatMessageListView: UIView {
 
     private(set) var messages: [ChatMessage] = []
 
+    /// 用户点了某条消息的过程区折叠行之后回调，带上切换后的那条消息。
+    /// 宿主（ViewController）用它把展开态同步到自己的快照与「已展开的轮次」集合里，
+    /// 否则下一次整体重建就把用户点开的过程区又折回去了。
+    var onActivityToggled: ((ChatMessage) -> Void)?
+
     private let tableView = UITableView()
     private var appliedBottomInset: CGFloat = 0
 
@@ -45,13 +50,19 @@ final class AppAgentChatMessageListView: UIView {
 
     // MARK: - 数据操作
 
-    func setMessages(_ messages: [ChatMessage]) {
+    /// 整体替换列表内容。
+    ///
+    /// `forceScrollToBottom` 只在「换了会话 / 首次装载」这类应当回到最新一条的场合传 true。
+    /// 每轮结束都会重建列表，若无条件滚到底，正在翻历史的用户会被拽回底部。
+    func setMessages(_ messages: [ChatMessage], forceScrollToBottom: Bool = true) {
+        let wasFollowingLatestMessage = isNearBottom
         self.messages = messages
         tableView.reloadData()
         if messages.isEmpty {
             pendingScrollToBottomAnimated = nil
             return
         }
+        guard forceScrollToBottom || wasFollowingLatestMessage else { return }
         scrollToBottom(animated: false)
     }
 
@@ -70,29 +81,37 @@ final class AppAgentChatMessageListView: UIView {
         }
     }
 
-    /// 流式更新最后一条消息（文本与状态），用于模拟/真实的模型逐字输出。
-    func updateLastMessage(text: String, status: ChatMessage.Status) {
-        guard !messages.isEmpty else { return }
+    /// 流式更新某条消息（文本与状态），用于模型逐字输出。
+    ///
+    /// 按 id 定位而不是「最后一行」：流式正文属于本轮的 agent 气泡，而最后一行完全
+    /// 可能是用户气泡（和 `updateActivity` 用同一套定位口径）。
+    func updateMessage(text: String, status: ChatMessage.Status, messageID: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
         let wasFollowingLatestMessage = isNearBottom
-        messages[messages.count - 1].text = text
-        messages[messages.count - 1].status = status
-        let indexPath = IndexPath(row: messages.count - 1, section: 0)
-        tableView.reloadRows(at: [indexPath], with: .none)
+        messages[index].text = text
+        messages[index].status = status
+        tableView.reloadRows(at: [IndexPath(row: index, section: 0)], with: .none)
         if wasFollowingLatestMessage {
             scrollToBottom(animated: false)
         }
     }
 
-    /// 更新最后一条消息的「思考 / 执行过程」时间线并按需切换展开态。
-    func updateLastActivity(_ timeline: AppAgentActivityTimeline, expanded: Bool? = nil) {
-        guard !messages.isEmpty else { return }
+    /// 更新指定消息的「思考 / 执行过程」时间线并按需切换展开态。
+    ///
+    /// 按 id 定位而不是「最后一行」：过程区只属于 assistant 气泡，而最后一行完全
+    /// 可能是用户气泡（本轮还没吐出任何正文时列表末尾就是提问）。
+    func updateActivity(
+        _ timeline: AppAgentActivityTimeline,
+        expanded: Bool? = nil,
+        messageID: UUID
+    ) {
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
         let wasFollowingLatestMessage = isNearBottom
-        messages[messages.count - 1].activity = timeline
+        messages[index].activity = timeline
         if let expanded = expanded {
-            messages[messages.count - 1].isActivityExpanded = expanded
+            messages[index].isActivityExpanded = expanded
         }
-        let indexPath = IndexPath(row: messages.count - 1, section: 0)
-        tableView.reloadRows(at: [indexPath], with: .none)
+        tableView.reloadRows(at: [IndexPath(row: index, section: 0)], with: .none)
         if wasFollowingLatestMessage {
             scrollToBottom(animated: false)
         }
@@ -103,6 +122,7 @@ final class AppAgentChatMessageListView: UIView {
         guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
         messages[index].isActivityExpanded.toggle()
         tableView.reloadRows(at: [IndexPath(row: index, section: 0)], with: .none)
+        onActivityToggled?(messages[index])
     }
 
     // MARK: - 内部
@@ -127,11 +147,18 @@ final class AppAgentChatMessageListView: UIView {
     /// 随面板 displayHeight 更新列表的真实可见区域。
     ///
     /// BODragScroll 的 panelView 始终保持 full 尺寸，低档位只展示顶部一段。这里直接把可见段高度作为
-    /// tableView 的高度，让 scrollView 视口与展示区一直等高；底部 inset 只保留 inputBar/键盘占位。
+    /// tableView 的高度，让 scrollView 视口与展示区一直等高；`bottomInset` 是展开态 inputBar 白色背景
+    /// 顶部到屏幕底部的固定高度，只在安全区/bar 高度变化时才会变，不随面板高度或键盘变化。
+    ///
+    /// 面板是内部优先（`.innerFirst`）：手指落在列表里由列表自己滚，`contentOffset` 的写权始终在
+    /// 宿主。视口高度变化时只做「原来贴着底就继续贴底」，**不对高度变化做额外 offset 校正**。
     @discardableResult
-    func updateVisibleArea(visibleHeight: CGFloat, bottomAvoidingInset: CGFloat) -> Bool {
+    func updateVisibleArea(
+        visibleHeight: CGFloat,
+        bottomInset: CGFloat
+    ) -> Bool {
         let targetVisibleHeight = max(0, visibleHeight)
-        let targetBottomInset = max(0, bottomAvoidingInset)
+        let targetBottomInset = max(0, bottomInset)
         let visibleHeightChanged = abs(
             targetVisibleHeight - (self.visibleHeight ?? -.greatestFiniteMagnitude)
         ) > 0.5

@@ -64,5 +64,43 @@ final class AppAgentUITests: XCTestCase {
         inputBar.clearText()
         XCTAssertTrue(inputBar.gestureRecognizerShouldBegin(longPress))
     }
+
+    /// 等卡片期间 run 被取消（用户按停止 / 切走）：等待必须被唤醒并撤下卡片，
+    /// 否则那张卡片会一直挂着等一个已经死掉的回合，executor 的 Task 也回不来。
+    func testDecisionWaitUnblocksAndDismissesOnCancellation() async {
+        let dismissed = expectation(description: "卡片被撤下")
+        let presenter = AppAgentDecisionPresenter(
+            present: { _, _, _, _ in true },   // 假装贴出来了，但永远不回调
+            dismiss: { _ in dismissed.fulfill() }
+        )
+        let session = AISession(id: "cancel-while-waiting")
+
+        let task = Task {
+            await presenter.respond(
+                to: .toolAuthorization(tool: "app_hotfix", safetyLevel: .dangerous, detail: nil),
+                session: session
+            )
+        }
+        // 让 respond 真的进到「已呈现、正在等」的状态。
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+
+        let outcome = await task.value
+        XCTAssertNil(outcome, "取消后应交回责任链兜底，而不是替用户拍板")
+        await fulfillment(of: [dismissed], timeout: 2)
+    }
+
+    /// 呈现不了（面板没挂载）时立刻返回 nil，让责任链往下走。
+    func testDecisionReturnsNilWhenPresentationFails() async {
+        let presenter = AppAgentDecisionPresenter(
+            present: { _, _, _, _ in false },
+            dismiss: { _ in }
+        )
+        let outcome = await presenter.respond(
+            to: .clarification(question: "选哪个？", choices: []),
+            session: AISession(id: "cannot-present")
+        )
+        XCTAssertNil(outcome)
+    }
 }
 #endif

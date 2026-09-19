@@ -68,13 +68,9 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
                     let request = try self.buildRequest(messages: messages, system: system, tools: tools, modelId: modelId, maxTokens: requestMaxTokens)
                     Logger.info("Anthropic", "streamCompletion: starting, model=\(modelId)")
 
-                    if #available(iOS 15.0, macOS 12.0, *) {
-                        Logger.debug("Anthropic", "streamCompletion: using bytes streaming (iOS 15+)")
-                        try await self.streamWithBytes(request: request, continuation: continuation)
-                    } else {
-                        Logger.debug("Anthropic", "streamCompletion: using delegate streaming (iOS 13/14)")
-                        await self.streamWithDelegate(request: request, continuation: continuation)
-                    }
+                    // 最低支持 iOS 15 / macOS 12，`URLSession.bytes` 一定可用——
+                    // 原来的 iOS 13/14 delegate 降级路径已随最低版本上调删除。
+                    try await self.streamWithBytes(request: request, continuation: continuation)
                 } catch {
                     continuation.finish(throwing: error)
                 }
@@ -86,9 +82,8 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         }
     }
 
-    // MARK: - iOS 15+ streaming via URLSession.bytes
+    // MARK: - SSE streaming via URLSession.bytes
 
-    @available(iOS 15.0, macOS 12.0, *)
     private func streamWithBytes(
         request: URLRequest,
         continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
@@ -138,31 +133,6 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         }
 
         continuation.finish()
-    }
-
-    // MARK: - iOS 13+ fallback streaming via URLSessionDataDelegate
-
-    private func streamWithDelegate(
-        request: URLRequest,
-        continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
-    ) async {
-        let delegate = SSEStreamDelegate(apiProtocol: apiProtocol, continuation: continuation)
-        let delegateQueue = OperationQueue()
-        delegateQueue.maxConcurrentOperationCount = 1
-        delegateQueue.name = "appagent.sse-delegate"
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: delegateQueue)
-        let task = session.dataTask(with: request)
-        delegate.task = task
-
-        await withTaskCancellationHandler {
-            task.resume()
-            await delegate.waitUntilFinished()
-            session.finishTasksAndInvalidate()
-        } onCancel: {
-            task.cancel()
-            session.invalidateAndCancel()
-            delegate.cancel()
-        }
     }
 
     // MARK: - Private
@@ -426,103 +396,5 @@ private func parseProviderSSEEvent(
         return OpenAIResponsesMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
     default:
         return []
-    }
-}
-
-// MARK: - SSEStreamDelegate (iOS 13/14 fallback for streaming)
-
-/// URLSessionDataDelegate that receives streaming SSE data and feeds parsed events
-/// into an `AsyncThrowingStream` continuation. Used on iOS 13/14 where `URLSession.bytes` is unavailable.
-private final class SSEStreamDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let apiProtocol: APIProtocol
-    private let continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
-    private var parser = SSEParser()
-    private var anthropicToolCalls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
-    private var openAIToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
-    private var httpStatusCode: Int?
-    private var errorBody = Data()
-    private var isErrorResponse = false
-
-    private let finishSignal = ReadySignal()
-
-    var task: URLSessionDataTask?
-
-    init(apiProtocol: APIProtocol, continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation) {
-        self.apiProtocol = apiProtocol
-        self.continuation = continuation
-    }
-
-    /// Awaitable gate — resolves when the delegate receives `didCompleteWithError`.
-    func waitUntilFinished() async {
-        await finishSignal.wait()
-    }
-
-    func cancel() {
-        task?.cancel()
-        continuation.finish(throwing: AIAgentError.cancelled)
-        Task { await finishSignal.signal() }
-    }
-
-    // MARK: URLSessionDataDelegate
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
-                    didReceive response: URLResponse,
-                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        if let http = response as? HTTPURLResponse {
-            httpStatusCode = http.statusCode
-            Logger.debug("Anthropic", "delegate httpResponse: statusCode=\(http.statusCode)")
-            if !(200..<300).contains(http.statusCode) {
-                isErrorResponse = true
-            }
-        }
-        completionHandler(.allow)
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        if isErrorResponse {
-            errorBody.append(data)
-            return
-        }
-
-        // Split incoming data into lines and feed them to the SSE parser
-        guard let text = String(data: data, encoding: .utf8) else { return }
-        let lines = text.components(separatedBy: "\n")
-        for line in lines {
-            guard dataTask.state != .canceling else { return }
-            if let sseEvent = parser.processLine(line) {
-                for providerEvent in parseProviderSSEEvent(
-                    apiProtocol: apiProtocol,
-                    sseEvent: sseEvent,
-                    anthropicToolCalls: &anthropicToolCalls,
-                    openAIToolCalls: &openAIToolCalls) {
-                    continuation.yield(providerEvent)
-                }
-            }
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            Logger.error("Anthropic", "delegate connectionError: \(error)")
-            continuation.finish(throwing: error)
-        } else if isErrorResponse {
-            let body = String(data: errorBody, encoding: .utf8) ?? ""
-            Logger.error("Anthropic", "delegate httpError: statusCode=\(httpStatusCode ?? 0), body=\(body.prefix(500))")
-            continuation.finish(throwing: ModelError.httpError(
-                statusCode: httpStatusCode ?? 0, body: body))
-        } else {
-            // Flush remaining SSE data
-            if let sseEvent = parser.flush() {
-                for providerEvent in parseProviderSSEEvent(
-                    apiProtocol: apiProtocol,
-                    sseEvent: sseEvent,
-                    anthropicToolCalls: &anthropicToolCalls,
-                    openAIToolCalls: &openAIToolCalls) {
-                    continuation.yield(providerEvent)
-                }
-            }
-            continuation.finish()
-        }
-        Task { await finishSignal.signal() }
     }
 }

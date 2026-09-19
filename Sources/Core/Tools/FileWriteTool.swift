@@ -11,8 +11,9 @@ import Foundation
 public struct FileWriteTool: ToolProtocol {
     public let name = "file_write"
     public let description = """
-        Write content to a file within the app sandbox. \
-        Completely replaces existing content. Creates parent directories automatically.
+        Write content to a file in the agent's workspace (the app's Documents directory). \
+        Completely replaces existing content. Creates parent directories automatically. \
+        For anything outside Documents — Library, tmp, Caches — use app_sandbox_file instead.
         """
     public let parameters = Tool.Schema(
         properties: [

@@ -72,11 +72,30 @@ enum OpenAIChatCompletionsMapper {
                 textBuffer += text
             case .toolResult(let resultPart):
                 flushText()
+                // Chat Completions 的 `role:"tool"` 只接受字符串 content，图片放不进去。
+                // 官方做法是紧跟一条 user 消息，用 image_url + data URL 带图。
+                var toolContent = resultPart.content
+                if !resultPart.images.isEmpty {
+                    toolContent += "\n[\(resultPart.images.count) image(s) attached in the next message]"
+                }
                 result.append([
                     "role": "tool",
                     "tool_call_id": resultPart.toolCallId,
-                    "content": resultPart.content
+                    "content": toolContent
                 ])
+                if !resultPart.images.isEmpty {
+                    var parts: [[String: Any]] = [[
+                        "type": "text",
+                        "text": "Image(s) returned by tool call \(resultPart.toolCallId)."
+                    ]]
+                    for image in resultPart.images {
+                        parts.append([
+                            "type": "image_url",
+                            "image_url": ["url": "data:\(image.mediaType);base64,\(image.base64)"]
+                        ])
+                    }
+                    result.append(["role": "user", "content": parts])
+                }
             case .toolUse:
                 break
             }

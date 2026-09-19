@@ -11,9 +11,11 @@ import Foundation
 public struct FileSearchTool: ToolProtocol {
     public let name = "file_search"
     public let description = """
-        Search file contents or find files by name within the app sandbox. \
+        Search file contents or find files by name inside the agent's workspace \
+        (the app's Documents directory). \
         target='content': search inside file contents. \
-        target='files': find files by name pattern (glob-style, e.g., '*.txt').
+        target='files': find files by name pattern (glob-style, e.g., '*.txt'). \
+        For anything outside Documents use app_sandbox_file.
         """
     public let parameters = Tool.Schema(
         properties: [

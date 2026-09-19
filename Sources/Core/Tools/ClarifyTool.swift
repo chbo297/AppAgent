@@ -38,28 +38,19 @@ public struct ClarifyTool: ToolProtocol {
             return .error("Missing required parameter: question")
         }
 
-        let choices: [String]? = arguments["choices"]?.arrayValue?.compactMap { $0.stringValue }
+        let choices: [String] = arguments["choices"]?.arrayValue?.compactMap { $0.stringValue } ?? []
 
-        // Notify UI state
-        session.uiState.set("pendingClarification", value: [
-            "question": question,
-            "choices": choices as Any
-        ])
-
-        // Delegate to host app
-        guard let agent = session.agentMask?.agent, let delegate = agent.delegate else {
-            session.uiState.remove("pendingClarification")
-            return .error("No delegate configured to handle clarification requests")
-        }
-
-        let answer = await delegate.aiAgent(agent, session: session,
-                                          needsClarification: question, choices: choices)
-
-        session.uiState.remove("pendingClarification")
-
-        if let answer {
+        // 和工具授权走同一条链路：AppAgent 面板在对话列表里渲染同一种卡片，
+        // 宿主不必实现任何异步管道。
+        let outcome = await session.requestDecision(.clarification(question: question,
+                                                                  choices: choices))
+        switch outcome {
+        case .answer(let answer?):
             return .text(answer)
-        } else {
+        case .answer(nil), .deny:
+            return .text("User did not provide an answer.")
+        case .allowOnce, .allowForSession:
+            // 澄清类不该收到授权语义；当作没回答，别让模型以为拿到了内容。
             return .text("User did not provide an answer.")
         }
     }

@@ -29,7 +29,13 @@ enum AnthropicMapper {
         case .toolUse(let call):
             return .toolUse(AnthropicToolUseBlock(id: call.id, name: call.name, input: call.arguments))
         case .toolResult(let result):
-            return .toolResult(AnthropicToolResultBlock(toolUseId: result.toolCallId, content: result.content))
+            return .toolResult(AnthropicToolResultBlock(
+                toolUseId: result.toolCallId,
+                content: result.content,
+                images: result.images.map {
+                    AnthropicImageBlock(base64: $0.base64, mediaType: $0.mediaType)
+                }
+            ))
         }
     }
 

@@ -191,7 +191,11 @@ public final class LLMExecutor: @unchecked Sendable {
     // MARK: - System Prompt Assembly
 
     /// Assemble the final system prompt from profile, memory, tools, and session-level parts.
-    func assembleSystemPrompt(session: AISession) async -> [ContentOrCacheControl<SystemPrompt>] {
+    ///
+    /// - Parameter tools: 这一轮真正递给模型的工具清单。由调用方解析一次传进来——自己再
+    ///   解析一遍会二次命中 ToolCentral、并且让工厂工具多造一份实例。
+    func assembleSystemPrompt(session: AISession,
+                             tools: [any ToolProtocol]? = nil) async -> [ContentOrCacheControl<SystemPrompt>] {
         guard let mask = session.agentMask else {
             // No mask — minimal prompt
             var result: [ContentOrCacheControl<SystemPrompt>] = []
@@ -227,12 +231,17 @@ public final class LLMExecutor: @unchecked Sendable {
         }
 
         // 3. Tool-specific prompts
-        let tools = await self.availableTools(session: session)
+        let resolvedTools: [any ToolProtocol]
+        if let tools {
+            resolvedTools = tools
+        } else {
+            resolvedTools = await self.availableTools(session: session)
+        }
         var mergedToolPrompts = AIAgentProfile.defaultBuiltInToolPrompts
         for (key, value) in profile.toolPrompts {
             mergedToolPrompts[key] = value
         }
-        let matchedToolPrompts = tools.compactMap { mergedToolPrompts[$0.name] }
+        let matchedToolPrompts = resolvedTools.compactMap { mergedToolPrompts[$0.name] }
         if !matchedToolPrompts.isEmpty {
             let toolSection = "# Using your tools\n\n" + matchedToolPrompts.joined(separator: "\n\n")
             result.append(.content(SystemPrompt(toolSection)))
@@ -375,10 +384,13 @@ public final class LLMExecutor: @unchecked Sendable {
 
             // 1. Get available tools (filtered, sorted)
             let availableTools = await self.availableTools(session: session)
+            // Offer 与 execute 必须同源：下面 `executeSingleTool` 用 `tool(named:)` 查表，
+            // 所以先把执行表对齐到刚算出的清单，避免「清单里有、执行时找不到」。
+            session.syncInstalledTools(availableTools)
             Logger.debug("LLMExecutor", "availableTools: [\(availableTools.map(\.name).joined(separator: ", "))]")
 
-            // 2. Assemble system prompt
-            let systemParts = await self.assembleSystemPrompt(session: session)
+            // 2. Assemble system prompt（复用上面那份清单，别再解析一遍）
+            let systemParts = await self.assembleSystemPrompt(session: session, tools: availableTools)
             let contentCount = systemParts.filter { if case .content = $0 { return true }; return false }.count
             let cacheCount = systemParts.filter { if case .cacheControl = $0 { return true }; return false }.count
             Logger.debug("LLMExecutor", "systemPrompt: \(contentCount) content segments, \(cacheCount) cache markers")
@@ -556,7 +568,9 @@ public final class LLMExecutor: @unchecked Sendable {
                 assistantParts.append(.toolUse(call))
             }
             if !assistantParts.isEmpty {
-                currentMessages.append(AIAgentMessage(role: .assistant, content: assistantParts))
+                currentMessages.append(AIAgentMessage(
+                    role: .assistant, content: assistantParts, turnID: session.currentTurnID
+                ))
             }
 
             // 7. If tool_use, execute tools and loop
@@ -578,8 +592,11 @@ public final class LLMExecutor: @unchecked Sendable {
                     return
                 }
 
-                // Add tool results as a user message
-                currentMessages.append(AIAgentMessage(role: .user, content: toolResultParts))
+                // Add tool results as a user message. Wire 上必须是 user 角色，但它们是
+                // 这一轮内部的过程，不是用户又说了话——所以打上同一个 turnID。
+                currentMessages.append(AIAgentMessage(
+                    role: .user, content: toolResultParts, turnID: session.currentTurnID
+                ))
                 continue
             }
 
@@ -623,7 +640,10 @@ public final class LLMExecutor: @unchecked Sendable {
         var executableCalls: [AIAgentMessage.ToolCall] = []
 
         for call in calls {
-            let loopResult = loopDetector.record(name: call.name, arguments: call.arguments)
+            // 循环检测按「工具名 + 参数」做签名，所以必须用剥掉 `_why` 的那份：
+            // 否则模型每次换一句理由就是新签名，精确重复检测直接失效。
+            let loopResult = loopDetector.record(name: call.name,
+                                                arguments: Self.executableArguments(call.arguments))
             switch loopResult {
             case .critical(let message):
                 Logger.error("LLMExecutor", "toolLoopCritical: \(message)")
@@ -642,19 +662,33 @@ public final class LLMExecutor: @unchecked Sendable {
             }
         }
 
-        // Phase 2: Parallel execution via TaskGroup
+        // Phase 2: read-only calls run concurrently; anything that mutates runs one at
+        // a time. Two parallel writes to the same view or file have no mutual exclusion,
+        // so the speedup is not worth the interleaving. (Codex draws the same line via
+        // the MCP `readOnlyHint`.)
         var executionResults: [String: (content: AIAgentMessage.Content, event: AIAgentEvent?)] = [:]
 
         if !executableCalls.isEmpty {
             let toolTimeout = session.agentMask?.profile.toolTimeout ?? 60
+            var concurrentCalls: [AIAgentMessage.ToolCall] = []
+            var serialCalls: [AIAgentMessage.ToolCall] = []
+            for call in executableCalls {
+                let level = session.tool(named: call.name)?.safetyLevel(for: call.arguments) ?? .safe
+                if level == .safe { concurrentCalls.append(call) } else { serialCalls.append(call) }
+            }
+            if !serialCalls.isEmpty {
+                Logger.info("LLMExecutor",
+                            "toolExecutionSplit: concurrent=\(concurrentCalls.count), serial=\(serialCalls.count)")
+            }
 
             await withTaskGroup(of: (String, AIAgentMessage.Content, AIAgentEvent?).self) { group in
-                for call in executableCalls {
+                for call in concurrentCalls {
                     group.addTask { [weak session] in
                         guard let session else {
                             let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
                                 toolCallId: call.id,
-                                content: "Error: Session released during tool execution"
+                                content: "Error: Session released during tool execution",
+                                isError: true
                             ))
                             return (call.id, content, AIAgentEvent.toolCallFailed(
                                 toolCallId: call.id, name: call.name,
@@ -673,6 +707,15 @@ public final class LLMExecutor: @unchecked Sendable {
                 for await result in group {
                     executionResults[result.0] = (result.1, result.2)
                 }
+            }
+
+            for call in serialCalls {
+                let result = await Self.executeSingleTool(
+                    call: call,
+                    session: session,
+                    toolTimeout: toolTimeout
+                )
+                executionResults[result.0] = (result.1, result.2)
             }
         }
 
@@ -712,27 +755,79 @@ public final class LLMExecutor: @unchecked Sendable {
             guard let tool = session.tool(named: call.name) else {
                 Logger.warning("LLMExecutor", "toolNotFound: name=\(call.name), id=\(call.id)")
                 let err = AIAgentError.toolNotFound(call.name)
+                // 回给模型一份可用的工具清单，否则它只会反复猜名字空转。
+                let available = session.installedTools.keys.sorted().joined(separator: ", ")
                 let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
                     toolCallId: call.id,
-                    content: "Error: Tool '\(call.name)' not found"
+                    content: "Error: Tool '\(call.name)' not found. "
+                        + "Available tools: \(available.isEmpty ? "(none)" : available). "
+                        + "Do not retry this name — either call one of the listed tools or answer without tools.",
+                    isError: true
                 ))
                 return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
             }
 
-            // Safety level check
-            let level = tool.safetyLevel
-            if level == .sensitive || level == .dangerous,
-               let agent = session.agentMask?.agent, let delegate = agent.delegate {
-                let allowed = await delegate.aiAgent(agent, session: session,
-                    shouldExecuteTool: call.name, safetyLevel: level, arguments: call.arguments)
-                if !allowed {
-                    Logger.info("LLMExecutor", "toolRejected: name=\(call.name), id=\(call.id), safetyLevel=\(level.rawValue)")
-                    let err = AIAgentError.toolExecutionDenied(call.name)
-                    let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
-                        toolCallId: call.id,
-                        content: "Error: User denied execution of '\(call.name)' (safety level: \(level.rawValue))"
-                    ))
-                    return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
+            // Per-call safety level: a multi-op tool reports `list` and `delete` differently.
+            let level = tool.safetyLevel(for: call.arguments)
+
+            // Mutation boundary. Refused outright rather than prompted — an out-of-bounds
+            // call should fail like a sandbox violation, not become a dialog.
+            let mutationPolicy = session.agentMask?.profile.toolMutationPolicy ?? .allowed
+            if Self.isBlockedByMutationPolicy(mutationPolicy, level: level) {
+                Logger.info("LLMExecutor", "toolBlockedByReadOnly: name=\(call.name), id=\(call.id), safetyLevel=\(level.rawValue)")
+                let err = AIAgentError.toolExecutionDenied(call.name)
+                let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
+                    toolCallId: call.id,
+                    content: "Error: '\(call.name)' would change runtime state (safety level: \(level.rawValue)) "
+                        + "but the agent is running read-only. Use an inspection-only operation instead.",
+                    isError: true
+                ))
+                return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
+            }
+
+            // `_why` 是元参数：模型用它说明为什么需要这次危险操作，卡片才能给出有意义的
+            // 提示。它不属于工具的入参，执行前剥掉（循环检测那边也用同一份）。
+            let toolArguments = Self.executableArguments(call.arguments)
+            let justification = call.arguments["_why"]?.stringValue
+
+            // Safety level check：统一走 session 的决策中心，由 AppAgent 自己的面板
+            // 呈现（宿主策略可先行定夺），没人能回答时兜底拒绝。
+            if level == .sensitive || level == .dangerous {
+                let opKey = Self.approvalKey(tool: call.name, arguments: toolArguments)
+                let remembered: [String] = session.uiState.get("approvedToolOps") ?? []
+                if !remembered.contains(opKey) {
+                    let decision = await session.requestDecision(.toolAuthorization(
+                        tool: call.name, safetyLevel: level, detail: justification))
+                    switch decision {
+                    case .deny, .answer:
+                        Logger.info("LLMExecutor", "toolRejected: name=\(call.name), id=\(call.id), safetyLevel=\(level.rawValue)")
+                        let err = AIAgentError.toolExecutionDenied(call.name)
+                        let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
+                            toolCallId: call.id,
+                            content: "Error: User denied execution of '\(call.name)' (safety level: \(level.rawValue))",
+                            isError: true
+                        ))
+                        return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
+                    case .allowForSession:
+                        // 原子追加：两个并发的授权不能互相覆盖（见 appendUnique 注释）。
+                        session.uiState.appendUnique(opKey, forKey: "approvedToolOps")
+                        Logger.info("LLMExecutor", "toolApprovedForSession: \(opKey)")
+                    case .allowOnce:
+                        break
+                    }
+
+                    // 等卡片的这段时间里 run 可能已经被取消（用户按了停止 / 切走）。
+                    // 拿到「允许」也不能再执行——否则一个已经停掉的回合还会改状态。
+                    if Task.isCancelled {
+                        Logger.info("LLMExecutor", "toolAbandonedAfterDecision: name=\(call.name), id=\(call.id)")
+                        let err = AIAgentError.toolExecutionDenied(call.name)
+                        let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
+                            toolCallId: call.id,
+                            content: "Error: Run was cancelled while waiting for authorization of '\(call.name)'",
+                            isError: true
+                        ))
+                        return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
+                    }
                 }
             }
 
@@ -740,7 +835,7 @@ public final class LLMExecutor: @unchecked Sendable {
             let startTime = CFAbsoluteTimeGetCurrent()
             let result = try await withThrowingTaskGroup(of: Tool.Output.self) { group in
                 group.addTask {
-                    try await tool.execute(arguments: call.arguments, session: session)
+                    try await tool.execute(arguments: toolArguments, session: session)
                 }
                 group.addTask {
                     try await Task.sleep(nanoseconds: UInt64(toolTimeout * 1_000_000_000))
@@ -751,21 +846,85 @@ public final class LLMExecutor: @unchecked Sendable {
                 return first
             }
             let duration = CFAbsoluteTimeGetCurrent() - startTime
-            let resultPreview = result.stringValue.prefix(500)
-            Logger.info("LLMExecutor", "toolResult: name=\(call.name), id=\(call.id), duration=\(String(format: "%.2f", duration))s, result=\"\(resultPreview)\(result.stringValue.count > 500 ? "...(\(result.stringValue.count) chars)" : "")\"")
+            let budget = tool.outputMaxBytes ?? session.agentMask?.profile.toolOutputMaxBytes ?? 8192
+            // 预算只管文本；图片走多模态通道，截断它只会得到一张坏图。
+            let payload = Self.clampToolOutput(result.stringValue, maxBytes: budget, toolName: call.name)
+            let attachments = result.images.map {
+                AIAgentMessage.ImageAttachment(data: $0.data, mediaType: $0.mediaType)
+            }
+            let resultPreview = payload.prefix(500)
+            Logger.info("LLMExecutor", "toolResult: name=\(call.name), id=\(call.id), duration=\(String(format: "%.2f", duration))s, images=\(attachments.count), result=\"\(resultPreview)\(payload.count > 500 ? "...(\(payload.count) chars)" : "")\"")
             let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
                 toolCallId: call.id,
-                content: result.stringValue
+                content: payload,
+                images: attachments
             ))
             return (call.id, content, .toolCallCompleted(toolCallId: call.id, result: result))
         } catch {
             Logger.error("LLMExecutor", "toolError: name=\(call.name), id=\(call.id), error=\(error)")
             let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
                 toolCallId: call.id,
-                content: "Error: \(error.localizedDescription)"
+                content: "Error: \(error.localizedDescription)",
+                isError: true
             ))
             return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: error))
         }
+    }
+
+    /// 递给工具执行的参数：剥掉 `_why` 这类只给授权卡片看的元参数。
+    /// 执行、循环检测、授权记忆键都必须用这一份，三处口径才一致。
+    static func executableArguments(_ arguments: [String: JSONValue]) -> [String: JSONValue] {
+        guard arguments["_why"] != nil else { return arguments }
+        var stripped = arguments
+        stripped.removeValue(forKey: "_why")
+        return stripped
+    }
+
+    /// 会话级授权的记忆键：工具 + op 粒度。整个工具级会太粗（批了 `list` 就等于批了
+    /// `delete`），单次调用级太细（同一个 op 每次都问）。
+    static func approvalKey(tool: String, arguments: [String: JSONValue]) -> String {
+        let op = arguments["op"]?.stringValue ?? arguments["action"]?.stringValue ?? "*"
+        return "\(tool):\(op)"
+    }
+
+    /// Whether the mutation boundary refuses this call. Split out so the rule is
+    /// testable without standing up a session and a provider.
+    static func isBlockedByMutationPolicy(_ policy: Tool.MutationPolicy,
+                                         level: Tool.SafetyLevel) -> Bool {
+        policy == .readOnly && level > .safe
+    }
+
+    /// Keep one tool result from eating the context window.
+    ///
+    /// Cuts on a UTF-8 byte budget (that is what the wire and the tokenizer care
+    /// about), snaps back to the last line boundary so the model never sees half a
+    /// record, and appends how much was dropped plus what to do about it. The hint
+    /// matters: without it the model retries the same broad call.
+    ///
+    /// 边界都在**字节**上找，不要混用字符距离：CJK 一个字符 3 字节，拿字符数去比
+    /// `maxBytes / 2` 的话行边界回退几乎永不触发；直接按字节前缀解码还会在多字节字符
+    /// 中间切出一个 U+FFFD 替换符。
+    static func clampToolOutput(_ text: String, maxBytes: Int, toolName: String) -> String {
+        guard maxBytes > 0 else { return text }
+        let data = Data(text.utf8)
+        guard data.count > maxBytes else { return text }
+
+        // 先在字节上找切点：优先切到后半段里最后一个换行，否则退到不劈开字符的边界。
+        var cut = maxBytes
+        let head = data.prefix(maxBytes)
+        if let newline = head.lastIndex(of: 0x0A), newline > maxBytes / 2 {
+            cut = newline
+        } else {
+            // UTF-8 续字节是 10xxxxxx，往前退到一个字符起始字节。
+            while cut > 0, data[cut] & 0xC0 == 0x80 { cut -= 1 }
+        }
+
+        let kept = String(decoding: data.prefix(cut), as: UTF8.self)
+        let dropped = max(0, data.count - cut)
+        Logger.info("LLMExecutor", "toolOutputTruncated: name=\(toolName), kept=\(cut)B, dropped=\(dropped)B, budget=\(maxBytes)B")
+        return kept + "\n\n…[truncated: \(dropped) of \(data.count) bytes dropped to stay inside the "
+            + "\(maxBytes)-byte tool output budget. Narrow the request — filter, paginate, "
+            + "or target a specific path/section — instead of repeating this call.]"
     }
 
     private static func describeArgumentsForLog(_ arguments: [String: JSONValue]) -> String {

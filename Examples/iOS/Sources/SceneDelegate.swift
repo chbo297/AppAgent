@@ -30,6 +30,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // "no API key" alert is suppressed so it does not pollute that dump.
         // Works without any provider config — tools execute without the model.
         let isSelfCheck = ProcessInfo.processInfo.arguments.contains("-run-selfcheck")
+        // 样例对话同样是无模型跑法，别让「未配置 API Key」的弹窗盖住要看的面板。
+        let showsSampleConversation =
+            ProcessInfo.processInfo.arguments.contains("-show-sample-conversation")
 
         // 1) Host app's own window (any normal iOS app would do this).
         let host = UIWindow(windowScene: windowScene)
@@ -46,7 +49,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             let settings = AppAgentSettingsStore.loadOrDefault()
             await ModelProviderCentral.`default`.register(settings: settings)
 
-            if !settings.hasUsableAPIKey, !isSelfCheck, let presenter = host.rootViewController {
+            if !settings.hasUsableAPIKey, !isSelfCheck, !showsSampleConversation, let presenter = host.rootViewController {
                 showAlert(
                     on: presenter,
                     title: "尚未配置 API Key",
@@ -100,6 +103,37 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 let session = await CapabilitySelfCheck.ephemeralSession()
                 _ = await CapabilitySelfCheck.run(session: session)
             }
+
+            #if DEBUG
+            // `-show-sample-conversation`：灌一段样例对话并展开面板，用来肉眼验收
+            // 对话列表的分层（一次提问一个气泡 + 过程折叠）与 markdown 渲染。
+            if ProcessInfo.processInfo.arguments.contains("-show-sample-conversation"),
+               let sessionId = DemoAgentHolder.currentSessionId,
+               let session = agent.allSessions.first(where: { $0.id == sessionId }) {
+                SampleConversation.install(into: session)
+                overlay.show()
+                // show() 之后视图才加载完，列表内容要再灌一次才拿得到。
+                DispatchQueue.main.async {
+                    overlay.viewController.reloadFromSession(forceScrollToBottom: true)
+                }
+            }
+
+            // `-show-decision-card`：展开面板并真的发一次私网授权请求，让 AppAgent
+            // 自己的决策卡片走完整链路弹出来（截图人工验观感用）。2s 后自动点「拒绝」，
+            // 免得留一个永远等着的 continuation。
+            if ProcessInfo.processInfo.arguments.contains("-show-decision-card"),
+               let sessionId = DemoAgentHolder.currentSessionId,
+               let session = agent.allSessions.first(where: { $0.id == sessionId }) {
+                overlay.show()
+                overlay.viewController.debugPresentDecision(
+                    .privateNetworkAccess(host: "10.0.0.5",
+                                          url: "http://10.0.0.5/admin/api/users"),
+                    on: session,
+                    autoTapOptionId: "deny",
+                    after: 30
+                )
+            }
+            #endif
         }
     }
 

@@ -218,6 +218,12 @@ public final class AIAgent: @unchecked Sendable {
             await toolCentral.register(HapticTool())
         }
 
+        // Network read access (group "web"). No host provider needed — unlike
+        // web_search this one just fetches a URL the model already has.
+        if !disabled.contains("web_fetch") {
+            await toolCentral.register(WebFetchTool())
+        }
+
         // Phase 5: Host-introspection storage tools (group "host-storage")
         if !disabled.contains("app_user_defaults") {
             await toolCentral.register(AppUserDefaultsTool())
@@ -234,6 +240,9 @@ public final class AIAgent: @unchecked Sendable {
         #if canImport(UIKit)
         if !disabled.contains("app_runtime_inspect") {
             await toolCentral.register(RuntimeInspectTool(provider: DefaultRuntimeInspectProvider()))
+        }
+        if !disabled.contains("screenshot") {
+            await toolCentral.register(ScreenshotTool())
         }
         #endif
 
@@ -276,6 +285,11 @@ public final class AIAgent: @unchecked Sendable {
 
     /// Restore all sessions from storage.
     public func restoreAll() async throws {
+        // 恢复会话时会从 toolCentral 解析工具表。内置工具的注册是 init 里丢出去的
+        // 异步 Task，若不等就绪就解析，拿到的是「注册到一半」的残缺工具集（注册顺序
+        // 靠后的 web_fetch / screenshot 会缺），而模型看到的清单是实时全集，于是
+        // 出现「清单里有、执行时 Tool not found」。所以必须先等就绪。
+        await ensureReady()
         try await sessionManager.restoreAll()
     }
 

@@ -2,7 +2,7 @@
 //  AppAgentKeychain.swift
 //  AppAgent
 //
-//  轻量 Keychain 读写封装（Security 框架，iOS 13+ / macOS 12+）。
+//  轻量 Keychain 读写封装（Security 框架，iOS 15+ / macOS 12+）。
 //  用于持久化敏感项（如大模型 apiKey），避免明文落 UserDefaults。
 //
 

@@ -49,15 +49,26 @@ public final class DefaultHotfixProvider: HotfixProvider, @unchecked Sendable {
     }
 
     public func setEnabled(name: String, enabled: Bool) async -> Bool {
-        let script: String? = lock.writeSync {
-            guard var slot = slots[name] else { return nil }
+        // 「槽位不存在」和「关掉了」必须分开报。原来两种都走 `script == nil`
+        // 那条路、再 `return slots[name] != nil || !enabled`，于是 toggle 一个
+        // 不存在的补丁名也会报成功（`!enabled` 恒真），模型据此以为改生效了；
+        // 而且那次 `slots[name]` 还是在锁外读的。
+        enum Outcome { case missing, disabled, reenable(String) }
+        let outcome: Outcome = lock.writeSync {
+            guard var slot = slots[name] else { return .missing }
             slot.enabled = enabled
             slots[name] = slot
-            return enabled ? slot.javascript : nil
+            return enabled ? .reenable(slot.javascript) : .disabled
         }
-        guard let script = script else { return slots[name] != nil || !enabled }
-        _ = await Self.evaluate(script)
-        return true
+        switch outcome {
+        case .missing:
+            return false
+        case .disabled:
+            return true
+        case .reenable(let script):
+            // 重新开启 = 重新 eval 一遍，JS 报错就算没开成功。
+            return !(await Self.evaluate(script)).hasPrefix("JS error")
+        }
     }
 
     public func list() async -> [HotfixPatchInfo] {
@@ -127,6 +138,12 @@ public final class DefaultHotfixProvider: HotfixProvider, @unchecked Sendable {
             let sel = NSSelectorFromString(selector)
             guard view.responds(to: sel) else { return "(selector \(selector) not found on \(type(of: view)))" }
             let args = (try? JSONSerialization.jsonObject(with: Data(argsJSON.utf8))) as? [Any] ?? []
+            // JS 桥和 view_invoke 共用同一条反射路径，也得过同一道类型闸门
+            // （见 DefaultRuntimeInspectProvider.selectorRejection：原始类型的参数会被
+            // 当指针写进去、原始类型的返回值按对象解引用会崩）。
+            if let rejection = DefaultRuntimeInspectProvider.selectorRejection(
+                sel, on: view, argCount: args.count
+            ) { return rejection }
             do {
                 let result = try ObjCExceptionCatcher.performReturning {
                     DefaultRuntimeInspectProvider.performSelector(sel, on: view, args: args)

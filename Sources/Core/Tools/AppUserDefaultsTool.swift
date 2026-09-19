@@ -30,6 +30,15 @@ public struct AppUserDefaultsTool: ToolProtocol {
     public let group = "host-storage"
     public let safetyLevel: Tool.SafetyLevel = .moderate
 
+    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        switch arguments["op"]?.stringValue {
+        case "read", "list": return .safe
+        case "write": return .moderate
+        case "remove": return .sensitive     // 删用户设置不可逆
+        default: return .moderate
+        }
+    }
+
     private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) {
