@@ -1,6 +1,6 @@
 //
 //  DefaultHotfixProvider.swift
-//  AppAgent — Liji 集成层
+//  AppAgent — 宿主能力层
 //
 //  基于 JavaScriptCore 的通用 HotfixProvider 默认实现：把一段 JS 当作「运行时补丁」执行，
 //  JS 里通过 `appagent` 桥直接读改运行时（视图树寻址、改 frame/颜色/文本、反射调用、KVC 读写）。

@@ -1,6 +1,6 @@
 //
 //  HotfixTool.swift
-//  AppAgent — Liji 集成层
+//  AppAgent — 宿主能力层
 //
 //  把宿主 app 的热修复能力封装为工具。仅当 HotfixProvider 注入且能力开启时注册。
 //
@@ -30,7 +30,7 @@ public struct HotfixTool: ToolProtocol {
         ],
         required: ["op"]
     )
-    public let group = "liji-hotfix"
+    public let group = "host-hotfix"
     public let safetyLevel: Tool.SafetyLevel = .sensitive
 
     /// `apply` 会在运行时执行任意 JS 改 UI/逻辑，风险等级和「列一下装了哪些补丁」

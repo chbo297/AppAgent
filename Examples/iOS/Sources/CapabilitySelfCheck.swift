@@ -398,7 +398,7 @@ enum CapabilitySelfCheck {
 
         await checkHookCapture(rec, session: session)
 
-        // liji_server 相关工具已迁到宿主（百度地图）侧，由宿主自行注册到 ToolCentral，
+        // 宿主后台服务（liji_server）相关工具已迁到宿主侧，由宿主自行注册到 ToolCentral，
         // AppAgent 不再内置，故本自检不再覆盖；宿主侧自检请在宿主工程里做。
 
         rec.section("app_device_info")
@@ -545,7 +545,7 @@ enum CapabilitySelfCheck {
 
     // MARK: - app_hook_capture：真的写两条 JSONL 再读回来
 
-    /// 抓包记录的写入方在仓库外（宿主 LijiMsgTap），所以以前 `read` 永远是 0 条、
+    /// 抓包记录的写入方在仓库外（宿主侧写入方），所以以前 `read` 永远是 0 条、
     /// `clear` 永远删 0 个文件 —— 等于只验了「没崩」。这里自己按磁盘契约造两条记录，
     /// 把 seq 排序 / limit 取尾 / sinceSeq 过滤 / 按 channel 删 全部走一遍真实文件。
     private static func checkHookCapture(_ rec: Recorder, session: AISession) async {
@@ -555,7 +555,7 @@ enum CapabilitySelfCheck {
         let originalConfig = defaults.string(forKey: HookCaptureStore.configKey)
         let fm = FileManager.default
         let dir = ((NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first
-                    ?? NSTemporaryDirectory()) as NSString).appendingPathComponent("LijiMsgCapture")
+                    ?? NSTemporaryDirectory()) as NSString).appendingPathComponent("AppAgentMsgCapture")
         let dirExisted = fm.fileExists(atPath: dir)
 
         let status = { () async -> [String: Any] in

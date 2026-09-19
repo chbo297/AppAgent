@@ -133,7 +133,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 - **写类操作的成功判定是「以 `OK.` 起头」，不是「不在失败清单里」**。provider 的失败文案形态一堆（`Invalid rect '…'`、`Invalid alpha '…'`、`UIView has no text/title to set.`…），靠失败前缀清单漏一个就把没生效的修改当成功。所以 `view_set` / `property_set` 走 `mutationOutput`，provider 侧所有成功分支（含 KVC 兜底）统一以 `OK.` 开头。
 - **读也要判失败**：`property_value` 以前绕过判定直接 `.text(...)`，于是 `Failed to read …` / `(no target object for KVC…)` 被模型当成读到的值。
 - **`app_hotfix` 的失败一律 `.error`**：`apply` 的 JS 报错、`toggle`/`remove` 指了不存在的槽位，都不能包成 `success:false` 的「成功调用」。`DefaultHotfixProvider.setEnabled` 要区分「槽位不存在」与「关掉了」（原来两者同走一条路，`!enabled` 恒真导致 toggle 未知补丁报成功）。
-- **`app_hook_capture` 的写入方在仓库外**（宿主 `LijiMsgTap`），所以自检自己按磁盘契约往 `Caches/LijiMsgCapture/cap_<channel>_*.jsonl` 造两条乱序 `seq` 记录，再验 seq 升序 / `limit` 取尾 / `sinceSeq` 过滤 / 按 channel 删干净；跑完把 `NSUserDefaults` 里的抓包开关和目录一起复位。
+- **`app_hook_capture` 的写入方在仓库外**（宿主侧写入方，如百度地图的 LijiMsgTap），所以自检自己按磁盘契约往 `Caches/AppAgentMsgCapture/cap_<channel>_*.jsonl` 造两条乱序 `seq` 记录，再验 seq 升序 / `limit` 取尾 / `sinceSeq` 过滤 / 按 channel 删干净；跑完把 `NSUserDefaults` 里的抓包开关和目录一起复位。
 
 
 `Tool.Output.image(Tool.ImageOutput)` 让工具直接把图片交给模型看，不必先落盘再让模型猜文件里是什么。`screenshot` 默认走这条路（`save_as_file: true` 才落盘）。链路：

@@ -1,13 +1,13 @@
 //
 //  HookCaptureStore.swift
-//  AppAgent — Liji 集成层
+//  AppAgent — 宿主能力层
 //
-//  JS↔端消息捕获（LijiMsgTap）的 agent 对端：读写门控配置、读取落盘的 JSONL 记录。
-//  纯 Foundation，与宿主端 LijiMsgTap 共享同一磁盘契约（两侧不互相链接）：
-//    目录: <Home>/Library/Caches/LijiMsgCapture/
+//  JS↔端消息捕获的 agent 对端：读写门控配置、读取落盘的 JSONL 记录。
+//  纯 Foundation，与宿主侧写入方共享同一磁盘契约（两侧不互相链接）：
+//    目录: <Home>/Library/Caches/AppAgentMsgCapture/
 //    文件: cap_<channel>_<yyyyMMdd>.jsonl（超 8MB 轮转为 cap_<channel>_<yyyyMMdd>_<epoch>.jsonl）
-//    开关: NSUserDefaults key "liji.msgcapture.config.v1"（JSON 字符串）
-//  写开关后同进程的 LijiMsgTap 经 NSUserDefaultsDidChangeNotification 自动刷新门控。
+//    开关: NSUserDefaults key "appagent.msgcapture.config.v1"（JSON 字符串）
+//  写开关后同进程的宿主写入方经 NSUserDefaultsDidChangeNotification 自动刷新门控。
 //
 
 import Foundation
@@ -15,10 +15,10 @@ import Foundation
 /// 捕获特性的磁盘/配置契约常量与读写。所有方法无状态。
 public enum HookCaptureStore {
 
-    public static let configKey = "liji.msgcapture.config.v1"
-    static let dirName = "LijiMsgCapture"
+    public static let configKey = "appagent.msgcapture.config.v1"
+    static let dirName = "AppAgentMsgCapture"
 
-    /// 四个消息边界，顺序（bitIndex）与宿主 LijiCaptureChannel 一致。
+    /// 四个消息边界，顺序（bitIndex）与宿主侧通道枚举一致。
     public static let channels = ["talos_in", "talos_out", "shell_in", "shell_out"]
 
     public static func isValidChannel(_ channel: String) -> Bool {
@@ -38,7 +38,7 @@ public enum HookCaptureStore {
         return dict
     }
 
-    /// 写回配置（序列化为字符串存 UserDefaults）；触发同进程 LijiMsgTap 刷新。
+    /// 写回配置（序列化为字符串存 UserDefaults）；触发同进程宿主写入方刷新。
     @discardableResult
     static func writeConfig(_ config: [String: Any]) -> Bool {
         guard JSONSerialization.isValidJSONObject(config),

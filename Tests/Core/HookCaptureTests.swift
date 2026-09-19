@@ -2,7 +2,7 @@ import XCTest
 @testable import AppAgent
 
 /// app_hook_capture 工具与 HookCaptureStore 的门控配置读写测试。
-/// 只覆盖与宿主 LijiMsgTap 互通的关键面——config 的 JSON 形状与开关语义；
+/// 只覆盖与宿主侧写入方 互通的关键面——config 的 JSON 形状与开关语义；
 /// 不触碰真实 Caches JSONL（读路径依赖真机落盘）。用完清理共享 key。
 final class HookCaptureTests: XCTestCase {
 
@@ -74,6 +74,6 @@ final class HookCaptureTests: XCTestCase {
         let out = try await HookCaptureTool().execute(arguments: ["op": .string("status")], session: makeSession())
         let s = try XCTUnwrap(text(out))
         XCTAssertTrue(s.contains("talos_in"))
-        XCTAssertTrue(s.contains("LijiMsgCapture"))
+        XCTAssertTrue(s.contains("AppAgentMsgCapture"))
     }
 }

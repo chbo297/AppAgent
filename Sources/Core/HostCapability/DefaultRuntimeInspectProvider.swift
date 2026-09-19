@@ -1,6 +1,6 @@
 //
 //  DefaultRuntimeInspectProvider.swift
-//  AppAgent — Liji 集成层
+//  AppAgent — 宿主能力层
 //
 //  基于 ObjC runtime + KVC + UIKit 的通用 RuntimeInspectProvider 默认实现。
 //  任意 UIKit 宿主 app 都可直接注册使用，无需自行实现内省逻辑。

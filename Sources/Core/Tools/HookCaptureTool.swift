@@ -1,11 +1,11 @@
 //
 //  HookCaptureTool.swift
-//  AppAgent — Liji 集成层
+//  AppAgent — 宿主能力层
 //
 //  app agent 的「JS↔端消息捕获」诊断工具（app_hook_capture）。热修复排查时：在宿主
 //  四个消息边界（talos_in/out、shell_in/out）按 channel 开启 dormant tap，把命中的
 //  {方向, API, 入参, 结果} 落到本地沙盒 JSONL，再由本工具读回分析。捕获默认全关；本工具
-//  通过共享的 NSUserDefaults 契约拨动开关，同进程 LijiMsgTap 即时生效。自包含，无需 provider。
+//  通过共享的 NSUserDefaults 契约拨动开关，同进程的宿主写入方即时生效。自包含，无需 provider。
 //
 
 import Foundation
