@@ -12,7 +12,7 @@ import Foundation
 /// Well-known tool group identifiers used by the SDK's built-in tools.
 ///
 /// A tool's `group` is a free-form string, so hosts may define their own; these
-/// are the groups the built-in and Liji-integration tools ship with.
+/// are the groups the built-in and host-capability tools ship with.
 public enum ToolGroups {
     /// Core assistant tools (clarify, memory, todo).
     public static let core = "core"

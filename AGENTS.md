@@ -3,14 +3,17 @@
 iOS/macOS AIAgent SDK，为应用提供嵌入式 AI AIAgent 能力。Core 零第三方依赖；完整 UIKit UI 支持 iOS 15+ / Mac Catalyst 15+，原生 macOS 12+ 提供 Core；iOS/Catalyst ChatPanel 使用 BODragScroll。
 
 > **命名约定（长期生效）**：本工程 **AppAgent 即「app agent」**。任何文档/对话/代码注释中提到「app agent」都指本工程。
-> `liji` 分支新增 `Sources/Core/Liji/`：OneAPI 多协议 Provider 工厂、liji_server 客户端、运行时内省 / 热修复的宿主 provider 协议与工具。集成说明见 [`docs/Liji.md`](docs/Liji.md)。
-> 关联：后台服务 liji_server（`/Users/bdmap/Baidu/baidu/personal-code/liji_server`）、百度地图壳工程 liji_pub（分支 `feature_liji`）。
+> **边界（长期生效）**：AppAgent 只做**通用机制与协议**。任何业务/领域能力（某个 App 的后台服务客户端、
+> 地图能力、业务面板等）都由**宿主**实现并经 `ToolCentral.register(_:)` / `ModelProviderCentral.register`
+> / `DecisionResponderCentral` / Skills 注册进来；AppAgent 不感知、不引用、不依赖具体宿主。
+> `Sources/Core/HostCapability/` 放的是宿主能力的**协议 + 默认实现 + 装配**（运行时内省 / 热修复 / 消息捕获），
+> 通用；`Sources/Core/Model/EndpointProviderFactory.swift` 按端点参数造 Provider，也不绑定任何宿主配置类型。
 
 ## 构建 & 测试
 
 ```bash
 swift build
-swift test        # 原生 macOS Core：168 tests
+swift test        # 原生 macOS Core：161 tests
 xcodebuild -project Examples/iOS/AppAgentDemo.xcodeproj -scheme AppAgentDemo -configuration Debug -destination 'generic/platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO build
 xcodebuild -scheme AppAgent -configuration Debug -destination 'platform=macOS,variant=Mac Catalyst,name=My Mac' test  # Core + UIKit：278 tests
 Scripts/simulator-selfcheck.sh   # iOS 模拟器上把全部工具跑一遍（见下）
@@ -354,7 +357,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `AppUserDefaultsTool.swift` | UserDefaults read/write/remove/list（group host-storage） |
 | `AppDeviceInfoTool.swift` | 设备与运行环境：机型/系统/存储/内存/语言时区/电量（group host-runtime） |
 
-> `Core/Liji/Tools/` 另有 4 个：`RuntimeInspectTool`（含 view_tree/view_info/view_set/view_invoke）、`HotfixTool`、`LijiServerTool`、`HookCaptureTool`。
+> 宿主能力工具另有 3 个（同在 `Core/Tools/`，协议与默认实现在 `Core/HostCapability/`）：`RuntimeInspectTool`（含 view_tree/view_info/view_set/view_invoke）、`HotfixTool`、`HookCaptureTool`。
 
 ### Core/Tools/Protocols/ — 宿主 App Provider 协议 (3 files)
 
@@ -421,12 +424,11 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `UI/Settings/AppAgentSettingsViewController.swift` | 模型设置：探查、拖拽优先级、可用性实测 |
 | `UI/Debug/` (4 files) | 模型调用调试窗口 + 响应区域调试窗口（👻 悬浮按钮） |
 | `UI/VoiceInputOverlay/` + `AppAgentVoiceRecognitionManager.swift` | 按住说话浮层与识别 |
-| `UI/Liji/` (3 files) | liji 场景面板 |
 
 ### Tests/
 
-`Tests/Core/`：AppAgentCoreTests、AppAgentSettingsTests、AppAgentDebugLogTests、ModelFallbackTests、ReasoningStreamTests、SessionManageTests、HostToolsTests、HookCaptureTests、LijiTests
+`Tests/Core/`：AppAgentCoreTests、AppAgentSettingsTests、AppAgentDebugLogTests、ModelFallbackTests、ReasoningStreamTests、SessionManageTests、HostToolsTests、HookCaptureTests
 
-`Tests/UI/`：AppAgentUITests、AppAgentChatPanelGeometryTests、AppAgentActivityTimelineTests、AppAgentRegionDebugTests、AppAgentInputBarFramePolicyTests、AppAgentVoiceInputCoordinatorTests、RuntimeInspectViewTests、LijiPanelUITests、ChatMessageAssemblerTests、AppAgentMarkdownTests
+`Tests/UI/`：AppAgentUITests、AppAgentChatPanelGeometryTests、AppAgentActivityTimelineTests、AppAgentRegionDebugTests、AppAgentInputBarFramePolicyTests、AppAgentVoiceInputCoordinatorTests、RuntimeInspectViewTests、ChatMessageAssemblerTests、AppAgentMarkdownTests
 
 原生 macOS `swift test` 只跑 Core 部分；UIKit 用例需 Mac Catalyst destination。Catalyst 的 xctest 里创建 `UIWindow` 会抛 `NSApplication has not been created yet`，需要窗口的断言请改写成纯几何/纯视图层级的形式。

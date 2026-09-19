@@ -4,7 +4,7 @@
 //
 //  宿主 app（百度地图）实现，向 app agent 暴露「运行时内省」能力：
 //  UI 层级、类列表、方法/属性列表、属性取值、方法调用。
-//  这些能力默认关闭，需在百度地图配置中显式打开（LijiConfig.runtimeToolsEnabled）。
+//  这些能力默认关闭，需宿主显式打开（HostToolset 的 runtimeToolsEnabled）。
 //
 
 import Foundation

@@ -398,26 +398,8 @@ enum CapabilitySelfCheck {
 
         await checkHookCapture(rec, session: session)
 
-        rec.section("liji_server（离线可判定的边界）")
-        // 后台服务在自检环境里不可达，所以只验参数校验与兜底分支：baseURL 指向
-        // 一个必定连不上的本机端口，真实请求会立刻以 transport 错误收场。
-        let liji = LijiServerTool(client: LijiServerClient(baseURL: "http://127.0.0.1:9"))
-        await check(rec, "submit(缺 prompt) rejected", liji, ["op": .string("submit")],
-                    expect: .errorContains("'prompt' is required"), session: session)
-        await check(rec, "status(缺 requirementId) rejected", liji, ["op": .string("status")],
-                    expect: .errorContains("'requirementId' is required"), session: session)
-        await check(rec, "share(缺 patchId) rejected", liji, ["op": .string("share")],
-                    expect: .errorContains("'patchId' is required"), session: session)
-        await check(rec, "toggle(缺 token) rejected", liji, ["op": .string("toggle")],
-                    expect: .errorContains("'token' is required"), session: session)
-        await check(rec, "apply(无 hotfix 引擎) rejected", liji,
-                    ["op": .string("apply"), "patchId": .string("selfcheck")],
-                    expect: .errorContains("hotfix engine not available"), session: session)
-        await check(rec, "unknown op rejected", liji, ["op": .string("nope")],
-                    expect: .errorContains("unknown op"), session: session)
-        // 服务不可达时必须以错误收场而不是挂住整轮自检。
-        await check(rec, "list(服务不可达不挂死)", liji, ["op": .string("list")],
-                    expect: .completes, session: session)
+        // liji_server 相关工具已迁到宿主（百度地图）侧，由宿主自行注册到 ToolCentral，
+        // AppAgent 不再内置，故本自检不再覆盖；宿主侧自检请在宿主工程里做。
 
         rec.section("app_device_info")
         let device = AppDeviceInfoTool()

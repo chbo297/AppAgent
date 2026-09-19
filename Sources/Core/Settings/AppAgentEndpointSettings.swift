@@ -40,9 +40,9 @@ public struct AppAgentEndpointSettings: Codable, Sendable, Equatable {
     public var maxTokens: Int
 
     public init(
-        baseURL: String = LijiConfig.oneAPIBaseURL,
+        baseURL: String = AppAgentEndpointSettings.oneAPIBaseURL,
         apiKey: String = "",
-        customHeaders: [String: String] = LijiConfig.defaultOneAPIHeaders,
+        customHeaders: [String: String] = AppAgentEndpointSettings.defaultOneAPIHeaders,
         enabledModels: [AppAgentModelRef] = [AppAgentModelRef(modelId: "gpt-5.6-sol", apiProtocol: .openaiCompletions)],
         contextWindow: Int = 200_000,
         maxTokens: Int = 8192
@@ -54,6 +54,14 @@ public struct AppAgentEndpointSettings: Codable, Sendable, Equatable {
         self.contextWindow = contextWindow
         self.maxTokens = maxTokens
     }
+
+    /// 默认端点：OneAPI 网关（宿主可整体替换；此处只是开箱默认值，不含任何业务语义）。
+    public static let oneAPIBaseURL = "https://oneapi-comate.baidu-int.com/v1"
+
+    /// OneAPI 需要的自定义头；`username`/`source` 由宿主按需覆盖。
+    public static let defaultOneAPIHeaders: [String: String] = [
+        "comate_custom_header": "{\"username\":\"appagent\",\"source\":\"appagent\"}"
+    ]
 
     /// 默认接入：OneAPI + 默认模型，`apiKey` 留空由用户在设置页填写。
     public static var oneAPIDefault: AppAgentEndpointSettings { AppAgentEndpointSettings() }

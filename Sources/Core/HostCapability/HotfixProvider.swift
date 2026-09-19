@@ -3,7 +3,7 @@
 //  AppAgent — Liji 集成层
 //
 //  宿主 app（百度地图·增强版 BMBandage）实现，向 app agent 暴露「热修复」能力：
-//  应用/开关/列举命名 JS 补丁槽。默认关闭，需 LijiConfig.hotfixEnabled 打开。
+//  应用/开关/列举命名 JS 补丁槽。默认关闭，需宿主显式打开（HostToolset 的 hotfixEnabled）。
 //
 
 import Foundation
