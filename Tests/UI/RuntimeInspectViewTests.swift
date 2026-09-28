@@ -4,6 +4,7 @@ import UIKit
 @testable import AppAgent
 
 /// 运行时视图寻址与取值解析（app_runtime_inspect 的 view_* 系列依赖它们）。
+@MainActor
 final class RuntimeInspectViewTests: XCTestCase {
 
     /// root / 0 / 1/0 三种路径都能落到正确的视图，越界返回 nil。
@@ -166,39 +167,39 @@ final class RuntimeInspectViewTests: XCTestCase {
 
 /// 只记录调用的桩 provider，用于验证工具的分发与参数校验。
 private struct RecordingRuntimeProvider: RuntimeInspectProvider {
-    func uiHierarchy() async -> String { "hierarchy" }
-    func classList(matching filter: String?) async -> [String] { ["A"] }
-    func methodList(ofClass className: String) async -> [String] { ["- m"] }
-    func propertyList(ofClass className: String) async -> [String] { ["@property p"] }
-    func propertyValue(keyPath: String, ofClass className: String?) async -> String? { "value" }
-    func invoke(className: String, selector: String, argumentsJSON: String) async -> String { "invoked" }
-    func viewTree(maxDepth: Int) async -> String { "tree depth=\(maxDepth)" }
-    func viewInfo(path: String) async -> String { "info \(path)" }
-    func setViewValue(path: String, key: String, value: String) async -> String { "OK. set \(path).\(key)=\(value)" }
-    func invokeOnView(path: String, selector: String, argumentsJSON: String) async -> String { "view invoked" }
+    func uiHierarchy(context: HostInspectionContext) async -> String { "hierarchy" }
+    func classList(matching filter: String?, context: HostInspectionContext) async -> [String] { ["A"] }
+    func methodList(ofClass className: String, context: HostInspectionContext) async -> [String] { ["- m"] }
+    func propertyList(ofClass className: String, context: HostInspectionContext) async -> [String] { ["@property p"] }
+    func propertyValue(keyPath: String, ofClass className: String?, context: HostInspectionContext) async -> String? { "value" }
+    func invoke(className: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String { "invoked" }
+    func viewTree(maxDepth: Int, context: HostInspectionContext) async -> String { "tree depth=\(maxDepth)" }
+    func viewInfo(path: String, context: HostInspectionContext) async -> String { "info \(path)" }
+    func setViewValue(path: String, key: String, value: String, context: HostInspectionContext) async -> String { "OK. set \(path).\(key)=\(value)" }
+    func invokeOnView(path: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String { "view invoked" }
 }
 
 /// 全部以 provider 真实的失败文案回答，用于验证工具层的成功/失败判定。
 private struct FailingRuntimeProvider: RuntimeInspectProvider {
-    func uiHierarchy() async -> String { "(no windows)" }
-    func classList(matching filter: String?) async -> [String] { [] }
-    func methodList(ofClass className: String) async -> [String] { ["(class not found: X)"] }
-    func propertyList(ofClass className: String) async -> [String] { ["(class not found: X)"] }
-    func propertyValue(keyPath: String, ofClass className: String?) async -> String? {
+    func uiHierarchy(context: HostInspectionContext) async -> String { "(no windows)" }
+    func classList(matching filter: String?, context: HostInspectionContext) async -> [String] { [] }
+    func methodList(ofClass className: String, context: HostInspectionContext) async -> [String] { ["(class not found: X)"] }
+    func propertyList(ofClass className: String, context: HostInspectionContext) async -> [String] { ["(class not found: X)"] }
+    func propertyValue(keyPath: String, ofClass className: String?, context: HostInspectionContext) async -> String? {
         "Failed to read \(keyPath): valueForUndefinedKey:"
     }
-    func setPropertyValue(keyPath: String, value: String, ofClass className: String?) async -> String {
+    func setPropertyValue(keyPath: String, value: String, ofClass className: String?, context: HostInspectionContext) async -> String {
         "Failed to set \(keyPath): setValue:forUndefinedKey:"
     }
-    func invoke(className: String, selector: String, argumentsJSON: String) async -> String {
+    func invoke(className: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String {
         "Invoke failed: boom"
     }
-    func viewTree(maxDepth: Int) async -> String { "(no key window)" }
-    func viewInfo(path: String) async -> String { "(no view at path '\(path)')" }
-    func setViewValue(path: String, key: String, value: String) async -> String {
+    func viewTree(maxDepth: Int, context: HostInspectionContext) async -> String { "(no key window)" }
+    func viewInfo(path: String, context: HostInspectionContext) async -> String { "(no view at path '\(path)')" }
+    func setViewValue(path: String, key: String, value: String, context: HostInspectionContext) async -> String {
         "Invalid rect '\(value)'. Use \"x,y,width,height\"."
     }
-    func invokeOnView(path: String, selector: String, argumentsJSON: String) async -> String {
+    func invokeOnView(path: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String {
         "(selector \(selector) not found on UIView)"
     }
 }

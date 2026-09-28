@@ -106,6 +106,110 @@ final class AppAgentRegionDebugTests: XCTestCase {
         }
     }
 
+    func testDisplayHeightReadoutFormatsPointsAndFitsExpandedPanel() throws {
+        let panel = AppAgentRegionDebugPanelView()
+        panel.frame = CGRect(origin: .zero, size: AppAgentRegionDebugPanelView.expandedSize)
+        panel.setExpanded(true, notify: false)
+        let label = try XCTUnwrap(view(
+            withIdentifier: "appagent.regionDebug.displayHeight", in: panel
+        ) as? UILabel)
+        XCTAssertEqual(label.text, "displayHeight: —")
+
+        panel.updateDisplayHeight(410.5)
+        XCTAssertEqual(label.text, "displayHeight: 410.5 pt")
+        XCTAssertEqual(label.accessibilityValue, "410.5 pt")
+        panel.layoutIfNeeded()
+        XCTAssertGreaterThan(label.bounds.height, 0)
+        XCTAssertTrue(panel.bounds.contains(label.convert(label.bounds, to: panel)))
+        XCTAssertLessThanOrEqual(label.intrinsicContentSize.width, label.bounds.width)
+        let demoButton = try XCTUnwrap(view(
+            withIdentifier: "appagent.regionDebug.failureDemo", in: panel
+        ))
+        XCTAssertTrue(panel.bounds.contains(demoButton.convert(demoButton.bounds, to: panel)),
+                      "增加高度读数后，底部测试按钮仍应完整可见")
+
+        panel.updateDisplayHeight(0)
+        XCTAssertEqual(label.text, "displayHeight: 0.0 pt", "零高度不能误报为无目标")
+        panel.updateDisplayHeight(nil)
+        XCTAssertEqual(label.text, "displayHeight: —")
+    }
+
+    func testDebugReadoutTracksActualDragScrollDisplayHeight() throws {
+        // 不建 UIWindow，也不加载真实会话，只配置被观测的 coordinator。
+        let target = AppAgentViewController()
+        let coordinator = target.chatPanelCoordinator
+        coordinator.updateLayout(
+            bounds: CGRect(x: 0, y: 0, width: 393, height: 852),
+            safeAreaInsets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)
+        )
+        let controller = AppAgentRegionDebugViewController()
+        controller.target = target
+        controller.loadViewIfNeeded()
+        let label = try XCTUnwrap(view(
+            withIdentifier: "appagent.regionDebug.displayHeight", in: controller.view
+        ) as? UILabel)
+
+        controller.refreshOutlines()
+        XCTAssertEqual(coordinator.dragScrollView.displayHeight, 486.5, accuracy: 0.01)
+        XCTAssertEqual(label.text, "displayHeight: 486.5 pt")
+
+        // 使用非档位高度，防止读数误用 halfHeight 或固定面板 frame.height。
+        coordinator.dragScrollView.scroll(toDisplayHeight: 537.3, animated: false)
+        controller.refreshOutlines()
+        let actualHeight = coordinator.dragScrollView.displayHeight
+        // BODragScroll 可按像素对齐；读数应跟随实际值，而不是传入的目标值。
+        let scale = max(1, coordinator.dragScrollView.traitCollection.displayScale)
+        XCTAssertEqual(actualHeight, 537.3, accuracy: 1 / scale)
+        XCTAssertEqual(label.text, String(format: "displayHeight: %.1f pt", Double(actualHeight)))
+
+        coordinator.move(to: .peek, animated: false)
+        controller.refreshOutlines()
+        XCTAssertEqual(label.text, "displayHeight: 118.0 pt")
+
+        controller.target = nil
+        controller.refreshOutlines()
+        XCTAssertEqual(label.text, "displayHeight: —", "目标释放后不能留下旧高度")
+    }
+
+    func testExpandedPanelRefreshesWithoutOutlinesAndResumesAfterReappearing() throws {
+        let controller = AppAgentRegionDebugViewController()
+        controller.loadViewIfNeeded()
+        defer { controller.viewDidDisappear(false) }
+        let panel = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? AppAgentRegionDebugPanelView }.first
+        )
+        XCTAssertFalse(controller.isRefreshing)
+        XCTAssertTrue(AppAgentInteractionRegion.allCases.allSatisfy { !panel.isOn($0) })
+
+        panel.setExpanded(true)
+        XCTAssertTrue(controller.isRefreshing, "只看高度、不画区域框时也需要按帧刷新")
+        controller.viewDidDisappear(false)
+        XCTAssertFalse(controller.isRefreshing)
+        controller.viewDidAppear(false)
+        XCTAssertTrue(controller.isRefreshing, "调试窗口再次显示后要恢复实时读数")
+        panel.setExpanded(false)
+        XCTAssertFalse(controller.isRefreshing, "面板收起且无区域框时停止刷新")
+
+        let toggle = try XCTUnwrap(view(
+            withIdentifier: AppAgentInteractionRegion.chatListViewport.accessibilityIdentifier,
+            in: panel
+        ) as? UISwitch)
+        toggle.isOn = true
+        try invokeRegisteredAction(toggle, for: .valueChanged)
+        XCTAssertTrue(controller.isRefreshing, "折叠时仍保留原有区域框刷新")
+        toggle.isOn = false
+        try invokeRegisteredAction(toggle, for: .valueChanged)
+        XCTAssertFalse(controller.isRefreshing)
+    }
+
+    private func view(withIdentifier identifier: String, in root: UIView) -> UIView? {
+        if root.accessibilityIdentifier == identifier { return root }
+        for child in root.subviews {
+            if let match = view(withIdentifier: identifier, in: child) { return match }
+        }
+        return nil
+    }
+
     /// 点击 / 上滑的输入命中区要纵向撑满整条 bar 的白色背景。
     func testExtendedInputAreaSpansFullBarHeight() {
         let bar = AppAgentInputBar()

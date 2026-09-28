@@ -13,8 +13,20 @@ public enum AppAgentSettingsStore {
     public static let storageKey = "com.appagent.endpointSettings"
     /// Keychain account（存 apiKey）。
     public static let apiKeyAccount = "com.appagent.endpoint.apiKey"
+    /// UserDefaults key：是否「总是显示思考过程」。这是纯 UI 展示偏好，和端点/模型无关，
+    /// 所以单独存一个键，不塞进 `AppAgentEndpointSettings` 的 save 校验里。
+    public static let alwaysShowThinkingKey = "com.appagent.alwaysShowThinkingProcess"
 
     private static var defaults: UserDefaults { .standard }
+
+    /// 是否在成功给出最终结果后仍保留「处理过程」入口（小三角 + 标题）。
+    ///
+    /// 默认 `false`：成功的回复只显示最终结果，界面更干净；报错 / 异常回合不受此开关影响，
+    /// 仍保留过程入口并在结果下方给出错误摘要。缺省键（新装）即默认值。
+    public static var alwaysShowThinkingProcess: Bool {
+        get { defaults.object(forKey: alwaysShowThinkingKey) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: alwaysShowThinkingKey) }
+    }
 
     /// 读取已保存的设置；从未保存过时返回 nil。apiKey 从 Keychain 注入。
     public static func load() -> AppAgentEndpointSettings? {

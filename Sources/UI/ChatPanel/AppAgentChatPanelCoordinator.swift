@@ -5,6 +5,7 @@
 
 #if canImport(UIKit)
 import BODragScroll
+import BOUIKit
 import UIKit
 
 /// ChatPanel 与 BODragScroll 之间的唯一适配层。
@@ -25,10 +26,24 @@ final class AppAgentChatPanelCoordinator: NSObject {
 
     private var geometry: AppAgentChatPanelGeometry?
     private var pendingLayoutDetent: AppAgentChatPanelDetent?
+    private var wasFullyCollapsed = false
+    private var automaticRevealID: UUID?
+
+    /// 真正收至 peek 后再次展开才开始新的浏览；half/full 切换与逐帧布局不触发。
+    var onWillRevealMessages: (() -> Void)?
 
     override init() {
         super.init()
 
+        panelView.listView.scrollTrace.panelContext = { [weak self] in
+            guard let self else { return "released" }
+            let drag = self.dragScrollView
+            return "displayHeight=\(drag.displayHeight) y=\(drag.contentOffset.y)"
+                + " pan=\(drag.panGestureRecognizer.state.rawValue)"
+                + " translationY=\(drag.panGestureRecognizer.translation(in: drag).y)"
+                + " dragging=\(drag.isDragging) decel=\(drag.isDecelerating)"
+                + " panelFrame=\(self.panelView.frame)"
+        }
         dragScrollView.backgroundColor = .clear
         // 内容区背景的阴影会超出 panel bounds，因此 DragScroll 不裁掉它。
         dragScrollView.clipsToBounds = false
@@ -51,17 +66,19 @@ final class AppAgentChatPanelCoordinator: NSObject {
     }
 
     /// 根据 ViewController 最新环境更新 host、固定面板尺寸和 detent。
+    ///
+    /// 键盘不参与：键盘只让宿主把整个 ChatPanel 容器上移，面板几何与展示高度全程不变。
+    ///
+    /// **不在这里写 `dragScrollView.frame`**：画布 frame 的唯一 writer 是
+    /// `AppAgentChatPanelContainerView`（目标值见 `AppAgentChatPanelContainerLayout.dragScrollFrame`）。
+    /// 调用方 `applyChatPanelContainerLayout` 在本方法之后紧接着提交容器布局，尺寸由那一次写入给出。
     func updateLayout(
         bounds: CGRect,
-        safeAreaInsets: UIEdgeInsets,
-        inputBarExpandedFrame: CGRect
+        safeAreaInsets: UIEdgeInsets
     ) {
-        dragScrollView.frame = CGRect(origin: .zero, size: bounds.size)
-
         guard let newGeometry = AppAgentChatPanelGeometry(
             bounds: bounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame
+            safeAreaInsets: safeAreaInsets
         ) else { return }
 
         guard geometry != newGeometry else {
@@ -71,6 +88,7 @@ final class AppAgentChatPanelCoordinator: NSObject {
 
         let isFirstGeometry = geometry == nil
         geometry = newGeometry
+        updateLatestReplyInitialHeight(for: newGeometry)
         if isFirstGeometry {
             // 首次布局前若业务已经调用 move(to:)，保留该请求；否则默认停在 half。
             pendingLayoutDetent = pendingLayoutDetent ?? displayDetent
@@ -93,7 +111,17 @@ final class AppAgentChatPanelCoordinator: NSObject {
     }
 
     /// 由业务主动移动到指定档位；运动细节和中途打断全部交给 BODragScroll。
-    func move(to detent: AppAgentChatPanelDetent, animated: Bool) {
+    func move(
+        to detent: AppAgentChatPanelDetent,
+        animated: Bool,
+        preservingReplyHeight: Bool = false,
+        source: String = #function
+    ) {
+        // 新消息自动展开不是重新浏览；标记跨越滚动动画，直到第一帧真正离开 peek。
+        let revealID = preservingReplyHeight && detent != .peek ? UUID() : nil
+        automaticRevealID = revealID
+        panelView.listView.scrollTrace.record("outer.move", on: dragScrollView, source: source, force: true,
+                                             details: "detent=\(detent) animated=\(animated) pending=\(geometry == nil)")
         guard let geometry else {
             displayDetent = detent
             pendingLayoutDetent = detent
@@ -103,7 +131,12 @@ final class AppAgentChatPanelCoordinator: NSObject {
         dragScrollView.scroll(
             toDisplayHeight: geometry.height(for: detent),
             animated: animated
-        )
+        ) { [weak self] _ in
+            // 首帧前取消 / 中断也要结束本次豁免，不能影响之后的用户重开。
+            // 新请求可能同步中断旧请求，旧 completion 只能清理自己的标记。
+            guard let self, let revealID, self.automaticRevealID == revealID else { return }
+            self.automaticRevealID = nil
+        }
     }
 
     /// 当前 displayHeight 是否处在 peek 附近，供新消息到达时决定是否自动展开。
@@ -117,10 +150,37 @@ final class AppAgentChatPanelCoordinator: NSObject {
     }
 
     /// 所有面板派生 UI 都只消费 displayHeight；不等待 movement completion 或 idle 回调。
-    private func applyDisplayHeightState(_ displayHeight: CGFloat) {
+    private func applyDisplayHeightState(
+        _ displayHeight: CGFloat,
+        syncMode: AppAgentChatMessageListView.VisibleAreaSyncMode = .normal,
+        source: String = #function
+    ) {
         guard let geometry, displayHeight > 0 else { return }
 
-        updatePanelPresentation(at: displayHeight)
+        let isFullyCollapsed = displayHeight <= geometry.peekHeight + 0.5
+        let isRevealing = wasFullyCollapsed && !isFullyCollapsed
+        wasFullyCollapsed = isFullyCollapsed
+        if isRevealing {
+            let preservesHeight = automaticRevealID != nil && !dragScrollView.isDragging
+            automaticRevealID = nil
+            if !preservesHeight { onWillRevealMessages?() }
+        }
+        if !isFullyCollapsed { automaticRevealID = nil }
+
+        let trace = panelView.listView.scrollTrace
+        let listScrollView = panelView.listView.participantScrollView
+        trace.record(
+            "display.begin",
+            on: listScrollView,
+            source: source,
+            force: syncMode == .tracking,
+            details: "displayHeight=\(displayHeight) syncMode=\(syncMode.label)"
+        )
+        trace.observe("panel.presentation", on: listScrollView, source: source,
+                      force: syncMode == .tracking,
+                      details: "displayHeight=\(displayHeight)") {
+            updatePanelPresentation(at: displayHeight)
+        }
 
         let clampedDisplayHeight = geometry.clampedDisplayHeight(displayHeight)
         displayDetent = geometry.nearestDetent(
@@ -138,10 +198,30 @@ final class AppAgentChatPanelCoordinator: NSObject {
         if panelView.listView.updateVisibleArea(
             visibleHeight: visibleListHeight,
             // 固定值：只随安全区/bar 高度变化的几何量，键盘和面板高度都不参与。
-            bottomInset: geometry.listBottomInset
+            bottomInset: geometry.listBottomInset,
+            syncMode: syncMode
         ) {
-            dragScrollView.reloadScrollMetrics()
+            trace.observe("metrics.list", on: listScrollView, source: source,
+                          force: syncMode == .tracking) {
+                trace.observe("metrics.outer", on: dragScrollView, source: source,
+                              force: syncMode == .tracking) {
+                    dragScrollView.reloadScrollMetrics()
+                }
+            }
         }
+    }
+
+    /// 新一轮回复的留白基准固定按 half 计算，而不是随着用户把面板拖到 full
+    /// 又重新分配；这样首条消息在 displayHeight 首次发布前到达时也不会落回 400pt。
+    private func updateLatestReplyInitialHeight(
+        for geometry: AppAgentChatPanelGeometry
+    ) {
+        let fixedTopAreaHeight = AppAgentChatPanelGeometry.dragHandleAreaHeight
+            + AppAgentChatPanelNavigationBar.height
+        panelView.listView.updateLatestReplyInitialHeight(
+            halfScreenVisibleHeight: max(0, geometry.halfHeight - fixedTopAreaHeight),
+            bottomInset: geometry.listBottomInset
+        )
     }
 
     /// 【竖向收起接线点】把 BODragScroll 的实时展示高度交给 panel 内部，只更新背景和 viewport 的裁切几何。
@@ -186,7 +266,7 @@ extension AppAgentChatPanelCoordinator: BODragScrollEventDelegate {
         didChangeDisplayHeight displayHeight: CGFloat
     ) {
         // 【竖向收起每帧入口】手势拖动、减速或程序化移动改变展示高度时，BODragScroll 都从这里回调。
-        applyDisplayHeightState(displayHeight)
+        applyDisplayHeightState(displayHeight, syncMode: .tracking)
     }
 }
 

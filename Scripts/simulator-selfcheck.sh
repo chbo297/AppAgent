@@ -56,7 +56,7 @@ gtimeout 120 xcrun simctl install "$SIM" "$APP" || { echo "INSTALL FAILED"; exit
 
 # Clear the previous report so a stale file cannot be mistaken for a fresh run.
 CONTAINER=$(gtimeout 30 xcrun simctl get_app_container "$SIM" "$BUNDLE_ID" data 2>/dev/null)
-REPORT="$CONTAINER/Documents/selfcheck-report.txt"
+REPORT="$CONTAINER/Documents/AppAgent/diagnostics/selfcheck-report.txt"
 [ -n "$CONTAINER" ] && rm -f "$REPORT"
 
 echo "==> launching with -run-selfcheck"
@@ -64,7 +64,7 @@ gtimeout "$LAUNCH_TIMEOUT" xcrun simctl launch --terminate-running-process \
     "$SIM" "$BUNDLE_ID" -run-selfcheck || { echo "LAUNCH FAILED"; exit 1; }
 
 CONTAINER=$(gtimeout 30 xcrun simctl get_app_container "$SIM" "$BUNDLE_ID" data)
-REPORT="$CONTAINER/Documents/selfcheck-report.txt"
+REPORT="$CONTAINER/Documents/AppAgent/diagnostics/selfcheck-report.txt"
 for i in $(seq 1 "$REPORT_TIMEOUT"); do
     [ -f "$REPORT" ] && break
     sleep 1

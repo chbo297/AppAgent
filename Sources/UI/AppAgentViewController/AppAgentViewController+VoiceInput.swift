@@ -38,6 +38,10 @@ extension AppAgentViewController {
     /// 语音输入手势总入口：inputBar 透传值事件，按阶段转给协调器。
     func handleVoiceInputGesture(_ event: AppAgentInputBarVoiceGestureEvent) {
         switch event.phase {
+        case .prewarm:
+            voiceInputCoordinator.prewarm(source: event.source)
+        case .abortPrewarm:
+            voiceInputCoordinator.abortPrewarm()
         case .began:
             voiceInputCoordinator.begin(source: event.source, location: event.locationInHost)
         case .moved:
@@ -47,15 +51,6 @@ extension AppAgentViewController {
         case .cancelled:
             voiceInputCoordinator.systemCancel(at: event.locationInHost)
         }
-    }
-
-    /// 把语音识别文本回填到 inputBar 输入框：切回键盘输入源并聚焦，追加在已有文本之后。
-    func backfillVoiceTranscriptToInputBar(_ transcript: String) {
-        inputBar.setInputSource(.keyboard, animated: true)
-        if !transcript.isEmpty {
-            inputBar.text = inputBar.text.isEmpty ? transcript : inputBar.text + transcript
-        }
-        inputBar.textField.becomeFirstResponder()
     }
 
     /// 创建语音输入震动发生器：新系统优先绑定 view，旧系统使用传统 medium 样式。
@@ -81,12 +76,9 @@ extension AppAgentViewController: AppAgentVoiceInputCoordinatorDelegate {
             releaseAction: renderState.releaseAction,
             fingerLocation: renderState.fingerLocation,
             transcriptText: renderState.transcriptText,
-            showsTranscriptCursor: renderState.showsTranscriptCursor
+            showsTranscriptCursor: renderState.showsTranscriptCursor,
+            audioLevel: renderState.audioLevel
         )
-    }
-
-    func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didRequestBackfill text: String) {
-        backfillVoiceTranscriptToInputBar(text)
     }
 
     func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didEnterEditModeWith text: String) {

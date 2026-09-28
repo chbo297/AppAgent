@@ -29,6 +29,10 @@ Package.resolved
 # CocoaPods
 Pods/
 
+# Python（Scripts/Dependencies 下的辅助脚本产生的字节码缓存）
+__pycache__/
+*.py[cod]
+
 # macOS
 .DS_Store
 .AppleDouble

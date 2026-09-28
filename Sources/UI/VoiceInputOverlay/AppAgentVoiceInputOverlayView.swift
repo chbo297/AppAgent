@@ -115,10 +115,14 @@ final class AppAgentVoiceInputOverlayView: UIView {
         releaseAction: AppAgentVoiceInputReleaseAction,
         fingerLocation: CGPoint,
         transcriptText: String,
-        showsTranscriptCursor: Bool
+        showsTranscriptCursor: Bool,
+        audioLevel: Double
     ) {
         // 编辑态由 textView 驱动，忽略手势阶段的更新。
         guard !isEditingModeActive else { return }
+        // 波形驱动是高频、只改 path 的轻量路径，放在变化判定之前：
+        // 纯音量更新（识别状态/文本/手指都没变）也能持续喂给录音态波形，不被下面的 guard 拦掉。
+        driveWaveform(for: recognitionState, audioLevel: audioLevel)
         let recognitionChanged = currentRecognitionState != recognitionState
         let releaseActionChanged = currentReleaseAction != releaseAction
         let transcriptChanged = self.transcriptText != transcriptText
@@ -148,6 +152,19 @@ final class AppAgentVoiceInputOverlayView: UIView {
         }
     }
 
+    /// 按识别状态选择波形驱动方式：录音中→实时音量，收尾中→循环波浪动画，其余→静态。
+    private func driveWaveform(for state: AppAgentVoiceRecognitionVisualState, audioLevel: Double) {
+        switch state {
+        case .recording:
+            waveformView.setMode(.audioReactive)
+            waveformView.pushAudioLevel(CGFloat(audioLevel))
+        case .finalizing:
+            waveformView.setMode(.waving)
+        default:
+            waveformView.setMode(.idle)
+        }
+    }
+
     func hide(animated: Bool) {
         // 立即禁用交互：淡出窗口期内再点“发送/取消”会重复触发收尾（如消息重复发送）。
         isUserInteractionEnabled = false
@@ -161,6 +178,7 @@ final class AppAgentVoiceInputOverlayView: UIView {
             self.backgroundView.layer.removeAllAnimations()
             self.backgroundView.alpha = 0
             self.activityIndicator.stopAnimating()
+            self.waveformView.setMode(.idle)
             self.transcriptText = ""
             self.showsTranscriptCursor = false
             self.currentRecognitionState = .none
@@ -342,6 +360,7 @@ final class AppAgentVoiceInputOverlayView: UIView {
         cancelZoneView.isHidden = true
         editZoneView.isHidden = true
         transcriptLabel.isHidden = true
+        waveformView.setMode(.idle)
         waveformView.isHidden = true
         isUserInteractionEnabled = true
 
@@ -729,7 +748,7 @@ extension AppAgentVoiceInputOverlayView: AppAgentVoiceEditModeSessionHost {
     }
 }
 
-private final class AppAgentVoiceInputOverlayBackgroundView: UIView {
+private final class AppAgentVoiceInputOverlayBackgroundView: UIView, AppAgentRuntimeOwned {
     private let bottomColor: UIColor
     var gradientTopY: CGFloat = 0 {
         didSet {

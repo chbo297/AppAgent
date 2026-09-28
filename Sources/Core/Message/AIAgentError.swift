@@ -7,7 +7,7 @@ import Foundation
 
 /// Errors from the agent execution layer.
 public enum AIAgentError: Error, LocalizedError, Sendable {
-    case maxIterationsReached
+    case maxIterationsReached(limit: Int)
     case toolNotFound(String)
     case toolExecutionFailed(toolName: String, underlying: Error)
     case sessionNotFound(String)
@@ -17,11 +17,14 @@ public enum AIAgentError: Error, LocalizedError, Sendable {
     case toolLoopDetected(String)
     case toolExecutionTimedOut(toolName: String)
     case concurrencyLimitReached(limit: Int)
+    /// 本轮结束了却没产出任何结果或错误（执行流有出口漏发终止事件）。
+    /// 兜底用：宁可报一个「异常结束」，也不能让界面永远停在「进行中」。
+    case runEndedWithoutResult
 
     public var errorDescription: String? {
         switch self {
-        case .maxIterationsReached:
-            return "AIAgent loop exceeded maximum iterations"
+        case .maxIterationsReached(let limit):
+            return "AIAgent loop exceeded maximum(\(limit)) iterations"
         case .toolNotFound(let name):
             return "Tool not found: \(name)"
         case .toolExecutionFailed(let name, let error):
@@ -40,6 +43,8 @@ public enum AIAgentError: Error, LocalizedError, Sendable {
             return "Tool '\(name)' execution timed out"
         case .concurrencyLimitReached(let limit):
             return "已达并行上限(\(limit))，请先暂停其他任务再重试。"
+        case .runEndedWithoutResult:
+            return "本轮异常结束（没有收到模型结果，也没有明确错误），请重试。"
         }
     }
 }

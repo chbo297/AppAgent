@@ -20,9 +20,34 @@ struct AppAgentVoiceInputRenderState {
     /// 识别文本：语音识别管理器实时返回的文本内容。
     var transcriptText = ""
 
+    /// 实时音量（0…1）：录音态波形据此起伏，反映声音大小随时间变化。
+    var audioLevel: Double = 0
+
     var showsTranscriptCursor: Bool {
         !transcriptText.isEmpty
     }
+}
+
+/// 语音输入时序参数：松手后继续采集的尾音时长、等待最终识别结果的上限。
+struct AppAgentVoiceInputTimings {
+    /// 松手后继续采集尾音的时长（send / edit 才等；cancel 不等）。
+    var trailingCapture: TimeInterval
+
+    /// 停止喂音频后，等识别器吐出最终结果的上限；到点用当前最好文本收尾。
+    var finalizationTimeout: TimeInterval
+
+    /// 预热后既没正式开始也没取消的看门狗时限：到点自动放弃预热，避免麦克风长挂。
+    var prewarmWatchdog: TimeInterval
+
+    /// 最终文本写进气泡后、关闭面板前的停留时长：至少覆盖一帧/一次 runloop，
+    /// 保证用户能看到识别出来的那句话，而不是一闪而过。
+    var finalTextRenderHold: TimeInterval = 0.02
+
+    /// 生产默认：松手后多录 0.3s 尾音，再等最终结果最多 1.2s（最坏 1.5s 关面板）；预热看门狗 1.5s。
+    static let standard = AppAgentVoiceInputTimings(trailingCapture: 0.3, finalizationTimeout: 1.2, prewarmWatchdog: 1.5)
+
+    /// 仅「等最终结果、不延长尾音」——用于只验证「不丢」的场景与单测。
+    static let phase1 = AppAgentVoiceInputTimings(trailingCapture: 0, finalizationTimeout: 1.2, prewarmWatchdog: 1.5)
 }
 
 /// 语音输入触觉反馈的抽象：协调器只表达“何时震动”，不关心震动如何实现。
@@ -54,13 +79,10 @@ protocol AppAgentVoiceInputCoordinatorDelegate: AnyObject {
     /// 渲染状态变化：宿主应把 renderState 同步给 overlay。
     func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didUpdate renderState: AppAgentVoiceInputRenderState)
 
-    /// 松手发送（含识别仍在进行中）：宿主应把识别文本回填到输入框。
-    func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didRequestBackfill text: String)
-
     /// 松手编辑：宿主应让 overlay 进入编辑态（面板保持展示）。
     func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didEnterEditModeWith text: String)
 
-    /// 编辑态点击发送：宿主应把文本作为消息发出。
+    /// 松手发送 / 编辑态点击发送：宿主应把文本作为消息发出。
     func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didRequestSend text: String)
 
     /// 本次语音输入结束：宿主应隐藏语音输入面板。
@@ -91,26 +113,83 @@ final class AppAgentVoiceInputCoordinator {
 
     private let recognitionManager: AppAgentVoiceRecognitionProviding
     private let feedback: AppAgentVoiceInputFeedbackProviding
+    private let timings: AppAgentVoiceInputTimings
     private var recognitionTask: Task<Void, Never>?
+
+    /// 预热中：识别已启动但面板未展示、尚未决定是否正式开始。
+    private var isPrewarming = false
+    private var prewarmWatchdogTask: Task<Void, Never>?
+
+    /// 松手后正在等待最终识别结果的收尾动作；nil 表示当前没有在收尾。
+    /// send / edit 松手后进入收尾（等 `.ended` 带最终文本），cancel 不进入。
+    private var finalizeAction: AppAgentVoiceInputReleaseAction?
+
+    /// 「最终文本已上屏、等一帧再关面板」的延时任务。
+    private var finishHoldTask: Task<Void, Never>?
 
     init(
         recognitionManager: AppAgentVoiceRecognitionProviding = AppAgentVoiceRecognitionManager.shared,
-        feedback: AppAgentVoiceInputFeedbackProviding
+        feedback: AppAgentVoiceInputFeedbackProviding,
+        timings: AppAgentVoiceInputTimings = .standard
     ) {
         self.recognitionManager = recognitionManager
         self.feedback = feedback
+        self.timings = timings
     }
 
     deinit {
         recognitionTask?.cancel()
+        prewarmWatchdogTask?.cancel()
+        finishHoldTask?.cancel()
+    }
+
+    // MARK: - 预热（touchDown 抢跑）
+
+    /// touchDown 预热：仅在系统权限已授权且没有其他音频在放时，提前启动识别，
+    /// 面板不展示、不发任何 delegate 事件。正式开始（`begin`）会复用这条已起的识别。
+    func prewarm(source: AppAgentInputBarVoiceInputSource) {
+        guard !isActive, finalizeAction == nil, !isPrewarming else { return }
+        guard recognitionManager.canPrewarmNow else { return }
+        isPrewarming = true
+        startRecognitionIfNeeded()
+        prewarmWatchdogTask?.cancel()
+        let deadline = timings.prewarmWatchdog
+        prewarmWatchdogTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, deadline) * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.isPrewarming else { return }
+            self.abortPrewarm()
+        }
+    }
+
+    /// 取消预热：短按等未转成正式语音输入时调用；停识别、丢弃预热文本，不发任何 delegate 事件。
+    func abortPrewarm() {
+        guard isPrewarming else { return }
+        isPrewarming = false
+        prewarmWatchdogTask?.cancel()
+        prewarmWatchdogTask = nil
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        recognitionManager.requestStopRecording(reason: .cancelled)
     }
 
     // MARK: - 手势输入
 
-    /// 手势开始：建立本次语音输入状态、启动识别，并请求宿主展示面板。
+    /// 手势开始：建立本次语音输入状态、启动识别（复用预热），并请求宿主展示面板。
     func begin(source: AppAgentInputBarVoiceInputSource, location: CGPoint) {
-        renderState = AppAgentVoiceInputRenderState(fingerLocation: location)
-        startRecognition()
+        prewarmWatchdogTask?.cancel()
+        prewarmWatchdogTask = nil
+        isPrewarming = false
+        // 上一次「等一帧再关面板」还没落地就又开始了新手势：直接作废，别让它把新面板关掉。
+        finishHoldTask?.cancel()
+        finishHoldTask = nil
+        var state = AppAgentVoiceInputRenderState(fingerLocation: location)
+        // 预热已让识别提前就绪时，那条 `.recording` 事件在预热期已被丢弃；展示面板时直接读当前录音状态，
+        // 初始态就置为「录音中」，避免面板卡在 loading 转圈。
+        if recognitionManager.isRecording {
+            state.recognitionState = .recording
+        }
+        renderState = state
+        startRecognitionIfNeeded()
         delegate?.voiceInput(self, didBeginAt: location)
         render()
         feedback.impact(reason: beginHapticReason(for: source))
@@ -120,12 +199,13 @@ final class AppAgentVoiceInputCoordinator {
 
     /// 手势移动：按当前位置重新判定“此刻抬起会执行什么行为”。
     func move(to location: CGPoint) {
+        guard finalizeAction == nil else { return }
         refreshReleaseAction(location: location)
     }
 
     /// 手势抬起：用最终位置刷新行为后，按 send/cancel/edit 收尾。
     func end(at location: CGPoint) {
-        guard isActive else { return }
+        guard isActive, finalizeAction == nil else { return }
         refreshReleaseAction(location: location)
 
         switch renderState?.releaseAction ?? .cancel {
@@ -138,7 +218,7 @@ final class AppAgentVoiceInputCoordinator {
         }
     }
 
-    /// 系统取消/手势失败：刷新位置保持 UI 一致后统一按取消收尾。
+    /// 系统取消/手势失败：刷新位置保持 UI 一致后统一按取消收尾（取消不等尾音）。
     func systemCancel(at location: CGPoint) {
         guard isActive else { return }
         refreshReleaseAction(location: location)
@@ -170,8 +250,9 @@ final class AppAgentVoiceInputCoordinator {
 
     // MARK: - 识别事件
 
-    private func startRecognition() {
-        recognitionTask?.cancel()
+    private func startRecognitionIfNeeded() {
+        // 幂等：预热已起的识别，正式开始时直接复用，不重启（重启会丢掉预热已识别的音频）。
+        guard recognitionTask == nil else { return }
         let events = recognitionManager.startRecording()
         recognitionTask = Task { @MainActor [weak self] in
             for await event in events {
@@ -182,6 +263,16 @@ final class AppAgentVoiceInputCoordinator {
 
     /// 识别事件只影响 loading/recording 展示与文本，不能覆盖手指当前选择的 send/cancel/edit。
     private func handleRecognitionEvent(_ event: AppAgentVoiceRecognitionEvent) {
+        // 预热期：面板未展示，只维持识别；意外结束就清预热态，不触碰面板。
+        if isPrewarming {
+            if case .ended = event {
+                isPrewarming = false
+                prewarmWatchdogTask?.cancel()
+                prewarmWatchdogTask = nil
+                recognitionTask = nil
+            }
+            return
+        }
         switch event {
         case .loading:
             guard var state = renderState else { return }
@@ -192,10 +283,17 @@ final class AppAgentVoiceInputCoordinator {
             guard var state = renderState else { return }
             state.recognitionState = .recording
             state.transcriptText = context.combinedText
+            state.audioLevel = context.audioLevel
             renderState = state
             render()
-        case .ended:
+        case .ended(let context):
             recognitionTask = nil
+            // 松手发送 / 编辑正在等最终结果：用识别器给出的最终文本收尾，保证不丢。
+            if let action = finalizeAction {
+                finalizeAction = nil
+                completeFinalize(action: action, finalText: context.finalText)
+                return
+            }
             // 手势仍进行中时识别意外结束（权限拒绝/中断等），按结束收尾；
             // 已交接给编辑态（renderState == nil）时不再干预面板。
             guard isActive else { return }
@@ -209,31 +307,88 @@ final class AppAgentVoiceInputCoordinator {
 
     // MARK: - 收尾
 
+    /// 松手落在发送区：不立即停止，先请求优雅收尾（继续采集尾音 + 等最终结果），
+    /// 待识别器给出最终文本后再隐藏面板并发送（在 `.ended` → `completeFinalize` 里）。
     private func finishSend() {
-        let transcript = renderState?.transcriptText ?? ""
         feedback.impact(reason: "stop-send")
-        stopRecognition(reason: .userStopped)
-        finish()
-        delegate?.voiceInput(self, didRequestBackfill: transcript)
+        beginFinalize(action: .send)
     }
 
     private func finishCancel() {
         feedback.impact(reason: "stop-cancel")
+        finalizeAction = nil
         stopRecognition(reason: .cancelled)
         finish()
     }
 
+    /// 松手落在编辑区：同样等最终结果，拿到最终文本后再进编辑态（面板保留）。
     private func finishEdit() {
-        let transcript = renderState?.transcriptText ?? ""
         feedback.impact(reason: "stop-edit")
-        stopRecognition(reason: .userStopped)
-        // 手势语音阶段结束；renderState 置空后识别 ended 事件不会再触发 didFinish，
-        // 编辑态由 overlay 驱动、经 editCancel/editSend 收尾。
-        renderState = nil
-        delegate?.voiceInput(self, didEnterEditModeWith: transcript)
+        beginFinalize(action: .edit)
+    }
+
+    /// 进入收尾：面板切到 loading（保持展示，冻结当前松手动作），请求识别器优雅收尾；
+    /// 真正的发送/编辑在 `.ended` 到达后执行。
+    private func beginFinalize(action: AppAgentVoiceInputReleaseAction) {
+        finalizeAction = action
+        if var state = renderState {
+            state.recognitionState = .finalizing
+            renderState = state
+            render()
+        }
+        recognitionManager.requestFinishRecording(
+            trailingCapture: timings.trailingCapture,
+            finalizationTimeout: timings.finalizationTimeout
+        )
+    }
+
+    /// 收尾完成：识别器已给出最终文本，按当初松手的动作发送或进编辑态。
+    private func completeFinalize(action: AppAgentVoiceInputReleaseAction, finalText: String) {
+        switch action {
+        case .send:
+            // 顺序刻意如此：先把最终文本刷到气泡上（让用户看到识别结果），同时把消息交给 agent，
+            // 面板留到最终文本真正渲染出来之后再关——直接 finish() 会让最终结果一闪而过甚至完全看不到。
+            presentFinalTranscript(finalText)
+            let trimmed = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                delegate?.voiceInput(self, didRequestSend: trimmed)
+            }
+            finishAfterFinalTranscriptRendered()
+        case .edit:
+            // 手势语音阶段结束；renderState 置空后识别 ended 事件不会再触发 didFinish，
+            // 编辑态由 overlay 驱动、经 editCancel/editSend 收尾。
+            renderState = nil
+            delegate?.voiceInput(self, didEnterEditModeWith: finalText)
+        case .cancel:
+            // 不会进入收尾，保底按结束处理。
+            finish()
+        }
+    }
+
+    /// 把最终文本写进气泡并渲染：收尾波浪停下，气泡只剩识别出来的那句话。
+    private func presentFinalTranscript(_ text: String) {
+        guard var state = renderState else { return }
+        state.recognitionState = .none
+        state.transcriptText = text
+        state.audioLevel = 0
+        renderState = state
+        render()
+    }
+
+    /// 等最终文本至少渲染一帧/一次 runloop 之后再关闭面板。
+    private func finishAfterFinalTranscriptRendered() {
+        let hold = max(0, timings.finalTextRenderHold)
+        finishHoldTask?.cancel()
+        finishHoldTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.finish()
+        }
     }
 
     private func finish() {
+        finishHoldTask?.cancel()
+        finishHoldTask = nil
         renderState = nil
         delegate?.voiceInputDidFinish(self)
     }

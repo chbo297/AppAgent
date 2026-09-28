@@ -7,6 +7,7 @@
 //
 
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 
 public final class AppAgentRegionDebugViewController: UIViewController {
@@ -20,6 +21,8 @@ public final class AppAgentRegionDebugViewController: UIViewController {
     /// 折叠态按钮中心；nil 表示还没定位过，首次布局时落到右上角。
     private var collapsedCenter: CGPoint?
 
+    var isRefreshing: Bool { displayLink != nil }
+
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
@@ -32,7 +35,11 @@ public final class AppAgentRegionDebugViewController: UIViewController {
             outlines[region] = outline
         }
 
-        panel.onExpansionChange = { [weak self] _ in self?.view.setNeedsLayout() }
+        panel.onExpansionChange = { [weak self] _ in
+            self?.view.setNeedsLayout()
+            self?.syncDisplayLink()
+            self?.refreshOutlines()
+        }
         panel.onRegionVisibilityChange = { [weak self] region, isOn in
             self?.outlines[region]?.isHidden = !isOn
             self?.syncDisplayLink()
@@ -42,6 +49,15 @@ public final class AppAgentRegionDebugViewController: UIViewController {
             guard let self else { return }
             self.collapsedCenter = self.clampedCenter(center, size: AppAgentRegionDebugPanelView.collapsedSize)
             self.view.setNeedsLayout()
+        }
+        panel.onFailureDemo = { [weak self] in
+            guard let self, let target = self.target,
+                  target.presentedViewController == nil else { return }
+            self.panel.setExpanded(false)
+            let demo = AppAgentFailureDemoViewController()
+            let navigation = UINavigationController(rootViewController: demo)
+            navigation.modalPresentationStyle = .fullScreen
+            target.present(navigation, animated: true)
         }
         view.addSubview(panel)
     }
@@ -55,6 +71,12 @@ public final class AppAgentRegionDebugViewController: UIViewController {
     public override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         stopDisplayLink()
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        syncDisplayLink()
+        refreshOutlines()
     }
 
     // MARK: - Panel layout
@@ -96,13 +118,14 @@ public final class AppAgentRegionDebugViewController: UIViewController {
 
     // MARK: - Region outlines
 
-    /// 是否有任何一个区域正在显示；没有就不用每帧跑。
+    /// 是否有任何一个区域正在显示；调试面板折叠后仍需刷新这些边框。
     private var hasVisibleRegion: Bool {
         AppAgentInteractionRegion.allCases.contains { panel.isOn($0) }
     }
 
     private func syncDisplayLink() {
-        hasVisibleRegion ? startDisplayLink() : stopDisplayLink()
+        // 展开时即使所有区域开关都关闭，高度读数也必须实时刷新。
+        (panel.isExpanded || hasVisibleRegion) ? startDisplayLink() : stopDisplayLink()
     }
 
     private func startDisplayLink() {
@@ -122,6 +145,7 @@ public final class AppAgentRegionDebugViewController: UIViewController {
     }
 
     func refreshOutlines() {
+        panel.updateDisplayHeight(target?.chatPanelCoordinator.dragScrollView.displayHeight)
         for region in AppAgentInteractionRegion.allCases {
             guard let outline = outlines[region] else { continue }
             guard panel.isOn(region), let rect = rect(for: region) else {
@@ -129,7 +153,8 @@ public final class AppAgentRegionDebugViewController: UIViewController {
                 continue
             }
             outline.isHidden = false
-            outline.frame = rect
+            // 这里由 CADisplayLink 每帧驱动，绝大多数帧几何没变，写之前先判等。
+            outline.bo_setFrame(rect)
             view.bringSubviewToFront(outline)
         }
         view.bringSubviewToFront(panel)

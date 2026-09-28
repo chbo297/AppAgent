@@ -24,7 +24,10 @@ extension AppAgentViewController {
             self?.promptRenameSession(item)
         }
         sessionSidebarView.onDeleteItem = { [weak self] item in
-            self?.promptDeleteSession(item)
+            self?.promptArchiveSession(item)
+        }
+        sessionSidebarView.sessionListView.onTrashTapped = { [weak self] in
+            self?.presentSessionTrash()
         }
         sessionSidebarView.onSettingsTapped = { [weak self] in
             self?.presentSettings()
@@ -37,10 +40,11 @@ extension AppAgentViewController {
     }
 
     /// 打开 AppAgent 层级内的设置面板（用 overlay 窗口最上层 VC 呈现）。
-    /// 保存后应用新配置，并新建一个会话让改动立即生效（会话 provider 创建后不可变）。
+    /// 落地页给两个入口：「模型配置」push 进模型/API 页；「总是显示思考过程」开关就地生效。
+    /// 模型配置保存后应用新配置，并新建一个会话让改动立即生效（会话 provider 创建后不可变）。
     private func presentSettings() {
-        let settingsVC = AppAgentSettingsViewController()
-        settingsVC.onSave = { [weak self] settings in
+        let menuVC = AppAgentSettingsMenuViewController()
+        menuVC.onModelSettingsSaved = { [weak self] settings in
             guard let self, let agent = self.agent else { return }
             Task { @MainActor in
                 await agent.applyEndpointSettings(settings)
@@ -48,7 +52,11 @@ extension AppAgentViewController {
                 self.switchSession(to: session.id)
             }
         }
-        let nav = UINavigationController(rootViewController: settingsVC)
+        menuVC.onAlwaysShowThinkingChanged = { [weak self] _ in
+            // 设置改变后按「重新浏览」语义重建当前会话列表，让成功轮的过程入口显隐立即生效。
+            self?.reloadFromSession(reason: .browsing)
+        }
+        let nav = UINavigationController(rootViewController: menuVC)
         nav.modalPresentationStyle = .formSheet
 
         hideSessionSidebar(animated: false)
@@ -92,43 +100,6 @@ extension AppAgentViewController {
         var presenter: UIViewController = self
         while let presented = presenter.presentedViewController { presenter = presented }
         presenter.present(alert, animated: true)
-    }
-
-    /// 弹出删除确认；确认后删除会话并存盘。若删的是当前会话，则切到最近的其它会话，
-    /// 没有其它会话时新建一个空会话，避免出现无当前会话的空态。
-    private func promptDeleteSession(_ item: AppAgentSessionSidebarItem) {
-        guard let sessionID = item.sessionID,
-              agent?.session(id: sessionID) != nil else { return }
-        let alert = UIAlertController(
-            title: "删除会话",
-            message: "确定删除「\(item.title)」？该操作不可撤销。",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "删除", style: .destructive) { [weak self] _ in
-            guard let self else { return }
-            self.performDeleteSession(sessionID)
-        })
-        var presenter: UIViewController = self
-        while let presented = presenter.presentedViewController { presenter = presented }
-        presenter.present(alert, animated: true)
-    }
-
-    private func performDeleteSession(_ sessionID: String) {
-        guard let agent else { return }
-        let deletingCurrent = (sessionID == currentSessionId)
-        Task { @MainActor in
-            try? await agent.deleteSession(sessionID)
-            if deletingCurrent {
-                if let next = agent.allSessions.first {
-                    self.switchSession(to: next.id)
-                } else {
-                    let fresh = await agent.createSession(title: "对话")
-                    self.switchSession(to: fresh.id)
-                }
-            }
-            self.reloadSessionSidebarItems()
-        }
     }
 
     /// 左侧导航按钮的统一入口；重复点击时从当前动画状态反向播放。

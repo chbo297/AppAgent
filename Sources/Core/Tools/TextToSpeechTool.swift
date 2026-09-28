@@ -75,7 +75,7 @@ public struct TextToSpeechTool: ToolProtocol {
 
 #if canImport(AVFoundation)
 /// Delegate that signals completion when speech finishes or is cancelled.
-private final class SpeechCompletionDelegate: NSObject, AVSpeechSynthesizerDelegate {
+private final class SpeechCompletionDelegate: NSObject, AVSpeechSynthesizerDelegate, AppAgentRuntimeOwned {
     var continuation: CheckedContinuation<Void, Never>?
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,

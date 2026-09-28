@@ -14,12 +14,15 @@ import Foundation
 public struct AppSandboxFileTool: ToolProtocol {
     public let name = "app_sandbox_file"
     public let description = """
-        Browse and edit files anywhere in the host app's sandbox — its whole home \
-        directory, so Library, Caches and tmp as well as Documents. All paths are \
-        relative to the sandbox root; absolute paths and '..' escapes are rejected. \
+        Browse and edit scoped files in the host app's sandbox, including Library, \
+        Caches, tmp and Documents. Default scope 'host' excludes SDK internals; \
+        'appagent' selects SDK storage only, and 'all' selects both. Non-host scopes \
+        require explicit inspection approval. Shared preferences files require 'all'; \
+        prefer app_user_defaults for scoped key access. All paths are sandbox-relative; \
+        absolute paths, parent traversal and symlink escapes are rejected. \
+        Shared ancestor directories are navigation-only, never write/delete targets. \
         For ordinary working files prefer file_read / file_write / file_search, which are \
-        scoped to Documents; reach for this one when you need the app's own storage \
-        (preferences plists, databases, caches). Choose an 'op':
+        confined to a configured workspace (default: Documents/AppAgent/files). Choose an 'op':
         - 'list': list entries under 'path' (default root). Marks directories.
         - 'read': read the UTF-8 contents of the file at 'path'.
         - 'write': write 'content' to 'path' (creates intermediate dirs).
@@ -30,7 +33,8 @@ public struct AppSandboxFileTool: ToolProtocol {
             "op": .string(description: "Operation.", enumValues: ["list", "read", "write", "delete"]),
             "_why": .string(description: "One sentence on why this is needed. Shown to the user when they are asked to approve; supply it for 'delete'."),
             "path": .string(description: "Sandbox-relative path. Empty/omitted means the sandbox root (list only)."),
-            "content": .string(description: "File contents to write for 'write'.")
+            "content": .string(description: "File contents to write for 'write'."),
+            "scope": HostInspectionScope.parameter
         ],
         required: ["op"]
     )
@@ -57,13 +61,34 @@ public struct AppSandboxFileTool: ToolProtocol {
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
         let op = arguments["op"]?.stringValue ?? ""
         let rawPath = arguments["path"]?.stringValue ?? ""
-
-        let target: URL
+        let context: HostInspectionContext
         do {
-            target = try resolve(rawPath)
-        } catch let err as ResolveError {
-            return .error(err.message)
+            context = try await HostInspectionAccess.context(
+                arguments: arguments, session: session, tool: name,
+                isMutation: op == "write" || op == "delete"
+            )
+        } catch {
+            return .error(error.localizedDescription)
         }
+        guard let operation = HostStoragePolicy.Operation(rawValue: op) else {
+            return .error("Unknown op: '\(op)'. Use 'list', 'read', 'write', or 'delete'.")
+        }
+        let resolver = SandboxPathResolver(sandboxRoot: root)
+        guard let paths = resolver.paths(for: rawPath) else {
+            return .error("Invalid path: use a sandbox-relative path without traversal or symlink escapes.")
+        }
+        // Build the protected-alias snapshot once, AFTER authorization, and reuse
+        // it for the target and every list entry. Never rescan per child.
+        let policy = HostStoragePolicy(root: root)
+        try Task.checkCancellation()
+        if let denial = policy.denial(
+            logical: paths.logical, resolved: paths.resolved, scope: context.scope, operation: operation
+        ) {
+            return .error(denial)
+        }
+        let target = paths.resolved
+        // Report the requested logical name, never a canonical alias to filtered storage.
+        let displayPath = resolver.relativePath(of: paths.logical) ?? ""
 
         let fm = FileManager.default
         switch op {
@@ -77,24 +102,28 @@ public struct AppSandboxFileTool: ToolProtocol {
             }
             let entries = (try? fm.contentsOfDirectory(
                 at: target,
-                includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+                includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             )) ?? []
             let items: [JSONValue] = entries
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
-                .map { url in
-                    let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                .compactMap { url in
+                    let logical = paths.logical.appendingPathComponent(url.lastPathComponent)
+                    guard let resolved = resolver.validatedURL(logical),
+                          policy.denial(logical: logical, resolved: resolved,
+                                        scope: context.scope, operation: .list) == nil else { return nil }
+                    let values = try? resolved.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
                     let dir = values?.isDirectory ?? false
                     var entry: [String: JSONValue] = [
                         "name": .string(url.lastPathComponent),
-                        "path": .string(relative(of: url)),
+                        "path": .string(resolver.relativePath(of: logical) ?? ""),
                         "is_dir": .bool(dir)
                     ]
                     if !dir, let size = values?.fileSize { entry["size"] = .number(Double(size)) }
                     return .object(entry)
                 }
             return .json(.object([
-                "path": .string(relative(of: target)),
+                "path": .string(displayPath),
                 "count": .number(Double(items.count)),
                 "entries": .array(items)
             ]))
@@ -111,14 +140,14 @@ public struct AppSandboxFileTool: ToolProtocol {
             }
             guard let text = String(data: data, encoding: .utf8) else {
                 return .json(.object([
-                    "path": .string(relative(of: target)),
+                    "path": .string(displayPath),
                     "size": .number(Double(data.count)),
                     "binary": .bool(true),
                     "note": .string("File is not valid UTF-8; \(data.count) bytes.")
                 ]))
             }
             return .json(.object([
-                "path": .string(relative(of: target)),
+                "path": .string(displayPath),
                 "size": .number(Double(data.count)),
                 "content": .string(text)
             ]))
@@ -136,7 +165,7 @@ public struct AppSandboxFileTool: ToolProtocol {
             }
             return .json(.object([
                 "success": .bool(true),
-                "path": .string(relative(of: target)),
+                "path": .string(displayPath),
                 "size": .number(Double(content.utf8.count))
             ]))
         case "delete":
@@ -145,41 +174,16 @@ public struct AppSandboxFileTool: ToolProtocol {
                 return .error("Path does not exist: '\(rawPath)'.")
             }
             do {
-                try fm.removeItem(at: target)
+                // Validate the referent as well, but delete the requested entry:
+                // removing an allowed symlink must not recursively delete its target.
+                try fm.removeItem(at: paths.logical)
             } catch {
                 return .error("Failed to delete '\(rawPath)': \(error.localizedDescription)")
             }
-            return .json(.object(["success": .bool(true), "path": .string(relative(of: target))]))
+            return .json(.object(["success": .bool(true), "path": .string(displayPath)]))
         default:
             return .error("Unknown op: '\(op)'. Use 'list', 'read', 'write', or 'delete'.")
         }
     }
 
-    // MARK: - Path safety
-
-    private struct ResolveError: Error { let message: String }
-
-    /// Resolve a sandbox-relative path, rejecting absolute paths and any '..'
-    /// escape that would leave the sandbox root.
-    private func resolve(_ rawPath: String) throws -> URL {
-        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("/") {
-            throw ResolveError(message: "Absolute paths are not allowed; use a sandbox-relative path.")
-        }
-        let resolved = root.appendingPathComponent(trimmed).standardizedFileURL
-        let rootPath = root.path
-        guard resolved.path == rootPath || resolved.path.hasPrefix(rootPath + "/") else {
-            throw ResolveError(message: "Path escapes the sandbox root: '\(rawPath)'.")
-        }
-        return resolved
-    }
-
-    /// Sandbox-relative representation of a URL, for reporting back to the caller.
-    private func relative(of url: URL) -> String {
-        let full = url.standardizedFileURL.path
-        let rootPath = root.path
-        if full == rootPath { return "" }
-        if full.hasPrefix(rootPath + "/") { return String(full.dropFirst(rootPath.count + 1)) }
-        return full
-    }
 }

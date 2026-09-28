@@ -11,7 +11,6 @@ import Foundation
 public struct SessionSearchTool: ToolProtocol {
     public let name = "session_search"
 
-    private static let isoFormatter = ISO8601DateFormatter()
     public let description = """
         Search past conversation sessions or browse recent sessions. \
         With no query: returns recent sessions with titles and timestamps. \
@@ -41,13 +40,16 @@ public struct SessionSearchTool: ToolProtocol {
             return .error("No agent available for session search.")
         }
 
-        let limit = Int(arguments["limit"]?.numberValue ?? 5)
+        let limit: Int
+        do { limit = try SessionToolAccess.integer(arguments, "limit", default: 5, clamp: 1...10) }
+        catch { return .error(error.localizedDescription) }
+        let isoFormatter = ISO8601DateFormatter()
         let query = arguments["query"]?.stringValue
 
         let allSessions = agent.allSessions
 
         if let query, !query.isEmpty {
-            // Search mode: find sessions containing the query in message text
+            // Search mode: include tool arguments/results, not just visible prose.
             let lowered = query.lowercased()
             var matches: [JSONValue] = []
 
@@ -56,17 +58,19 @@ public struct SessionSearchTool: ToolProtocol {
                 // Skip the current session
                 if s.id == session.id { continue }
 
-                let matchingMessages = s.messages.filter { msg in
-                    msg.text.lowercased().contains(lowered)
+                let matchingText = s.messages.compactMap { message in
+                    searchableBlocks(message).first { block in
+                        block.lowercased().contains(lowered)
+                    }
                 }
 
-                if !matchingMessages.isEmpty {
-                    let preview = matchingMessages.first?.text.prefix(200) ?? ""
+                if !matchingText.isEmpty {
+                    let preview = matchingText.first?.prefix(200) ?? ""
                     matches.append(.object([
                         "session_id": .string(s.id),
                         "title": .string(s.title),
-                        "updated_at": .string(Self.isoFormatter.string(from: s.updatedAt)),
-                        "match_count": .number(Double(matchingMessages.count)),
+                        "updated_at": .string(isoFormatter.string(from: s.updatedAt)),
+                        "match_count": .number(Double(matchingText.count)),
                         "preview": .string(String(preview))
                     ]))
                 }
@@ -84,11 +88,11 @@ public struct SessionSearchTool: ToolProtocol {
                 .prefix(limit)
 
             let items: [JSONValue] = recent.map { s in
-                let lastMessage = s.messages.last?.text.prefix(200) ?? ""
+                let lastMessage = s.messages.last.flatMap { searchableBlocks($0).first }?.prefix(200) ?? ""
                 return .object([
                     "session_id": .string(s.id),
                     "title": .string(s.title),
-                    "updated_at": .string(ISO8601DateFormatter().string(from: s.updatedAt)),
+                    "updated_at": .string(isoFormatter.string(from: s.updatedAt)),
                     "message_count": .number(Double(s.messages.count)),
                     "preview": .string(String(lastMessage))
                 ])
@@ -98,6 +102,21 @@ public struct SessionSearchTool: ToolProtocol {
                 "sessions": .array(items),
                 "count": .number(Double(items.count))
             ]))
+        }
+    }
+
+    private func searchableBlocks(_ message: AIAgentMessage) -> [String] {
+        message.content.compactMap {
+            switch $0 {
+            case .text(let text):
+                return text
+            case .toolUse(let call):
+                return call.name + " " + Tool.Output.json(.object(call.arguments)).stringValue
+            case .toolResult(let result):
+                return result.content
+            case .hostContext:
+                return nil
+            }
         }
     }
 }

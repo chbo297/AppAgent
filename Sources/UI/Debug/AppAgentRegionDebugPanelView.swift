@@ -14,8 +14,8 @@ import UIKit
 final class AppAgentRegionDebugPanelView: UIView {
 
     static let collapsedSize = CGSize(width: 40, height: 40)
-    /// 高度按开关行数算：每行 31pt + 8pt 间距，加上 header 与内边距。
-    static let expandedSize = CGSize(width: 272, height: 271)
+    /// 高度按开关行数算：每行 31pt + 8pt 间距，加上 header、高度读数、测试按钮区与内边距。
+    static let expandedSize = CGSize(width: 272, height: 355)
 
     /// 折叠 / 展开切换。
     var onExpansionChange: ((Bool) -> Void)?
@@ -23,12 +23,15 @@ final class AppAgentRegionDebugPanelView: UIView {
     var onRegionVisibilityChange: ((AppAgentInteractionRegion, Bool) -> Void)?
     /// 折叠态被拖动到新的中心点（父视图坐标系）。
     var onDragToCenter: ((CGPoint) -> Void)?
+    /// 打开独立的本地报错演示。
+    var onFailureDemo: (() -> Void)?
 
     private(set) var isExpanded = false
 
     private let collapsedButton = UIButton(type: .custom)
     private let expandedEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
     private let collapseButton = UIButton(type: .system)
+    private let displayHeightLabel = UILabel()
     private let rowsStack = UIStackView()
     private var switches: [AppAgentInteractionRegion: UISwitch] = [:]
 
@@ -47,6 +50,16 @@ final class AppAgentRegionDebugPanelView: UIView {
 
     func isOn(_ region: AppAgentInteractionRegion) -> Bool {
         switches[region]?.isOn ?? false
+    }
+
+    /// 直接显示 DragScroll 的实际展示高度；无观测目标时不保留旧读数。
+    func updateDisplayHeight(_ height: CGFloat?) {
+        let value = height.map { String(format: "%.1f pt", Double($0)) } ?? "—"
+        let text = "displayHeight: \(value)"
+        // 按帧采样，但相同文案不重复触发 UILabel 布局。
+        guard displayHeightLabel.text != text else { return }
+        displayHeightLabel.text = text
+        displayHeightLabel.accessibilityValue = value
     }
 
     func setExpanded(_ expanded: Bool, notify: Bool = true) {
@@ -102,13 +115,19 @@ final class AppAgentRegionDebugPanelView: UIView {
         let header = UIStackView(arrangedSubviews: [title, UIView(), collapseButton])
         header.alignment = .center
 
+        displayHeightLabel.font = .monospacedSystemFont(ofSize: 12.5, weight: .medium)
+        displayHeightLabel.textColor = AppAgentAppearance.primaryText
+        displayHeightLabel.accessibilityIdentifier = "appagent.regionDebug.displayHeight"
+        displayHeightLabel.accessibilityLabel = "对话面板 displayHeight"
+        updateDisplayHeight(nil)
+
         rowsStack.axis = .vertical
         rowsStack.spacing = 8
         for region in AppAgentInteractionRegion.allCases {
             rowsStack.addArrangedSubview(makeRow(for: region))
         }
 
-        let root = UIStackView(arrangedSubviews: [header, rowsStack])
+        let root = UIStackView(arrangedSubviews: [header, displayHeightLabel, rowsStack, makeFailureDemoRow()])
         root.axis = .vertical
         root.spacing = 10
         root.translatesAutoresizingMaskIntoConstraints = false
@@ -155,11 +174,42 @@ final class AppAgentRegionDebugPanelView: UIView {
         return row
     }
 
+    private func makeFailureDemoRow() -> UIView {
+        let title = UILabel()
+        title.text = "本地模拟 · 不调用真实模型"
+        title.font = .systemFont(ofSize: 12.5)
+        title.textColor = AppAgentAppearance.primaryText
+
+        let button = makeTestButton(
+            title: "报错演示",
+            identifier: "appagent.regionDebug.failureDemo",
+            action: #selector(failureDemoTapped)
+        )
+        let column = UIStackView(arrangedSubviews: [title, button])
+        column.axis = .vertical
+        column.spacing = 6
+        return column
+    }
+
+    private func makeTestButton(title: String, identifier: String, action: Selector) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 12.5)
+        button.accessibilityIdentifier = identifier
+        button.backgroundColor = UIColor.systemGray5
+        button.layer.cornerRadius = 6
+        button.addTarget(self, action: action, for: .touchUpInside)
+        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        return button
+    }
+
     // MARK: - Actions
 
     @objc private func expandTapped() { setExpanded(true) }
 
     @objc private func collapseTapped() { setExpanded(false) }
+
+    @objc private func failureDemoTapped() { onFailureDemo?() }
 
     @objc private func switchChanged(_ sender: UISwitch) {
         guard let region = switches.first(where: { $0.value === sender })?.key else { return }

@@ -15,6 +15,8 @@ public final class AppAgentDebugViewController: UIViewController {
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let statusLabel = UILabel()
     private let filterControl = UISegmentedControl(items: ["全部", "仅异常"])
+    /// 一键导出诊断包（日志 + 模型调用记录 + 会话快照 + 记忆）。
+    private let exportAllButton = UIButton(type: .system)
 
     /// 当前展示的记录（倒序：最新在最上）。
     private var rows: [AppAgentDebugEvent] = []
@@ -55,6 +57,15 @@ public final class AppAgentDebugViewController: UIViewController {
         statusLabel.textColor = AppAgentAppearance.secondaryText
         statusLabel.textAlignment = .center
 
+        exportAllButton.setTitle("导出全部数据", for: .normal)
+        exportAllButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        exportAllButton.backgroundColor = .systemBlue
+        exportAllButton.setTitleColor(.white, for: .normal)
+        exportAllButton.layer.cornerRadius = 8
+        exportAllButton.addTarget(
+            self, action: #selector(didTapExportAll), for: .touchUpInside
+        )
+
         tableView.dataSource = self
         tableView.delegate = self
         tableView.backgroundColor = .clear
@@ -63,6 +74,7 @@ public final class AppAgentDebugViewController: UIViewController {
         tableView.estimatedRowHeight = 56
         view.addSubview(filterControl)
         view.addSubview(statusLabel)
+        view.addSubview(exportAllButton)
         view.addSubview(tableView)
 
         reload()
@@ -79,7 +91,10 @@ public final class AppAgentDebugViewController: UIViewController {
         let top = view.safeAreaInsets.top
         filterControl.frame = CGRect(x: 16, y: top + 8, width: view.bounds.width - 32, height: 30)
         statusLabel.frame = CGRect(x: 16, y: filterControl.frame.maxY + 6, width: view.bounds.width - 32, height: 16)
-        let listTop = statusLabel.frame.maxY + 6
+        exportAllButton.frame = CGRect(
+            x: 16, y: statusLabel.frame.maxY + 8, width: view.bounds.width - 32, height: 36
+        )
+        let listTop = exportAllButton.frame.maxY + 6
         tableView.frame = CGRect(
             x: 0, y: listTop, width: view.bounds.width, height: max(0, view.bounds.height - listTop)
         )
@@ -116,9 +131,16 @@ public final class AppAgentDebugViewController: UIViewController {
         reload()
     }
 
+    @objc private func didTapExportAll() {
+        exportDiagnosticsBundle()
+    }
+
     /// 导出：文本或 JSON，分享面板 + 复制到剪贴板兜底。
     @objc private func didTapExport() {
         let sheet = UIAlertController(title: "导出调试信息", message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "导出全部数据（诊断包）", style: .default) { [weak self] _ in
+            self?.exportDiagnosticsBundle()
+        })
         sheet.addAction(UIAlertAction(title: "分享文本", style: .default) { [weak self] _ in
             self?.share(text: self?.log.exportText() ?? "", fileName: "appagent-debug.log")
         })
@@ -137,6 +159,24 @@ public final class AppAgentDebugViewController: UIViewController {
         present(sheet, animated: true)
     }
 
+    /// 打包运行日志 + 模型调用记录 + 会话快照 + 记忆，走系统分享导出。
+    /// 打包要读写文件，在后台队列做，期间显示一个不可关闭的提示。
+    private func exportDiagnosticsBundle() {
+        let progress = UIAlertController(title: nil, message: "正在打包…", preferredStyle: .alert)
+        present(progress, animated: true)
+        AppAgentDiagnostics.export(debugLog: log) { [weak self] result in
+            progress.dismiss(animated: true) {
+                guard let self = self else { return }
+                switch result {
+                case .success(let bundle):
+                    self.shareFile(at: bundle.url)
+                case .failure(let error):
+                    self.toast("导出失败：\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     /// 写入临时文件后走系统分享（可存文件、发消息、拷贝）。
     private func share(text: String, fileName: String) {
         guard !text.isEmpty else { toast("暂无记录"); return }
@@ -148,6 +188,10 @@ public final class AppAgentDebugViewController: UIViewController {
             toast("写文件失败，已复制到剪贴板")
             return
         }
+        shareFile(at: url)
+    }
+
+    private func shareFile(at url: URL) {
         let share = UIActivityViewController(activityItems: [url], applicationActivities: nil)
         if let popover = share.popoverPresentationController {
             popover.sourceView = view

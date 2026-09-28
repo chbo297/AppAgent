@@ -19,57 +19,48 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     // MARK: - UI Hierarchy
 
-    public func uiHierarchy() async -> String {
+    public func uiHierarchy(context: HostInspectionContext) async -> String {
         await MainActor.run {
-            let windows = Self.allWindows()
-            guard !windows.isEmpty else { return "(no windows)" }
-            // 一个 app 常常有多个 window（本 SDK 的对话 UI 就挂在独立 overlay window
-            // 上），只看 keyWindow 会整层漏掉，所以按 windowLevel 全量列出。
-            var out = ""
-            for window in windows {
-                out += "Window: \(type(of: window)) frame=\(window.frame)"
-                out += " level=\(window.windowLevel.rawValue)"
-                out += window.isKeyWindow ? " [key]" : ""
-                out += window.isHidden ? " [hidden]" : ""
-                out += "\n"
-                if let root = window.rootViewController {
-                    out += "RootViewController:\n"
-                    Self.describe(viewController: root, indent: 1, into: &out)
+            do {
+                let windows = try HostInspectionUIKit.sceneWindows(context: context)
+                var out = ""
+                for window in windows {
+                    for root in HostInspectionUIKit.inspectionRoots(in: window, context: context) {
+                        guard let path = Self.addressablePath(of: root, context: context) else { continue }
+                        out += "[\(path)] \(type(of: root)) frame=\(root.frame)\n"
+                        Self.describeAddressable(view: root, path: path, depth: 0, maxDepth: 100,
+                                                 context: context, into: &out)
+                    }
+                    if let controller = window.rootViewController {
+                        Self.describe(viewController: controller, indent: 1, context: context, into: &out)
+                    }
                 }
-                out += "View tree:\n"
-                Self.describe(view: window, indent: 0, into: &out)
-                out += "\n"
+                return out.isEmpty ? "(no windows)" : out
+            } catch {
+                return error.localizedDescription
             }
-            return out
         }
     }
 
     // MARK: - Class list
 
-    public func classList(matching filter: String?) async -> [String] {
-        let count = objc_getClassList(nil, 0)
-        guard count > 0 else { return [] }
-        let classes = UnsafeMutablePointer<AnyClass>.allocate(capacity: Int(count))
-        defer { classes.deallocate() }
-        let autoreleasing = AutoreleasingUnsafeMutablePointer<AnyClass>(classes)
-        let realCount = objc_getClassList(autoreleasing, count)
-        var names: [String] = []
-        names.reserveCapacity(Int(realCount))
-        for i in 0..<Int(realCount) {
-            let name = NSStringFromClass(classes[i])
-            if let filter, !filter.isEmpty {
-                if name.range(of: filter, options: .caseInsensitive) != nil { names.append(name) }
-            } else {
-                names.append(name)
-            }
+    public func classList(matching filter: String?, context: HostInspectionContext) async -> [String] {
+        let names = Self.withRuntimeClasses { classes in
+            Self.scopedClassCandidates(in: classes, matching: { name in
+                guard let filter, !filter.isEmpty else { return true }
+                return name.range(of: filter, options: .caseInsensitive) != nil
+            }, context: context)?.map(\.name).sorted() ?? []
         }
-        return names.sorted()
+        return Task.isCancelled ? [] : names
     }
 
     // MARK: - Methods
 
-    public func methodList(ofClass className: String) async -> [String] {
-        guard let cls = Self.resolveClass(className) else { return ["(class not found: \(className))"] }
+    public func methodList(ofClass className: String, context: HostInspectionContext) async -> [String] {
+        guard let cls = Self.resolveClass(className, context: context),
+              Self.classIncluded(cls, context: context) else {
+            return ["(class not found or outside inspection scope: \(className))"]
+        }
         var result: [String] = []
         result.append(contentsOf: Self.methods(of: cls, isClassMethod: false))
         if let meta: AnyClass = object_getClass(cls) {
@@ -80,8 +71,11 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     // MARK: - Properties / ivars
 
-    public func propertyList(ofClass className: String) async -> [String] {
-        guard let cls = Self.resolveClass(className) else { return ["(class not found: \(className))"] }
+    public func propertyList(ofClass className: String, context: HostInspectionContext) async -> [String] {
+        guard let cls = Self.resolveClass(className, context: context),
+              Self.classIncluded(cls, context: context) else {
+            return ["(class not found or outside inspection scope: \(className))"]
+        }
         var out: [String] = []
         var pCount: UInt32 = 0
         if let props = class_copyPropertyList(cls, &pCount) {
@@ -108,195 +102,363 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     // MARK: - KVC read
 
-    public func propertyValue(keyPath: String, ofClass className: String?) async -> String? {
+    public func propertyValue(keyPath: String, ofClass className: String?, context: HostInspectionContext) async -> String? {
         await MainActor.run {
-            guard let target = Self.kvcTarget(className: className) as? NSObject else {
+            guard let target = Self.kvcTarget(className: className, context: context) as? NSObject else {
                 return "(no target object for KVC; className=\(className ?? "top page"))"
             }
-            do {
-                let value = try ObjCExceptionCatcher.performReturning {
-                    target.value(forKeyPath: keyPath)
-                }
-                guard let value else { return "(nil)" }
-                return "\(value)"
-            } catch {
-                return "Failed to read \(keyPath): \(error.localizedDescription)"
-            }
+            return Self.readProperty(from: target, keyPath: keyPath, context: context)
         }
     }
 
     // MARK: - KVC write
 
-    public func setPropertyValue(keyPath: String, value: String, ofClass className: String?) async -> String {
+    public func setPropertyValue(keyPath: String, value: String, ofClass className: String?, context: HostInspectionContext) async -> String {
         await MainActor.run {
-            guard let target = Self.kvcTarget(className: className) as? NSObject else {
+            guard let target = Self.kvcTarget(className: className, context: context) as? NSObject else {
                 return "(no target object for KVC; className=\(className ?? "top page"))"
             }
-            let boxed = Self.boxedValue(from: value)
-            do {
-                try ObjCExceptionCatcher.perform {
-                    target.setValue(boxed, forKeyPath: keyPath)
-                }
-                let readBack = (try? ObjCExceptionCatcher.performReturning {
-                    target.value(forKeyPath: keyPath)
-                })?.map { "\($0)" } ?? "(nil)"
-                return "OK. \(keyPath) = \(readBack)"
-            } catch {
-                return "Failed to set \(keyPath): \(error.localizedDescription)"
-            }
+            return Self.writeProperty(on: target, keyPath: keyPath, value: value, context: context)
         }
     }
 
     // MARK: - Reflection invoke
 
-    public func invoke(className: String, selector: String, argumentsJSON: String) async -> String {
+    public func invoke(className: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String {
         await MainActor.run {
-            guard let cls = Self.resolveClass(className) else {
+            guard let cls = Self.resolveClass(className, context: context) else {
                 return "(class not found: \(className))"
             }
             let sel = NSSelectorFromString(selector)
             // 优先对栈顶页面（若为该类实例）调用实例方法；否则当作类方法调用。
             let target: NSObject?
-            if let top = Self.kvcTarget(className: className) as? NSObject, top.responds(to: sel) {
+            if let top = Self.kvcTarget(className: className, context: context) as? NSObject, top.responds(to: sel) {
                 target = top
-            } else if let clsObj = cls as AnyObject as? NSObject, clsObj.responds(to: sel) {
+            } else if context.scope == .all, let clsObj = cls as AnyObject as? NSObject, clsObj.responds(to: sel) {
                 target = clsObj
             } else {
                 return "(selector \(selector) not found on \(className) instance/class)"
             }
             guard let obj = target else { return "(no target)" }
             let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [Any] ?? []
-            if let rejection = Self.selectorRejection(sel, on: obj, argCount: args.count) { return rejection }
+            if let rejection = Self.selectorRejection(sel, on: obj, argCount: args.count, context: context) { return rejection }
             do {
                 let result = try ObjCExceptionCatcher.performReturning {
-                    Self.performSelector(sel, on: obj, args: args)
+                    Self.performSelector(sel, on: obj, args: args, context: context)
                 }
-                return result.map { "\($0)" } ?? "(void/nil)"
+                guard let result else { return "(void/nil)" }
+                return try Self.inspectedDescription(of: result, context: context)
+            } catch let error as UIKitInspectionError {
+                return error.localizedDescription
             } catch {
-                return "Invoke failed: \(error.localizedDescription)"
+                // NSException.reason can embed an excluded object's description.
+                return "Invoke failed: Objective-C invocation failed."
             }
         }
     }
 
     // MARK: - 按路径寻址视图
 
-    public func viewTree(maxDepth: Int) async -> String {
+    public func viewTree(maxDepth: Int, context: HostInspectionContext) async -> String {
         await MainActor.run {
-            guard let window = Self.keyWindow() else { return "(no key window)" }
-            var out = "路径 root = keyWindow；子视图路径形如 0/2/1（按 subviews 下标）\n"
-            Self.describeAddressable(view: window, path: "root", depth: 0, maxDepth: maxDepth, into: &out)
+            guard let window = Self.keyWindow(context: context) else { return "(no key window)" }
+            var out = "路径 root = scoped default window；子视图路径保留实际 subviews 下标\n"
+            Self.describeAddressable(view: window, path: "root", depth: 0, maxDepth: maxDepth, context: context, into: &out)
             return out
         }
     }
 
-    public func viewInfo(path: String) async -> String {
+    public func viewInfo(path: String, context: HostInspectionContext) async -> String {
         await MainActor.run {
-            guard let view = Self.view(atPath: path) else { return "(no view at path '\(path)')" }
-            return Self.describeState(of: view, path: path)
+            guard let view = Self.view(atPath: path, context: context) else { return "(no view at path '\(path)')" }
+            return Self.describeState(of: view, path: path, context: context)
         }
     }
 
-    public func setViewValue(path: String, key: String, value: String) async -> String {
+    public func setViewValue(path: String, key: String, value: String, context: HostInspectionContext) async -> String {
         await MainActor.run {
-            guard let view = Self.view(atPath: path) else { return "(no view at path '\(path)')" }
-            return Self.applyValue(to: view, key: key, value: value)
+            guard let view = Self.view(atPath: path, context: context) else { return "(no view at path '\(path)')" }
+            return Self.applyValue(to: view, key: key, value: value, context: context)
         }
     }
 
-    public func invokeOnView(path: String, selector: String, argumentsJSON: String) async -> String {
+    public func invokeOnView(path: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String {
         await MainActor.run {
-            guard let view = Self.view(atPath: path) else { return "(no view at path '\(path)')" }
+            guard let view = Self.view(atPath: path, context: context) else { return "(no view at path '\(path)')" }
             let sel = NSSelectorFromString(selector)
             guard view.responds(to: sel) else {
                 return "(selector \(selector) not found on \(type(of: view)))"
             }
             let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [Any] ?? []
-            if let rejection = Self.selectorRejection(sel, on: view, argCount: args.count) { return rejection }
+            if let rejection = Self.selectorRejection(sel, on: view, argCount: args.count, context: context) { return rejection }
             do {
                 let result = try ObjCExceptionCatcher.performReturning {
-                    Self.performSelector(sel, on: view, args: args)
+                    Self.performSelector(sel, on: view, args: args, context: context)
                 }
-                return result.map { "\($0)" } ?? "(void/nil)"
+                guard let result else { return "(void/nil)" }
+                return try Self.inspectedDescription(of: result, context: context)
+            } catch let error as UIKitInspectionError {
+                return error.localizedDescription
             } catch {
-                return "Invoke failed: \(error.localizedDescription)"
+                // Keep exception details out of the model-visible inspection channel.
+                return "Invoke failed: Objective-C invocation failed."
             }
         }
     }
 
     // MARK: - 分层摘要：先给地图，细节按需二次调用
 
-    public func uiHierarchySummary() async -> String {
-        await MainActor.run { Self.hierarchySummary() }
+    public func uiHierarchySummary(context: HostInspectionContext) async -> String {
+        await MainActor.run { Self.hierarchySummary(context: context) }
     }
 
-    public func viewSubtree(path: String, maxDepth: Int) async -> String {
+    public func viewSubtree(path: String, maxDepth: Int, context: HostInspectionContext) async -> String {
         await MainActor.run {
             let trimmed = path.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed == "root" {
-                guard let window = Self.keyWindow() else { return "(no windows)" }
-                var out = "路径根 = keyWindow；子视图路径形如 0/2/1，跨 window 用 W1:0/2/1\n"
-                Self.describeAddressable(view: window, path: "root", depth: 0, maxDepth: maxDepth, into: &out)
+                guard let window = Self.keyWindow(context: context) else { return "(no windows)" }
+                var out = "路径根 = scoped default window；子视图路径保留实际 subviews 下标\n"
+                Self.describeAddressable(view: window, path: "root", depth: 0, maxDepth: maxDepth, context: context, into: &out)
                 return out
             }
-            guard let view = Self.view(atPath: trimmed) else { return "(no view at path '\(trimmed)')" }
+            guard let view = Self.view(atPath: trimmed, context: context) else { return "(no view at path '\(trimmed)')" }
             var out = "从 [\(trimmed)] 展开，maxDepth=\(maxDepth)\n"
-            Self.describeAddressable(view: view, path: trimmed, depth: 0, maxDepth: maxDepth, into: &out)
+            Self.describeAddressable(view: view, path: trimmed, depth: 0, maxDepth: maxDepth, context: context, into: &out)
             return out
         }
     }
 
     // MARK: - Helpers
 
-    static func keyWindow() -> UIWindow? {
-        let windows = allWindows()
-        return windows.first { $0.isKeyWindow } ?? windows.first
+    @MainActor
+    static func keyWindow(context: HostInspectionContext = .init()) -> UIWindow? {
+        guard let windows = try? HostInspectionUIKit.sceneWindows(context: context) else { return nil }
+        return HostInspectionUIKit.defaultWindow(in: windows, context: context)
     }
 
-    /// Every window across every connected window scene, ordered back-to-front.
-    static func allWindows() -> [UIWindow] {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+    /// Only in-scope windows in the selected scene. Array indices are NOT W<n> handles.
+    @MainActor
+    static func allWindows(context: HostInspectionContext = .init()) -> [UIWindow] {
+        (try? HostInspectionUIKit.sceneWindows(context: context))?
+            .filter { HostInspectionUIKit.includes($0, context: context) } ?? []
+    }
+
+    static func classIncluded(_ cls: AnyClass, context: HostInspectionContext = .init()) -> Bool {
+        // An authorized all-scope query does not need to initialize class metadata for ownership.
+        if context.scope == .all { return true }
+        return context.scope.includes(appAgentOwned: HostInspectionUIKit.isAppAgentClass(cls))
+    }
+
+    /// Keep the ObjC snapshot local; never cache negative lookups or ownership across calls.
+    private static func withRuntimeClasses<Result>(
+        _ body: (UnsafeBufferPointer<AnyClass>) -> Result
+    ) -> Result {
+        guard !Task.isCancelled else { return body(UnsafeBufferPointer(start: nil, count: 0)) }
+        let count = objc_getClassList(nil, 0)
+        guard count > 0, !Task.isCancelled else { return body(UnsafeBufferPointer(start: nil, count: 0)) }
+        let buffer = UnsafeMutablePointer<AnyClass>.allocate(capacity: Int(count))
+        defer { buffer.deallocate() }
+        let realCount = objc_getClassList(AutoreleasingUnsafeMutablePointer<AnyClass>(buffer), count)
+        return body(UnsafeBufferPointer(start: buffer, count: min(Int(realCount), Int(count))))
+    }
+
+    /// Name matching is ONLY a cheap candidate filter, never an ownership decision.
+    /// class_getName reads ObjC metadata without messaging the class. NSStringFromClass and
+    /// Swift protocol casts can initialize unrelated classes (including CoreData internals),
+    /// so ownership/superclass checks must run only after this filter, even for denied results.
+    /// The injected check lets tests count candidates without timing the whole process.
+    /// nil means cancellation: do not return partial lists or resolve a partly scanned short name.
+    static func scopedClassCandidates<Classes: Sequence>(
+        in classes: Classes,
+        matching matchesName: (String) -> Bool,
+        context: HostInspectionContext,
+        scopeCheck: (AnyClass, HostInspectionContext) -> Bool = { classIncluded($0, context: $1) }
+    ) -> [(cls: AnyClass, name: String)]? where Classes.Element == AnyClass {
+        guard !Task.isCancelled else { return nil }
+        var candidates: [(cls: AnyClass, name: String)] = []
+        for cls in classes {
+            guard !Task.isCancelled else { return nil }
+            let name = String(cString: class_getName(cls))
+            guard matchesName(name) else { continue }
+            guard !Task.isCancelled else { return nil }
+            // objc_getClassList writes raw ObjC class pointers into the buffer; it does not
+            // bridge each entry to Swift's canonical metatype (ObjC-only classes need a wrapper).
+            // Normalize ONLY matching names, before protocol casts/identity checks and returning.
+            // A vanished candidate must fail the scan, not make an ambiguous short name unique.
+            guard let candidate: AnyClass = objc_lookUpClass(name), !Task.isCancelled else { return nil }
+            if scopeCheck(candidate, context) { candidates.append((candidate, name)) }
+        }
+        return Task.isCancelled ? nil : candidates
     }
 
     /// Resolve a class by name, tolerating Swift's module-qualified runtime names.
     ///
-    /// `NSClassFromString("HostTabBarController")` fails for Swift classes because
+    /// `objc_lookUpClass("HostTabBarController")` fails for Swift classes because
     /// their Objective-C name is `"<Module>.HostTabBarController"`. The agent only
     /// ever knows the short name, so fall back to scanning the class list for a
     /// unique `*.name` match.
-    static func resolveClass(_ name: String) -> AnyClass? {
-        if let cls: AnyClass = NSClassFromString(name) { return cls }
-        let suffix = "." + name
-        let count = objc_getClassList(nil, 0)
-        guard count > 0 else { return nil }
-        let buffer = UnsafeMutablePointer<AnyClass>.allocate(capacity: Int(count))
-        defer { buffer.deallocate() }
-        let realCount = objc_getClassList(AutoreleasingUnsafeMutablePointer<AnyClass>(buffer), count)
-        for i in 0..<Int(realCount) {
-            if NSStringFromClass(buffer[i]).hasSuffix(suffix) { return buffer[i] }
+    static func resolveClass(_ name: String, context: HostInspectionContext = .init()) -> AnyClass? {
+        guard !name.isEmpty, !Task.isCancelled else { return nil }
+        // Unlike Foundation name conversion, lookup does not send +class / initialize the class.
+        if let cls = objc_lookUpClass(name) {
+            guard !Task.isCancelled, classIncluded(cls, context: context), !Task.isCancelled else { return nil }
+            return cls
         }
-        return nil
+        let suffix = "." + name
+        return withRuntimeClasses { classes in
+            guard let candidates = scopedClassCandidates(
+                in: classes, matching: { $0.hasSuffix(suffix) }, context: context
+            ), candidates.count == 1, !Task.isCancelled else { return nil }
+            // Ambiguous in-scope short names still fail closed.
+            return candidates[0].cls
+        }
     }
 
-    static func topViewController() -> UIViewController? {
-        guard var vc = keyWindow()?.rootViewController else { return nil }
+    @MainActor
+    static func topViewController(context: HostInspectionContext = .init()) -> UIViewController? {
+        guard var vc = keyWindow(context: context)?.rootViewController,
+              HostInspectionUIKit.includes(vc, context: context) else { return nil }
         while true {
-            if let presented = vc.presentedViewController { vc = presented; continue }
-            if let nav = vc as? UINavigationController, let top = nav.topViewController { vc = top; continue }
-            if let tab = vc as? UITabBarController, let sel = tab.selectedViewController { vc = sel; continue }
+            let candidates = [vc.presentedViewController, (vc as? UINavigationController)?.topViewController,
+                              (vc as? UITabBarController)?.selectedViewController]
+            if let next = candidates.compactMap({ $0 }).first(where: { HostInspectionUIKit.includes($0, context: context) }) {
+                vc = next
+                continue
+            }
             break
         }
         return vc
     }
 
-    /// KVC 目标：指定类名且栈顶页面正是该类实例则用之，否则回落到类对象；未指定类名则用栈顶页面。
-    static func kvcTarget(className: String?) -> AnyObject? {
-        guard let className, !className.isEmpty else { return topViewController() }
-        guard let cls = resolveClass(className) else { return nil }
-        if let top = topViewController(), type(of: top) == cls { return top }
-        return cls as AnyObject
+    /// Limited scopes never fall back to a class object/singleton to escape scene/ownership checks.
+    @MainActor
+    static func kvcTarget(className: String?, context: HostInspectionContext = .init()) -> AnyObject? {
+        guard let className, !className.isEmpty else { return topViewController(context: context) }
+        guard let cls = resolveClass(className, context: context) else { return nil }
+        if let top = topViewController(context: context), top.isKind(of: cls) { return top }
+        return context.scope == .all ? cls as AnyObject : nil
+    }
+
+    // MARK: - Scoped KVC
+
+    /// Walk one key at a time. value(forKeyPath:) would execute the whole chain, including
+    /// getters on excluded objects and collection operators, before we could check ownership.
+    @MainActor
+    private static func propertyTarget(
+        _ target: NSObject, keyPath: String, context: HostInspectionContext
+    ) throws -> (NSObject, String) {
+        let keys = keyPath.components(separatedBy: ".")
+        guard !keys.isEmpty, keys.allSatisfy({ !$0.isEmpty && !$0.contains("@") }) else {
+            throw UIKitInspectionError.unsafeObjectChain
+        }
+        var current = target
+        for (index, key) in keys.enumerated() {
+            try validatePropertyTarget(current, context: context)
+            if context.scope != .all {
+                // These synthesize object graphs/descriptions instead of exposing a property.
+                guard !key.hasPrefix("_"),
+                      !["description", "debugDescription", "recursiveDescription", "class", "superclass",
+                        "self", "nextResponder", "subviews", "windows", "connectedScenes",
+                        "children", "childViewControllers", "viewControllers", "layer",
+                        "delegate", "dataSource", "accessibilityElements"].contains(key) else {
+                    throw UIKitInspectionError.unsafeObjectChain
+                }
+            }
+            if index == keys.count - 1 { return (current, key) }
+            let next = try ObjCExceptionCatcher.performReturning { current.value(forKey: key) }
+            guard let object = next as? NSObject else { throw UIKitInspectionError.unsafeObjectChain }
+            try validatePropertyTarget(object, context: context)
+            current = object
+        }
+        throw UIKitInspectionError.unsafeObjectChain
+    }
+
+    @MainActor
+    private static func validatePropertyTarget(_ object: NSObject, context: HostInspectionContext) throws {
+        guard HostInspectionUIKit.includes(object, context: context) else { throw UIKitInspectionError.outsideScope }
+        if context.scope != .all {
+            // Class objects, collections and arbitrary non-UI intermediates could expose global
+            // singletons or describe nested SDK objects. Use a scoped view path instead.
+            guard object is UIView || object is UIViewController,
+                  let cls = object_getClass(object), !class_isMetaClass(cls) else {
+                throw UIKitInspectionError.unsafeObjectChain
+            }
+        }
+    }
+
+    /// Never ask an arbitrary object/collection for its description in a limited scope.
+    /// A UI object is represented only by its class, after checking inherited ownership.
+    @MainActor
+    static func inspectedDescription(of value: Any?, context: HostInspectionContext = .init()) throws -> String {
+        guard let value else { return "(nil)" }
+        if let object = value as? NSObject {
+            guard HostInspectionUIKit.includes(object, context: context) || (
+                context.scope == .appagent && isScalarValue(object) && !HostInspectionUIKit.isAppAgentOwned(object)
+            ) else { throw UIKitInspectionError.outsideScope }
+        }
+        if context.scope == .all { return String(describing: value) }
+        if let object = value as? NSObject, HostInspectionUIKit.isAppAgentOwned(object),
+           context.scope == .host { throw UIKitInspectionError.outsideScope }
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber { return number.stringValue }
+        if let color = value as? UIColor { return hexString(of: color) }
+        if let boxed = value as? NSValue, isScalarValue(boxed) { return boxed.description }
+        if let view = value as? UIView { return "<\(NSStringFromClass(type(of: view)))>" }
+        if let controller = value as? UIViewController { return "<\(NSStringFromClass(type(of: controller)))>" }
+        throw UIKitInspectionError.unsafeObjectChain
+    }
+
+    private static func isScalarValue(_ object: NSObject) -> Bool {
+        if object is NSString || object is NSNumber || object is UIColor { return true }
+        if let value = object as? NSValue {
+            let encoding = String(cString: value.objCType)
+            return encoding.hasPrefix("{CGRect=") || encoding.hasPrefix("{CGPoint=")
+                || encoding.hasPrefix("{CGSize=") || encoding.hasPrefix("{UIEdgeInsets=")
+        }
+        return false
+    }
+
+    @MainActor
+    static func readProperty(
+        from target: NSObject, keyPath: String, context: HostInspectionContext = .init()
+    ) -> String {
+        do {
+            let (object, key) = try propertyTarget(target, keyPath: keyPath, context: context)
+            let value = try ObjCExceptionCatcher.performReturning { object.value(forKey: key) }
+            return try inspectedDescription(of: value, context: context)
+        } catch let error as UIKitInspectionError {
+            return error.localizedDescription
+        } catch {
+            // NSException.reason can contain the excluded object's description. Do not echo it.
+            return "Failed to read \(keyPath): KVC access failed."
+        }
+    }
+
+    @MainActor
+    static func writeProperty(
+        on target: NSObject, keyPath: String, value: String, context: HostInspectionContext = .init()
+    ) -> String {
+        do {
+            let (object, key) = try propertyTarget(target, keyPath: keyPath, context: context)
+            // Validate the old value before invoking a setter on an object-valued property.
+            // This also prevents a successful write from leaking an excluded rollback value.
+            if context.scope != .all {
+                let view = (object as? UIView) ?? (object as? UIViewController)?.viewIfLoaded
+                if let view, containsExcludedView(view, context: context) {
+                    throw UIKitInspectionError.outsideScope
+                }
+                let old = try ObjCExceptionCatcher.performReturning { object.value(forKey: key) }
+                _ = try inspectedDescription(of: old, context: context)
+                if old is UIView || old is UIViewController { throw UIKitInspectionError.unsafeObjectChain }
+            }
+            try ObjCExceptionCatcher.perform { object.setValue(boxedValue(from: value), forKey: key) }
+            let updated = try ObjCExceptionCatcher.performReturning { object.value(forKey: key) }
+            return "OK. \(keyPath) = \(try inspectedDescription(of: updated, context: context))"
+        } catch let error as UIKitInspectionError {
+            return error.localizedDescription
+        } catch {
+            return "Failed to set \(keyPath): KVC access failed."
+        }
     }
 
     static func boxedValue(from string: String) -> Any {
@@ -313,14 +475,19 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     /// 单个视图的运行时状态快照（viewInfo 与 JS 桥共用）。
     @MainActor
-    static func describeState(of view: UIView, path: String) -> String {
+    static func describeState(of view: UIView, path: String, context: HostInspectionContext = .init()) -> String {
+        guard HostInspectionUIKit.includes(view, context: context) else {
+            return UIKitInspectionError.outsideScope.localizedDescription
+        }
         var out = "path=\(path)\nclass=\(type(of: view))\n"
         out += "frame=\(view.frame)\nbounds=\(view.bounds)\ncenter=\(view.center)\n"
         out += "alpha=\(view.alpha) hidden=\(view.isHidden) userInteractionEnabled=\(view.isUserInteractionEnabled)\n"
         out += "backgroundColor=\(view.backgroundColor.map { "\($0)" } ?? "nil")\n"
         out += "cornerRadius=\(view.layer.cornerRadius) tag=\(view.tag)\n"
         out += "superclass=\(view.superclass.map { "\($0)" } ?? "nil")\n"
-        out += "superview=\(view.superview.map { "\(type(of: $0))" } ?? "nil") subviews=\(view.subviews.count)\n"
+        let parent = view.superview.flatMap { HostInspectionUIKit.includes($0, context: context) ? $0 : nil }
+        let childCount = view.subviews.filter { HostInspectionUIKit.includes($0, context: context) }.count
+        out += "superview=\(parent.map { "\(type(of: $0))" } ?? "nil/out-of-scope") subviews=\(childCount)\n"
         if let label = view as? UILabel { out += "text=\"\(label.text ?? "")\"\n" }
         if let field = view as? UITextField { out += "text=\"\(field.text ?? "")\"\n" }
         if let button = view as? UIButton { out += "title=\"\(button.title(for: .normal) ?? "")\"\n" }
@@ -331,7 +498,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     /// 就完成了回滚。`view_set` 之前是单向的：改坏了没有任何撤销路径（我自己撞过一次，
     /// 自检把 demo 的 tab bar 改成了半透明蓝块）。
     @MainActor
-    static func readValue(from view: UIView, key: String) -> String {
+    static func readValue(from view: UIView, key: String, context: HostInspectionContext = .init()) -> String {
+        guard HostInspectionUIKit.includes(view, context: context) else {
+            return UIKitInspectionError.outsideScope.localizedDescription
+        }
         func rect(_ r: CGRect) -> String {
             String(format: "%.1f,%.1f,%.1f,%.1f", r.origin.x, r.origin.y, r.width, r.height)
         }
@@ -349,9 +519,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             if let button = view as? UIButton { return button.title(for: .normal) ?? "" }
             return ""
         default:
-            let existing = try? ObjCExceptionCatcher.performReturning { view.value(forKey: key) }
-            guard let unwrapped = existing ?? nil else { return "(unreadable)" }
-            return "\(unwrapped)"
+            return readProperty(from: view, keyPath: key, context: context)
         }
     }
 
@@ -367,15 +535,23 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     /// 对单个视图应用一次属性修改（view_set 与 JS 桥共用；已在主线程）。
     /// 成功时附带改前的原值，调用方把它写回同一个 key 即可回滚。
     @MainActor
-    static func applyValue(to view: UIView, key: String, value: String) -> String {
-        let previous = readValue(from: view, key: key)
-        let result = applyValueWithoutRollbackHint(to: view, key: key, value: value)
+    static func applyValue(to view: UIView, key: String, value: String, context: HostInspectionContext = .init()) -> String {
+        guard HostInspectionUIKit.includes(view, context: context) else {
+            return UIKitInspectionError.outsideScope.localizedDescription
+        }
+        if context.scope != .all, containsExcludedView(view, context: context) {
+            return "Inspection denied: mutation target contains an out-of-scope subtree."
+        }
+        let previous = readValue(from: view, key: key, context: context)
+        if previous.hasPrefix("Inspection denied:") || previous.hasPrefix("Failed to read ") { return previous }
+        let result = applyValueWithoutRollbackHint(to: view, key: key, value: value, context: context)
         guard result.hasPrefix("OK.") else { return result }
         return result + "  (previous: \(previous) — write it back to the same key to undo)"
     }
 
     @MainActor
-    private static func applyValueWithoutRollbackHint(to view: UIView, key: String, value: String) -> String {
+    private static func applyValueWithoutRollbackHint(to view: UIView, key: String, value: String,
+                                                     context: HostInspectionContext) -> String {
         switch key {
         case "frame", "bounds":
             guard let rect = parseRect(value) else {
@@ -413,45 +589,36 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             if let button = view as? UIButton { button.setTitle(value, for: .normal); return "OK. title = \"\(value)\"" }
             return "\(type(of: view)) has no text/title to set."
         default:
-            do {
-                try ObjCExceptionCatcher.perform {
-                    view.setValue(boxedValue(from: value), forKeyPath: key)
-                }
-                let readBack = (try? ObjCExceptionCatcher.performReturning {
-                    view.value(forKeyPath: key)
-                })?.map { "\($0)" } ?? "(nil)"
-                // 成功文案统一以 `OK.` 起头：工具层按这个前缀判定写操作是否真的生效，
-                // 原来的 "OK (KVC)." 既过不了那道判定，也拿不到下面的回滚提示。
-                return "OK. \(key) = \(readBack)  (via KVC)"
-            } catch {
-                return "Failed to set \(key): \(error.localizedDescription)"
-            }
+            return writeProperty(on: view, keyPath: key, value: value, context: context)
         }
     }
 
     /// 解析路径下的视图：`"root"`（或空）为 keyWindow，`"0/2"` 为 window.subviews[0].subviews[2]。
     /// 也支持从任意根视图出发（测试用）。
-    static func view(atPath path: String, root: UIView? = nil) -> UIView? {
+    @MainActor
+    static func view(atPath path: String, root: UIView? = nil, context: HostInspectionContext = .init()) -> UIView? {
         var indices = path.trimmingCharacters(in: .whitespaces)
-        var start = root ?? keyWindow()
+        var start = root ?? keyWindow(context: context)
         // `W2:0/1` —— 指定第几个 window 为根。没有前缀时沿用 keyWindow，
         // 否则 overlay window 里的视图根本没法寻址。
         if indices.hasPrefix("W"), let colon = indices.firstIndex(of: ":") {
             let digits = indices[indices.index(after: indices.startIndex)..<colon]
             guard let windowIndex = Int(digits) else { return nil }
-            let windows = allWindows()
-            guard windowIndex >= 0, windowIndex < windows.count else { return nil }
-            start = windows[windowIndex]
+            guard windowIndex >= 0 else { return nil }
+            start = HostInspectionUIKit.window(handle: windowIndex, context: context)
             indices = String(indices[indices.index(after: colon)...])
         }
         guard var current = start else { return nil }
         let trimmed = indices.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty || trimmed == "root" { return current }
-        for component in trimmed.split(separator: "/") {
+        if trimmed.isEmpty || trimmed == "root" {
+            return HostInspectionUIKit.includes(current, context: context) ? current : nil
+        }
+        for component in trimmed.split(separator: "/", omittingEmptySubsequences: false) {
+            guard HostInspectionUIKit.canTraverse(current, context: context) else { return nil }
             guard let index = Int(component), index >= 0, index < current.subviews.count else { return nil }
             current = current.subviews[index]
         }
-        return current
+        return HostInspectionUIKit.includes(current, context: context) ? current : nil
     }
 
     /// `"x,y,w,h"` → CGRect（允许空格）。
@@ -507,9 +674,20 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     }
 
     /// 递归打印带路径的视图树。
+    @MainActor
     static func describeAddressable(
-        view: UIView, path: String, depth: Int, maxDepth: Int, into out: inout String
+        view: UIView, path: String, depth: Int, maxDepth: Int,
+        context: HostInspectionContext = .init(), into out: inout String
     ) {
+        guard HostInspectionUIKit.canTraverse(view, context: context) else { return }
+        if !HostInspectionUIKit.includes(view, context: context) {
+            for (index, sub) in view.subviews.enumerated() {
+                let childPath = childPath(parent: path, index: index)
+                describeAddressable(view: sub, path: childPath, depth: depth, maxDepth: maxDepth,
+                                    context: context, into: &out)
+            }
+            return
+        }
         let pad = String(repeating: "  ", count: depth)
         var extra = ""
         if let label = view as? UILabel { extra = " text=\"\(label.text ?? "")\"" }
@@ -518,13 +696,32 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
         let hidden = view.isHidden ? " hidden" : ""
         out += "\(pad)[\(path)] \(type(of: view)) frame=\(view.frame)\(extra)\(hidden)\n"
         guard depth < maxDepth else {
-            if !view.subviews.isEmpty { out += "\(pad)  … \(view.subviews.count) more subviews (raise maxDepth)\n" }
+            let count = view.subviews.filter { HostInspectionUIKit.includes($0, context: context) }.count
+            if count > 0 { out += "\(pad)  … \(count) more subviews (raise maxDepth)\n" }
             return
         }
         for (index, sub) in view.subviews.enumerated() {
-            let childPath = (path == "root") ? "\(index)" : "\(path)/\(index)"
-            describeAddressable(view: sub, path: childPath, depth: depth + 1, maxDepth: maxDepth, into: &out)
+            let childPath = childPath(parent: path, index: index)
+            describeAddressable(view: sub, path: childPath, depth: depth + 1, maxDepth: maxDepth,
+                                context: context, into: &out)
         }
+    }
+
+    private static func childPath(parent: String, index: Int) -> String {
+        if parent == "root" { return "\(index)" }
+        if parent.hasSuffix(":root") { return String(parent.dropLast(4)) + "\(index)" }
+        if parent.hasSuffix(":") { return "\(parent)\(index)" }
+        return "\(parent)/\(index)"
+    }
+
+    /// Explicit trailing-context form for bridge callers that already pass `into:` last.
+    @MainActor
+    static func describeAddressable(
+        view: UIView, path: String, depth: Int, maxDepth: Int, into out: inout String,
+        context: HostInspectionContext
+    ) {
+        describeAddressable(view: view, path: path, depth: depth, maxDepth: maxDepth,
+                            context: context, into: &out)
     }
 
     static func methods(of cls: AnyClass, isClassMethod: Bool) -> [String] {
@@ -551,15 +748,22 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     /// `view_set` / `property_set`（KVC 会正确装箱）。
     ///
     /// 返回 nil = 可以调；返回字符串 = 拒绝理由（以 `(selector ` 起头，工具层按前缀判失败）。
-    static func selectorRejection(_ sel: Selector, on obj: NSObject, argCount: Int) -> String? {
+    @MainActor
+    static func selectorRejection(
+        _ sel: Selector, on obj: NSObject, argCount: Int, context: HostInspectionContext = .init()
+    ) -> String? {
         let name = NSStringFromSelector(sel)
+        guard HostInspectionUIKit.includes(obj, context: context) else {
+            return "Inspection denied: selector target is outside scope."
+        }
         // 实例对象给出它的类；类对象（invoke 走类方法时）给出元类，元类上的
         // “实例方法”正是它的类方法。两种情形用同一个查询。
         guard let cls: AnyClass = object_getClass(obj),
               let method = class_getInstanceMethod(cls, sel) else {
-            return nil      // 查不到签名就不拦（动态转发等），交给异常捕获兜底
+            return "(selector \(name) has no inspectable signature; dynamic forwarding is not supported)"
         }
         let declared = Int(method_getNumberOfArguments(method)) - 2
+        guard argCount <= 2 else { return "(selector \(name): at most two arguments are supported)" }
         guard declared == argCount else {
             return "(selector \(name) takes \(declared) argument(s), got \(argCount))"
         }
@@ -579,6 +783,17 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             return "(selector \(name) returns ObjC type '\(returnType)', not an object — "
                 + "reading it as one would crash. Use property_value / view_info to read primitives.)"
         }
+        if context.scope != .all {
+            // Arbitrary host selectors can reach global state; target filtering is not a sandbox.
+            // Limited scopes expose only these local UIKit invalidation/structural operations.
+            let local: Set<String> = ["setNeedsLayout", "setNeedsDisplay", "layoutIfNeeded", "removeFromSuperview"]
+            guard obj is UIView, local.contains(name), declared == 0, returnType == "v" else {
+                return "(selector \(name) requires all scope; arbitrary selectors cannot be scope-isolated)"
+            }
+            if let view = obj as? UIView, containsExcludedView(view, context: context) {
+                return "(selector \(name) would act on an out-of-scope subtree)"
+            }
+        }
         return nil
     }
 
@@ -587,30 +802,65 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
         type.hasPrefix("@") || type == "#"
     }
 
-    static func performSelector(_ sel: Selector, on obj: NSObject, args: [Any]) -> Any? {
+    @MainActor
+    static func performSelector(
+        _ sel: Selector, on obj: NSObject, args: [Any], context: HostInspectionContext = .init()
+    ) -> Any? {
+        if let rejection = selectorRejection(sel, on: obj, argCount: args.count, context: context) {
+            return rejection
+        }
+        // The caller still needs ObjCExceptionCatcher for an exception thrown by host code.
+        // A void-returning IMP has no object result: never dereference its return register.
+        guard let cls = object_getClass(obj), let method = class_getInstanceMethod(cls, sel) else {
+            return "(selector has no inspectable signature)"
+        }
+        let returnType = method_copyReturnType(method)
+        let returnsVoid = String(cString: returnType) == "v"
+        free(returnType)
+        let result: Unmanaged<AnyObject>?
         switch args.count {
         case 0:
-            return obj.perform(sel)?.takeUnretainedValue()
+            result = obj.perform(sel)
         case 1:
-            return obj.perform(sel, with: args[0])?.takeUnretainedValue()
+            result = obj.perform(sel, with: args[0])
         default:
-            return obj.perform(sel, with: args[0], with: args[1])?.takeUnretainedValue()
+            result = obj.perform(sel, with: args[0], with: args[1])
         }
+        return returnsVoid ? nil : result?.takeUnretainedValue()
     }
 
-    static func describe(viewController vc: UIViewController, indent: Int, into out: inout String) {
+    @MainActor
+    static func describe(viewController vc: UIViewController, indent: Int,
+                         context: HostInspectionContext = .init(), into out: inout String) {
+        guard HostInspectionUIKit.includes(vc, context: context) else {
+            if context.scope == .appagent {
+                for child in vc.children {
+                    describe(viewController: child, indent: indent, context: context, into: &out)
+                }
+                if let presented = vc.presentedViewController {
+                    describe(viewController: presented, indent: indent, context: context, into: &out)
+                }
+            }
+            return
+        }
         let pad = String(repeating: "  ", count: indent)
         out += "\(pad)- \(type(of: vc)) title=\(vc.title ?? "nil")\n"
         for child in vc.children {
-            describe(viewController: child, indent: indent + 1, into: &out)
+            describe(viewController: child, indent: indent + 1, context: context, into: &out)
         }
-        if let presented = vc.presentedViewController {
+        if let presented = vc.presentedViewController, HostInspectionUIKit.includes(presented, context: context) {
             out += "\(pad)  (presented)\n"
-            describe(viewController: presented, indent: indent + 1, into: &out)
+            describe(viewController: presented, indent: indent + 1, context: context, into: &out)
         }
     }
 
-    static func describe(view: UIView, indent: Int, into out: inout String) {
+    @MainActor
+    static func describe(view: UIView, indent: Int, context: HostInspectionContext = .init(), into out: inout String) {
+        guard HostInspectionUIKit.canTraverse(view, context: context) else { return }
+        guard HostInspectionUIKit.includes(view, context: context) else {
+            for sub in view.subviews { describe(view: sub, indent: indent, context: context, into: &out) }
+            return
+        }
         let pad = String(repeating: "  ", count: indent)
         var extra = ""
         if let label = view as? UILabel { extra = " text=\"\(label.text ?? "")\"" }
@@ -619,8 +869,14 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
         let hidden = view.isHidden ? " hidden" : ""
         out += "\(pad)• \(type(of: view)) frame=\(view.frame)\(extra)\(hidden)\n"
         for sub in view.subviews {
-            describe(view: sub, indent: indent + 1, into: &out)
+            describe(view: sub, indent: indent + 1, context: context, into: &out)
         }
+    }
+
+    @MainActor
+    private static func containsExcludedView(_ view: UIView, context: HostInspectionContext) -> Bool {
+        !HostInspectionUIKit.includes(view, context: context)
+            || view.subviews.contains { containsExcludedView($0, context: context) }
     }
 
     // MARK: - 摘要引擎
@@ -652,7 +908,8 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     }
     /// 值得在摘要里单独占一行的视图：能被人/agent 指认的东西。
     @MainActor
-    static func isAnchor(_ view: UIView) -> Bool {
+    static func isAnchor(_ view: UIView, context: HostInspectionContext = .init()) -> Bool {
+        guard HostInspectionUIKit.includes(view, context: context) else { return false }
         if view is UIWindow { return false }        // window 自己在标题行
         if isChrome(view) { return false }
         if view.accessibilityIdentifier?.isEmpty == false { return true }
@@ -673,19 +930,23 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     /// 深度是相对于传入节点的。
     @MainActor
-    static func stats(of view: UIView) -> SubtreeStats {
+    static func stats(of view: UIView, context: HostInspectionContext = .init()) -> SubtreeStats {
         var s = SubtreeStats()
-        s.views = 1
-        if view is UIControl { s.controls += 1 }
-        if view is UIScrollView { s.scrolls += 1 }
-        if view is UIImageView { s.images += 1 }
-        if let label = view as? UILabel, label.text?.isEmpty == false { s.labels += 1 }
-        if isAnchor(view) { s.anchors += 1 }
+        guard HostInspectionUIKit.canTraverse(view, context: context) else { return s }
+        let included = HostInspectionUIKit.includes(view, context: context)
+        if included {
+            s.views = 1
+            if view is UIControl { s.controls += 1 }
+            if view is UIScrollView { s.scrolls += 1 }
+            if view is UIImageView { s.images += 1 }
+            if let label = view as? UILabel, label.text?.isEmpty == false { s.labels += 1 }
+            if isAnchor(view, context: context) { s.anchors += 1 }
+        }
         for sub in view.subviews {
-            let c = stats(of: sub)
+            let c = stats(of: sub, context: context)
             s.views += c.views; s.labels += c.labels; s.controls += c.controls
             s.scrolls += c.scrolls; s.images += c.images; s.anchors += c.anchors
-            s.depth = max(s.depth, c.depth + 1)
+            if c.views > 0 { s.depth = max(s.depth, c.depth + (included ? 1 : 0)) }
         }
         return s
     }
@@ -697,7 +958,8 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     /// 一行里跟在类名后面的可辨识信息：文本、占位符、a11y、异常状态。
     @MainActor
-    static func inlineLabel(of view: UIView) -> String {
+    static func inlineLabel(of view: UIView, context: HostInspectionContext = .init()) -> String {
+        guard HostInspectionUIKit.includes(view, context: context) else { return "" }
         var bits: [String] = []
         if let label = view as? UILabel, let t = label.text, !t.isEmpty {
             bits.append("\"\(clip(t))\"")
@@ -718,7 +980,8 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     /// 视图 → 可寻址路径（`W0:0/1/2`）。摘要给 VC 挂钻取句柄用。
     @MainActor
-    static func addressablePath(of view: UIView) -> String? {
+    static func addressablePath(of view: UIView, context: HostInspectionContext = .init()) -> String? {
+        guard HostInspectionUIKit.includes(view, context: context) else { return nil }
         var indices: [Int] = []
         var node = view
         while let parent = node.superview {
@@ -727,14 +990,28 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             node = parent
         }
         guard let window = node as? UIWindow,
-              let windowIndex = allWindows().firstIndex(of: window) else { return nil }
+              let windows = try? HostInspectionUIKit.sceneWindows(context: context),
+              windows.contains(where: { $0 === window }) else { return nil }
+        let windowIndex = HostInspectionUIKit.handle(for: window)
         let tail = indices.reversed().map(String.init).joined(separator: "/")
         return tail.isEmpty ? "W\(windowIndex):root" : "W\(windowIndex):\(tail)"
     }
     /// VC 骨架：页面栈才是 agent 真正在问的「app 现在有哪些页面」。
     /// 关键约束：`isViewLoaded == false` 的 VC 绝不碰它的 `view` —— 内省不该反过来触发 loadView。
     @MainActor
-    static func describeVCSkeleton(_ vc: UIViewController, indent: Int, into out: inout String) {
+    static func describeVCSkeleton(_ vc: UIViewController, indent: Int,
+                                   context: HostInspectionContext = .init(), into out: inout String) {
+        guard HostInspectionUIKit.includes(vc, context: context) else {
+            if context.scope == .appagent {
+                for child in vc.children {
+                    describeVCSkeleton(child, indent: indent, context: context, into: &out)
+                }
+                if let presented = vc.presentedViewController {
+                    describeVCSkeleton(presented, indent: indent, context: context, into: &out)
+                }
+            }
+            return
+        }
         let pad = String(repeating: "  ", count: indent)
         var line = "\(pad)- \(type(of: vc))"
         if let title = vc.title, !title.isEmpty { line += " title=\"\(clip(title))\"" }
@@ -742,30 +1019,33 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             out += line + "  (view 未加载)\n"
             return
         }
-        if let path = addressablePath(of: vc.view) { line += "  view=[\(path)]" }
+        if let path = addressablePath(of: vc.view, context: context) { line += "  view=[\(path)]" }
         out += line + "\n"
 
         if let nav = vc as? UINavigationController {
-            let top = nav.topViewController.map { "\(type(of: $0))" } ?? "nil"
-            out += "\(pad)  页面栈 \(nav.viewControllers.count) 层，栈顶 = \(top)\n"
-            for child in nav.viewControllers {
-                describeVCSkeleton(child, indent: indent + 2, into: &out)
+            let visible = nav.viewControllers.filter { HostInspectionUIKit.includes($0, context: context) }
+            let top = visible.last.map { "\(type(of: $0))" } ?? "nil"
+            out += "\(pad)  页面栈 \(visible.count) 层，栈顶 = \(top)\n"
+            for child in visible {
+                describeVCSkeleton(child, indent: indent + 2, context: context, into: &out)
             }
         } else if let tab = vc as? UITabBarController {
             let all = tab.viewControllers ?? []
-            out += "\(pad)  \(all.count) 个 tab，当前 = \(tab.selectedIndex)\n"
-            for (index, child) in all.enumerated() {
+            let visible = all.enumerated().filter { HostInspectionUIKit.includes($0.element, context: context) }
+            let selected = visible.contains(where: { $0.offset == tab.selectedIndex }) ? "\(tab.selectedIndex)" : "out-of-scope"
+            out += "\(pad)  \(visible.count) 个 tab，当前 = \(selected)\n"
+            for (index, child) in visible {
                 out += "\(pad)  [tab \(index)\(index == tab.selectedIndex ? " ← 可见" : "")]\n"
-                describeVCSkeleton(child, indent: indent + 2, into: &out)
+                describeVCSkeleton(child, indent: indent + 2, context: context, into: &out)
             }
         } else {
             for child in vc.children {
-                describeVCSkeleton(child, indent: indent + 1, into: &out)
+                describeVCSkeleton(child, indent: indent + 1, context: context, into: &out)
             }
         }
-        if let presented = vc.presentedViewController {
+        if let presented = vc.presentedViewController, HostInspectionUIKit.includes(presented, context: context) {
             out += "\(pad)  present 出 ↓\n"
-            describeVCSkeleton(presented, indent: indent + 1, into: &out)
+            describeVCSkeleton(presented, indent: indent + 1, context: context, into: &out)
         }
     }
 
@@ -773,20 +1053,22 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     /// 子树太大或已到深度上限就折叠成统计 + 钻取 path。
     @MainActor
     static func emitAnchors(of view: UIView, path: String, anchorDepth: Int,
-                            indent: Int, into out: inout String) {
+                            indent: Int, context: HostInspectionContext = .init(), into out: inout String) {
+        guard HostInspectionUIKit.canTraverse(view, context: context) else { return }
         let pad = String(repeating: "  ", count: indent)
         var shown = 0
         var collapsedViews = 0
 
         for (index, sub) in view.subviews.enumerated() {
-            let subPath = path.hasSuffix(":") ? "\(path)\(index)" : "\(path)/\(index)"
-            let subStats = stats(of: sub)
+            guard HostInspectionUIKit.canTraverse(sub, context: context) else { continue }
+            let subPath = childPath(parent: path, index: index)
+            let subStats = stats(of: sub, context: context)
 
-            guard isAnchor(sub) else {
+            guard isAnchor(sub, context: context) else {
                 // 包装层 / 无信息量的容器：穿透，路径不断
                 if subStats.anchors > 0 {
                     emitAnchors(of: sub, path: subPath, anchorDepth: anchorDepth,
-                                indent: indent, into: &out)
+                                indent: indent, context: context, into: &out)
                 } else {
                     collapsedViews += subStats.views
                 }
@@ -799,7 +1081,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             }
             shown += 1
 
-            var line = "\(pad)• \(type(of: sub))\(inlineLabel(of: sub)) [\(subPath)]"
+            var line = "\(pad)• \(type(of: sub))\(inlineLabel(of: sub, context: context)) [\(subPath)]"
             let inside = subStats.views - 1
             let tooBig = inside > Summary.collapseAbove
             let tooDeep = anchorDepth + 1 >= Summary.anchorDepth
@@ -817,7 +1099,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             } else {
                 out += line + "\n"
                 emitAnchors(of: sub, path: subPath, anchorDepth: anchorDepth + 1,
-                            indent: indent + 1, into: &out)
+                            indent: indent + 1, context: context, into: &out)
             }
         }
 
@@ -827,24 +1109,29 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     }
 
     @MainActor
-    static func hierarchySummary() -> String {
-        let windows = allWindows()
-        guard !windows.isEmpty else { return "(no windows)" }
+    static func hierarchySummary(context: HostInspectionContext = .init()) -> String {
+        let windows: [UIWindow]
+        do { windows = try HostInspectionUIKit.sceneWindows(context: context) }
+        catch { return error.localizedDescription }
         var out = "UI 摘要 · 只列关键节点。⊞ = 已折叠子树，用 view_tree(path:\"…\") 展开\n"
-        for (index, window) in windows.enumerated() {
-            let total = stats(of: window)
-            out += "\n[W\(index)] \(type(of: window)) level=\(window.windowLevel.rawValue)"
-            out += String(format: " %.0f×%.0f", window.bounds.width, window.bounds.height)
-            out += window.isKeyWindow ? " [key]" : ""
-            out += window.isHidden ? " [hidden]" : ""
-            out += " · 共 \(total.views) 视图 / depth \(total.depth)\n"
-            if let root = window.rootViewController {
-                out += "  页面：\n"
-                describeVCSkeleton(root, indent: 2, into: &out)
+        var found = false
+        for window in windows {
+            let roots = HostInspectionUIKit.inspectionRoots(in: window, context: context)
+            guard !roots.isEmpty else { continue }
+            found = true
+            for root in roots {
+                guard let path = addressablePath(of: root, context: context) else { continue }
+                let total = stats(of: root, context: context)
+                out += "\n[\(path)] \(type(of: root))\(inlineLabel(of: root, context: context))"
+                out += " · 共 \(total.views) 视图 / depth \(total.depth)\n"
+                out += "  视图锚点：\n"
+                emitAnchors(of: root, path: path, anchorDepth: 0, indent: 2, context: context, into: &out)
             }
-            out += "  视图锚点：\n"
-            emitAnchors(of: window, path: "W\(index):", anchorDepth: 0, indent: 2, into: &out)
+            if let root = window.rootViewController {
+                describeVCSkeleton(root, indent: 2, context: context, into: &out)
+            }
         }
+        guard found else { return "(no windows)" }
         out += "\n钻取：view_tree(path:\"W0:0/1\") 展开子树 · view_info(path:…) 看单个视图 · "
         out += "ui_hierarchy(detail:\"full\") 拿全量（体积大，慎用）\n"
         return out

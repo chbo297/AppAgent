@@ -9,10 +9,14 @@
 
 import Foundation
 
-public struct AppUserDefaultsTool: ToolProtocol {
+// UserDefaults supports concurrent access; the reference and all tool configuration
+// are immutable. Foundation does not annotate UserDefaults as Sendable on every SDK.
+public struct AppUserDefaultsTool: ToolProtocol, @unchecked Sendable {
     public let name = "app_user_defaults"
     public let description = """
-        Read and modify the host app's UserDefaults. Choose an 'op':
+        Read and modify the host app's UserDefaults. Default scope 'host' excludes SDK \
+        namespaces; 'appagent' selects SDK keys only, and 'all' selects both. \
+        Non-host scopes require explicit inspection approval. Choose an 'op':
         - 'read': read the value for 'key'.
         - 'write': set 'key' to 'value' (string/number/bool/array/object).
         - 'remove': delete 'key'.
@@ -23,7 +27,8 @@ public struct AppUserDefaultsTool: ToolProtocol {
             "op": .string(description: "Operation.", enumValues: ["read", "write", "remove", "list"]),
             "key": .string(description: "Defaults key. Required for read/write/remove."),
             "value": .string(description: "Value to store for 'write'. JSON is parsed when possible, else stored as a string."),
-            "prefix": .string(description: "Optional key prefix filter for 'list'.")
+            "prefix": .string(description: "Optional key prefix filter for 'list'."),
+            "scope": HostInspectionScope.parameter
         ],
         required: ["op"]
     )
@@ -47,6 +52,21 @@ public struct AppUserDefaultsTool: ToolProtocol {
 
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
         let op = arguments["op"]?.stringValue ?? ""
+        let context: HostInspectionContext
+        do {
+            context = try await HostInspectionAccess.context(
+                arguments: arguments, session: session, tool: name,
+                isMutation: op == "write" || op == "remove"
+            )
+        } catch {
+            return .error(error.localizedDescription)
+        }
+        if ["read", "write", "remove"].contains(op),
+           let key = arguments["key"]?.stringValue,
+           !HostStoragePolicy.allows(defaultsKey: key, scope: context.scope) {
+            // Do not reveal existence, type or value of a rejected key.
+            return .error(HostStoragePolicy.deniedMessage)
+        }
         switch op {
         case "read":
             guard let key = arguments["key"]?.stringValue else { return .error("'key' is required for read.") }
@@ -72,7 +92,9 @@ public struct AppUserDefaultsTool: ToolProtocol {
             return .json(.object(["success": .bool(true), "key": .string(key)]))
         case "list":
             let prefix = arguments["prefix"]?.stringValue
-            var keys = Array(defaults.dictionaryRepresentation().keys)
+            var keys = defaults.dictionaryRepresentation().keys.filter {
+                HostStoragePolicy.allows(defaultsKey: $0, scope: context.scope)
+            }
             if let prefix, !prefix.isEmpty {
                 keys = keys.filter { $0.hasPrefix(prefix) }
             }

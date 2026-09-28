@@ -32,11 +32,11 @@ extension AppAgentViewController {
             return
         }
 
+        // 键盘顶起就一件事：在键盘自己的动画块里重算 inputBar 与 ChatPanel 容器的位置，整个容器
+        // 一起上移。面板自身高度、展示高度、档位都不变，块内的派生写入直接提交、继承这条动画上下文。
         UIView.animate(withDuration: duration) {
             self.layoutInputBar(reason: .keyboard)
         }
-
-        scrollToBottom(animated: true)
     }
 }
 

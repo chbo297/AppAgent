@@ -55,6 +55,16 @@ public enum AppAgentInputBarInputSource {
     case voice
 }
 
+/// inputBar 右侧动作槽（原加号位置）当前的形态。
+///
+/// 只有三态，且优先级固定：**有草稿 → 发送**，其次 **loop 运行中 → 停止**，否则 **加号**。
+/// 有草稿时语音按钮一并让位，界面上只剩「把这段话发出去」这一个动作。
+public enum AppAgentInputBarTrailingAction {
+    case plus
+    case send
+    case stop
+}
+
 /// 触发语音输入的交互场景，用于区分“语音模式按下”和“键盘模式长按”。
 public enum AppAgentInputBarVoiceInputSource {
     /// 语音输入模式下，手指按下中间“按住说话”区域。
@@ -66,8 +76,13 @@ public enum AppAgentInputBarVoiceInputSource {
 
 /// 语音输入手势的值上下文：不向宿主暴露 UIKit recognizer，只透传阶段与宿主坐标系中的位置。
 public struct AppAgentInputBarVoiceGestureEvent {
-    /// 手势阶段：began → moved* → ended / cancelled。
+    /// 手势阶段：prewarm(touchDown 预热) → began → moved* → ended / cancelled；
+    /// 短按未成立时 prewarm 之后直接 abortPrewarm。
     public enum Phase {
+        /// touchDown：提前预热语音（面板不展示），仅键盘模式长按候选区触发。
+        case prewarm
+        /// touchUp 但长按未成立：取消预热。
+        case abortPrewarm
         case began
         case moved
         case ended
@@ -79,6 +94,48 @@ public struct AppAgentInputBarVoiceGestureEvent {
 
     /// 手指在 inputBar 宿主视图（superview）坐标系中的位置。
     public let locationInHost: CGPoint
+}
+
+/// 被动触摸探针：永不进入 `.began` / `.recognized`，因此不参与手势竞争、不吞触点，
+/// 只把 touchDown / touchUp(或 cancel) 透传给回调，用于语音输入的「预热 / 取消预热」。
+/// 必须配 `cancelsTouchesInView = false`、`delaysTouchesBegan/Ended = false` 保持透明。
+final class AppAgentTouchProbeGestureRecognizer: UIGestureRecognizer {
+    var onTouchDown: ((UITouch) -> Void)?
+    var onTouchUp: (() -> Void)?
+    private weak var trackedTouch: UITouch?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesBegan(touches, with: event)
+        guard trackedTouch == nil, let touch = touches.first else { return }
+        trackedTouch = touch
+        onTouchDown?(touch)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        if let tracked = trackedTouch, touches.contains(tracked) {
+            finishTracking()
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        if let tracked = trackedTouch, touches.contains(tracked) {
+            finishTracking()
+        }
+    }
+
+    override func reset() {
+        super.reset()
+        trackedTouch = nil
+    }
+
+    private func finishTracking() {
+        trackedTouch = nil
+        onTouchUp?()
+        // 保持不识别：置 failed 彻底退出本次序列，绝不吞触点。
+        state = .failed
+    }
 }
 
 /// inputBar frame 拖拽结束时传给外部的上下文，外部据此决定最终展开、收起、吸附或自由落位。
@@ -108,6 +165,8 @@ public protocol AppAgentInputBarDelegate: AnyObject {
     func inputBar(_ bar: AppAgentInputBar, didSendText text: String)
     func inputBarDidTapVoice(_ bar: AppAgentInputBar)
     func inputBarDidTapPlus(_ bar: AppAgentInputBar)
+    /// loop 运行中且输入框为空时，右侧圆形按钮变为停止按钮，点击走这里。
+    func inputBarDidTapStop(_ bar: AppAgentInputBar)
     func inputBar(_ bar: AppAgentInputBar, didChangeInputSource source: AppAgentInputBarInputSource)
     func inputBar(_ bar: AppAgentInputBar, didChangeTextInputFocus isFocused: Bool)
     func inputBar(_ bar: AppAgentInputBar, didReceiveVoiceInputGesture event: AppAgentInputBarVoiceGestureEvent)
@@ -129,6 +188,7 @@ public extension AppAgentInputBarDelegate {
     func inputBar(_ bar: AppAgentInputBar, didSendText text: String) {}
     func inputBarDidTapVoice(_ bar: AppAgentInputBar) {}
     func inputBarDidTapPlus(_ bar: AppAgentInputBar) {}
+    func inputBarDidTapStop(_ bar: AppAgentInputBar) {}
     func inputBar(_ bar: AppAgentInputBar, didChangeInputSource source: AppAgentInputBarInputSource) {}
     func inputBar(_ bar: AppAgentInputBar, didChangeTextInputFocus isFocused: Bool) {}
     func inputBar(_ bar: AppAgentInputBar, didReceiveVoiceInputGesture event: AppAgentInputBarVoiceGestureEvent) {}
@@ -168,6 +228,13 @@ public final class AppAgentInputBar: UIView {
     private static let minimumInputAreaWidth: CGFloat = 80
     private static let symbolIconPointSize: CGFloat = 24
     private static let keyboardIconPointSize: CGFloat = 17
+    /// 上箭头 = 发送；实心方块 = 停止（配上蓝色圆底就是参考图里的「外圆内方」）。
+    private static let sendIcon = systemSymbolImage(
+        primary: "arrow.up", fallbacks: ["arrow.up.circle"], pointSize: 20, weight: .semibold
+    )
+    private static let stopIcon = systemSymbolImage(
+        primary: "stop.fill", fallbacks: ["square.fill"], pointSize: 15, weight: .semibold
+    )
     /// 展开态 inputBar 背景圆角；ChatPanel 收至最小高度时复用该值以保持视觉对齐。
     static let expandedCornerRadius: CGFloat = 16
     private static let inactiveTextInputPlaceholder = "发消息或按住说话..."
@@ -222,6 +289,11 @@ public final class AppAgentInputBar: UIView {
     private var isHoldingVoiceInput = false
     private var activeVoiceInputSource: AppAgentInputBarVoiceInputSource?
     private var lastVoiceInputHostLocation: CGPoint = .zero
+
+    /// 探针已发出预热、且本次触摸尚未转成正式语音输入（用于 touchUp 时决定是否取消预热）。
+    private var voiceProbeDidPrewarm = false
+    /// 本次触摸自预热以来是否已正式开始语音输入（`beginVoiceInput` 置真）。
+    private var voiceInputCommittedSincePrewarm = false
     private var frameAnimator: UIViewPropertyAnimator?
 
     // MARK: - Delegate
@@ -236,6 +308,8 @@ public final class AppAgentInputBar: UIView {
     public let voiceInputHoldButton = UIButton(type: .custom)
     public let inputSourceButton = UIButton(type: .system)
     public let plusButton = UIButton(type: .system)
+    /// 右侧动作槽：与 plusButton 同一块矩形，按 `trailingAction` 显示发送或停止。
+    public let trailingActionButton = UIButton(type: .custom)
 
     private lazy var inputBarPan: UIPanGestureRecognizer = {
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handleInputBarPan(_:)))
@@ -260,14 +334,50 @@ public final class AppAgentInputBar: UIView {
         return press
     }()
 
+    /// 触摸预热探针：touchDown 就通知宿主提前预热语音（面板不展示），短按未成立时通知取消预热。
+    private lazy var voiceInputTouchProbe: AppAgentTouchProbeGestureRecognizer = {
+        let probe = AppAgentTouchProbeGestureRecognizer()
+        probe.cancelsTouchesInView = false
+        probe.delaysTouchesBegan = false
+        probe.delaysTouchesEnded = false
+        probe.delegate = self
+        probe.onTouchDown = { [weak self] touch in self?.handleVoiceProbeTouchDown(touch) }
+        probe.onTouchUp = { [weak self] in self?.handleVoiceProbeTouchUp() }
+        return probe
+    }()
+
     // MARK: - Public API
 
     public var text: String {
         get { textField.text ?? "" }
-        set { textField.text = newValue }
+        set {
+            textField.text = newValue
+            updateTrailingAction()
+        }
     }
 
     public private(set) var inputSource: AppAgentInputBarInputSource = .keyboard
+
+    /// 当前会话是否还在跑 agent loop。由宿主（`AppAgentViewController`）在运行状态变化时写入；
+    /// inputBar 自己不猜，只据此决定右侧槽显示加号还是停止。
+    public private(set) var isRunActive = false
+
+    /// 右侧动作槽当前形态：草稿优先，其次运行中，否则加号。
+    public var trailingAction: AppAgentInputBarTrailingAction {
+        if hasDraftText { return .send }
+        return isRunActive ? .stop : .plus
+    }
+
+    /// 输入框里是否有可发送的内容（纯空白不算）。
+    private var hasDraftText: Bool {
+        !(textField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public func setRunActive(_ active: Bool) {
+        guard isRunActive != active else { return }
+        isRunActive = active
+        updateTrailingAction()
+    }
 
     public var isCollapsed: Bool {
         bounds.width <= Self.collapsedMinWidth + 0.5
@@ -275,6 +385,7 @@ public final class AppAgentInputBar: UIView {
 
     public func clearText() {
         textField.text = ""
+        updateTrailingAction()
     }
 
     public func setInputEnabled(_ enabled: Bool) {
@@ -283,6 +394,7 @@ public final class AppAgentInputBar: UIView {
         inputSourceButton.isEnabled = enabled
         voiceInputHoldButton.isEnabled = enabled
         plusButton.isEnabled = enabled
+        trailingActionButton.isEnabled = enabled
         updateControlInteractionState()
     }
 
@@ -353,9 +465,10 @@ public final class AppAgentInputBar: UIView {
     private static func systemSymbolImage(
         primary: String,
         fallbacks: [String] = [],
-        pointSize: CGFloat = symbolIconPointSize
+        pointSize: CGFloat = symbolIconPointSize,
+        weight: UIImage.SymbolWeight = .regular
     ) -> UIImage? {
-        let config = UIImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+        let config = UIImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
         for name in [primary] + fallbacks {
             if let image = UIImage(systemName: name, withConfiguration: config) {
                 return image
@@ -377,6 +490,12 @@ public final class AppAgentInputBar: UIView {
         )
         plusButton.addTarget(self, action: #selector(plusTapped), for: .touchUpInside)
 
+        // 发送 / 停止共用这一个实心圆按钮：圆形铺满整个加号槽（40pt），图标白色。
+        trailingActionButton.layer.cornerRadius = Self.buttonSize / 2
+        trailingActionButton.layer.masksToBounds = true
+        trailingActionButton.adjustsImageWhenHighlighted = false
+        trailingActionButton.addTarget(self, action: #selector(trailingActionTapped), for: .touchUpInside)
+
         inputSourceButton.addTarget(self, action: #selector(inputSourceTapped), for: .touchUpInside)
 
         inputAreaContainer.clipsToBounds = true
@@ -386,6 +505,8 @@ public final class AppAgentInputBar: UIView {
         textField.returnKeyType = .send
         textField.borderStyle = .none
         textField.delegate = self
+        // 草稿有无决定右侧槽形态；`.editingChanged` 只覆盖用户输入，程序化改文本走 `text` / `clearText`。
+        textField.addTarget(self, action: #selector(textFieldEditingChanged), for: .editingChanged)
 
         voiceInputHoldButton.setTitle("按住说话", for: .normal)
         voiceInputHoldButton.titleLabel?.font = .boldSystemFont(ofSize: 16)
@@ -405,12 +526,15 @@ public final class AppAgentInputBar: UIView {
         inputAreaContainer.addSubview(textField)
         inputAreaContainer.addSubview(voiceInputHoldButton)
         addSubview(menuButton)
+        addSubview(trailingActionButton)
         addGestureRecognizer(inputBarPan)
         // 键盘模式长按需要同时覆盖输入区域和输入源按钮，因此由 inputBar 统一接收，再由代理过滤起点。
         addGestureRecognizer(keyboardModeLongPressGesture)
+        addGestureRecognizer(voiceInputTouchProbe)
 
         applyAppearance()
         updateInputSourceAppearance(animated: false, notifyDelegate: false)
+        updateTrailingAction()
         updateControlInteractionState()
     }
 
@@ -430,6 +554,8 @@ public final class AppAgentInputBar: UIView {
         updateTextFieldPlaceholder()
         plusButton.tintColor = AppAgentAppearance.icon
         inputSourceButton.tintColor = AppAgentAppearance.icon
+        trailingActionButton.backgroundColor = AppAgentAppearance.actionButtonBackground
+        trailingActionButton.tintColor = AppAgentAppearance.actionButtonIcon
         voiceInputHoldButton.setTitleColor(AppAgentAppearance.primaryText, for: .normal)
         setVoiceInputHolding(isHoldingVoiceInput)
         menuButton.setNeedsDisplay()
@@ -560,6 +686,14 @@ public final class AppAgentInputBar: UIView {
             0,
             1
         )
+        // 发送 / 停止占的就是加号那一格，几何与淡出进度跟着它走。
+        applyTrailingActionGeometry()
+    }
+
+    /// 右侧动作槽与加号共用同一块矩形和同一条淡出进度：布局改了和形态改了都要同步一次。
+    private func applyTrailingActionGeometry() {
+        trailingActionButton.frame = plusButton.frame
+        trailingActionButton.alpha = plusButton.alpha
     }
 
     private func updateCapsuleCornerRadius(for size: CGSize) {
@@ -589,6 +723,34 @@ public final class AppAgentInputBar: UIView {
             && allowsExpandedControls
         plusButton.isUserInteractionEnabled = plusButton.isEnabled
             && allowsExpandedControls
+        trailingActionButton.isUserInteractionEnabled = trailingActionButton.isEnabled
+            && allowsExpandedControls
+    }
+
+    /// 按草稿 / 运行状态切换右侧槽：加号、发送或停止。
+    ///
+    /// 有草稿时语音按钮一起隐藏（此时长按语音本来也被 `canBeginVoiceInput` 挡着），
+    /// loop 运行中输入框为空则只替换加号，语音照常可用。
+    private func updateTrailingAction() {
+        let action = trailingAction
+        let showsPlus = action == .plus
+        plusButton.isHidden = !showsPlus
+        trailingActionButton.isHidden = showsPlus
+        inputSourceButton.isHidden = action == .send
+
+        switch action {
+        case .plus:
+            break
+        case .send:
+            trailingActionButton.setImage(Self.sendIcon, for: .normal)
+            trailingActionButton.accessibilityLabel = "发送"
+        case .stop:
+            trailingActionButton.setImage(Self.stopIcon, for: .normal)
+            trailingActionButton.accessibilityLabel = "停止"
+        }
+
+        applyTrailingActionGeometry()
+        updateControlInteractionState()
     }
 
     private func setInputSource(
@@ -686,12 +848,54 @@ public final class AppAgentInputBar: UIView {
         delegate?.inputBarDidTapPlus(self)
     }
 
+    /// 右侧圆形按钮：形态决定语义，别在外部再判一遍草稿。
+    @objc private func trailingActionTapped() {
+        switch trailingAction {
+        case .plus:
+            delegate?.inputBarDidTapPlus(self)
+        case .send:
+            let text = (textField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            delegate?.inputBar(self, didSendText: text)
+        case .stop:
+            delegate?.inputBarDidTapStop(self)
+        }
+    }
+
+    @objc private func textFieldEditingChanged() {
+        updateTrailingAction()
+    }
+
     @objc private func handleVoiceModePress(_ gr: UILongPressGestureRecognizer) {
         handleVoiceInputGesture(gr, source: .voiceModePress)
     }
 
     @objc private func handleKeyboardModeLongPress(_ gr: UILongPressGestureRecognizer) {
         handleVoiceInputGesture(gr, source: .keyboardModeLongPress)
+    }
+
+    /// 探针 touchDown：仅在「键盘模式长按会触发语音」的同等条件下预热（#2/#3）；
+    /// 语音模式按下(#1)是 0ms 长按、touchDown 即 began，无需预热。
+    private func handleVoiceProbeTouchDown(_ touch: UITouch) {
+        voiceProbeDidPrewarm = false
+        voiceInputCommittedSincePrewarm = false
+        guard canBeginVoiceInput(source: .keyboardModeLongPress) else { return }
+        let insideInputArea = isTouch(touch, insideViewHierarchyOf: inputAreaContainer)
+        let insideSourceButton = isTouch(touch, insideViewHierarchyOf: inputSourceButton)
+            && inputSourceButton.isEnabled
+            && inputSourceButton.isUserInteractionEnabled
+        guard insideInputArea || insideSourceButton else { return }
+        voiceProbeDidPrewarm = true
+        lastVoiceInputHostLocation = touch.location(in: superview ?? self)
+        sendVoiceGestureEvent(source: .keyboardModeLongPress, phase: .prewarm)
+    }
+
+    /// 探针 touchUp：若预热过但长按没成立（短按），通知取消预热；否则交给正式手势收尾。
+    private func handleVoiceProbeTouchUp() {
+        guard voiceProbeDidPrewarm else { return }
+        voiceProbeDidPrewarm = false
+        guard !voiceInputCommittedSincePrewarm else { return }
+        sendVoiceGestureEvent(source: .keyboardModeLongPress, phase: .abortPrewarm)
     }
 
     private func handleVoiceInputGesture(
@@ -721,6 +925,7 @@ public final class AppAgentInputBar: UIView {
         guard canBeginVoiceInput(source: source) else { return }
 
         isHoldingVoiceInput = true
+        voiceInputCommittedSincePrewarm = true
         activeVoiceInputSource = source
         lastVoiceInputHostLocation = hostLocation(of: gestureRecognizer)
         setVoiceInputHolding(source == .voiceModePress)
@@ -1113,6 +1318,10 @@ extension AppAgentInputBar: UITextFieldDelegate {
 /// 处理 inputBar 内部 pan、长按语音输入等手势是否允许开始，以及手势起点区域判定。
 extension AppAgentInputBar: UIGestureRecognizerDelegate {
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === voiceInputTouchProbe {
+            // 被动探针：接收所有触点，预热 / 取消预热的判定在 onTouchDown / onTouchUp 里做。
+            return true
+        }
         if gestureRecognizer === keyboardModeLongPressGesture {
             // 手指刚按下：只允许键盘模式、键盘未激活且无草稿时，
             // 从输入区域或麦克风输入源按钮开始长按。
@@ -1204,7 +1413,11 @@ extension AppAgentInputBar: UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        false
+        // 被动探针不参与竞争，但需与真实手势并存，否则会被系统判为互斥而收不到触点。
+        if gestureRecognizer === voiceInputTouchProbe || otherGestureRecognizer === voiceInputTouchProbe {
+            return true
+        }
+        return false
     }
 
     public func gestureRecognizer(

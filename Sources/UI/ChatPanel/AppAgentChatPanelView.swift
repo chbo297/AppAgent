@@ -9,8 +9,13 @@ import UIKit
 /// 对话流面板的透明根容器。
 ///
 /// 根容器按 `AppAgentChatPanelGeometry.dragHandleAreaHeight` 分成拖拽手柄区和内容区域。内容区域背景负责样式与阴影，viewport
-/// 负责 mask 裁切，实际聊天内容始终按照完整内容区域布局，不依赖 viewport 的临时尺寸；只有 `listView` 内部的 tableView
+/// 负责裁切，实际聊天内容始终按照完整内容区域布局，不依赖 viewport 的临时尺寸；只有 `listView` 内部的 tableView
 /// 会把自身视口高度对齐到当前展示高度（见 `AppAgentChatMessageListView.updateVisibleArea`）。
+///
+/// **裁切与圆角一律用 `clipsToBounds` + `layer.cornerRadius` + `maskedCorners` 表达，不用 shape mask。**
+/// 实测踩过：`layer.mask` 不吃 UIKit 动画块的隐式动画（`animationKeys()` 恒为空），而它又是唯一的裁切者，
+/// 于是键盘动画里可见边界第一帧就跳到终态、内容再慢慢滑上来，看起来就是「先落后键盘、再跳一下」；
+/// 想显式给 mask 补 CAAnimation 的话，`path` 那条又会在半屏高度制造「重绘半截闪白」。
 final class AppAgentChatPanelView: UIView {
 
     /// 点击内容区导航栏左侧 Session 列表按钮时触发。
@@ -37,12 +42,11 @@ final class AppAgentChatPanelView: UIView {
     /// 面板的真实内容坐标空间，不跟随 viewport 的裁切尺寸变化。
     let contentAreaView = UIView()
 
-    /// 内容展示窗口；所有实际内容都添加到这里，并由 shape mask 控制最终可见范围。
+    /// 内容展示窗口；所有实际内容都添加到这里，由它自己的 bounds + 圆角裁切出最终可见范围。
     let viewportView = UIView()
 
     private let backgroundView = AppAgentChatPanelBackgroundView()
     private let grabberView = UIView()
-    private let viewportMaskLayer = CAShapeLayer()
 
     private var currentDisplayHeight: CGFloat?
     private var minimumDisplayHeight: CGFloat?
@@ -104,7 +108,11 @@ final class AppAgentChatPanelView: UIView {
 
     // MARK: - 内部
 
-    /// 直接提交轻量 frame/path 变化，不触发整棵 UITableView 层级的同步 layoutIfNeeded。
+    /// 提交面板内部的一次纯几何变化。
+    ///
+    /// **写入一律直接提交，跟随调用方所处的动画上下文**：键盘动画块里调 → 和面板 frame、容器位移
+    /// 同一条时间曲线插值；手势跟手帧没有动画上下文 → 立即生效。这里不剥动画（`performWithoutAnimation`
+    /// 会让裁切窗口瞬跳到终态，内容再慢慢滑上来），也不给任何 layer 手工补 CAAnimation。
     private func applyContentLayoutIfNeeded() {
 
         let displayHeight = currentDisplayHeight ?? bounds.height
@@ -124,36 +132,32 @@ final class AppAgentChatPanelView: UIView {
         guard layout != appliedLayout else { return }
         appliedLayout = layout
 
-        UIView.performWithoutAnimation {
-            dragHandleAreaView.frame = layout.dragHandleAreaFrame
-            grabberView.frame = layout.grabberFrame
-            contentAreaView.frame = layout.contentAreaFrame
+        dragHandleAreaView.frame = layout.dragHandleAreaFrame
+        grabberView.frame = layout.grabberFrame
+        contentAreaView.frame = layout.contentAreaFrame
 
-            // 【竖向收起实际应用点】这两个 frame 决定 compact 过渡区间内背景和裁切窗口如何缩到 inputBar 大小。
-            // 手动调试跟手尺寸、位置时，优先查看 AppAgentChatPanelContentLayout 产出的这两个 frame。
-            backgroundView.frame = layout.backgroundFrame
-            viewportView.frame = layout.viewportFrame
+        // 【竖向收起实际应用点】这两个 frame 决定 compact 过渡区间内背景和裁切窗口如何缩到 inputBar 大小。
+        // 手动调试跟手尺寸、位置时，优先查看 AppAgentChatPanelContentLayout 产出的这两个 frame。
+        backgroundView.frame = layout.backgroundFrame
+        viewportView.frame = layout.viewportFrame
 
-            // 导航栏和消息列表始终按完整 contentArea 布局；viewport 变化时只裁切，不重排内容。
-            navigationBar.frame = layout.navigationBarFrame
-            listView.frame = layout.messageListFrame
-            layoutDecisionCard()
-        }
+        // 导航栏和消息列表始终按完整 contentArea 布局；viewport 变化时只裁切，不重排内容。
+        navigationBar.frame = layout.navigationBarFrame
+        listView.frame = layout.messageListFrame
+        layoutDecisionCard()
 
-        // 【竖向收起形状应用点】背景和 viewport mask 共用同一条路径，只计算一次，保证边缘完全重合。
-        // 调整跟手圆角时修改 layout 的两个 cornerRadius；调整具体路径形状时修改 AppAgentChatPanelShapePath。
-        let shapePath = AppAgentChatPanelShapePath.make(
-            in: viewportView.bounds,
-            topCornerRadius: layout.topCornerRadius,
-            bottomCornerRadius: layout.bottomCornerRadius
-        ).cgPath
-        backgroundView.apply(shapePath: shapePath)
+        // 【竖向收起形状应用点】背景和 viewport 共用同一组圆角，保证边缘完全重合。
+        // A/B 过渡区间四角同半径；高于 A 点是「上圆角、下直角」。
+        applyCornerRadius(top: layout.topCornerRadius, bottom: layout.bottomCornerRadius, to: viewportView)
+        backgroundView.applyCornerRadius(top: layout.topCornerRadius, bottom: layout.bottomCornerRadius)
+    }
 
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        viewportMaskLayer.frame = viewportView.bounds
-        viewportMaskLayer.path = shapePath
-        CATransaction.commit()
+    /// 上下圆角只有「四角同半径」与「只上两角」两种形态，正好能用 `maskedCorners` 表达。
+    private func applyCornerRadius(top: CGFloat, bottom: CGFloat, to view: UIView) {
+        view.layer.cornerRadius = top
+        view.layer.maskedCorners = bottom > 0.5
+            ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+            : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
     }
 
     /// 决策卡片底部要额外让出的高度：面板 viewport 会延伸到 inputBar 之下，
@@ -227,7 +231,7 @@ final class AppAgentChatPanelView: UIView {
         contentAreaView.addSubview(backgroundView)
 
         viewportView.backgroundColor = .clear
-        viewportView.layer.mask = viewportMaskLayer
+        viewportView.clipsToBounds = true
         contentAreaView.addSubview(viewportView)
         viewportView.addSubview(listView)
         viewportView.addSubview(navigationBar)
@@ -244,7 +248,6 @@ final class AppAgentChatPanelView: UIView {
             self?.onNewSessionRequested?()
         }
 
-        viewportMaskLayer.fillColor = UIColor.black.cgColor
         applyAppearance()
     }
 
@@ -254,9 +257,12 @@ final class AppAgentChatPanelView: UIView {
     }
 }
 
-/// ChatPanel 内容区域的背景层，统一管理填充色、边缘形状和阴影。
-private final class AppAgentChatPanelBackgroundView: UIView {
-    private let fillLayer = CAShapeLayer()
+/// ChatPanel 内容区域的背景层，统一管理填充色、圆角和阴影。
+///
+/// 填充直接用 `layer.backgroundColor` + `cornerRadius`（不再用 CAShapeLayer 画路径），阴影也不设
+/// `shadowPath`：让 UIKit 从 layer 形状自己推。这样背景的形状变化和 frame 变化走同一条隐式动画，
+/// 不会出现「frame 在动、填充路径已经瞬跳到终态」导致的半截闪白。
+private final class AppAgentChatPanelBackgroundView: UIView, AppAgentRuntimeOwned {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -268,95 +274,26 @@ private final class AppAgentChatPanelBackgroundView: UIView {
         setup()
     }
 
-    func apply(shapePath: CGPath) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        fillLayer.frame = bounds
-        fillLayer.path = shapePath
-        layer.shadowPath = shapePath
-        CATransaction.commit()
+    func applyCornerRadius(top: CGFloat, bottom: CGFloat) {
+        layer.cornerRadius = top
+        layer.maskedCorners = bottom > 0.5
+            ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+            : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
     }
 
     func applyAppearance(for traitCollection: UITraitCollection) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        fillLayer.fillColor = AppAgentAppearance.inputBarBackground
+        backgroundColor = AppAgentAppearance.inputBarBackground
             .resolvedColor(with: traitCollection)
-            .cgColor
         layer.shadowColor = AppAgentAppearance.inputBarShadow
             .resolvedColor(with: traitCollection)
             .cgColor
         layer.shadowOpacity = AppAgentAppearance.inputBarShadowOpacity(for: traitCollection)
-        CATransaction.commit()
     }
 
     private func setup() {
-        backgroundColor = .clear
         clipsToBounds = false
         layer.shadowRadius = 12
         layer.shadowOffset = CGSize(width: 0, height: -4)
-        layer.addSublayer(fillLayer)
-    }
-}
-
-/// 生成上、下圆角可独立变化的面板路径，供背景层和 viewport mask 共用。
-private enum AppAgentChatPanelShapePath {
-    static func make(
-        in bounds: CGRect,
-        topCornerRadius: CGFloat,
-        bottomCornerRadius: CGFloat
-    ) -> UIBezierPath {
-        guard bounds.width > 0, bounds.height > 0 else { return UIBezierPath() }
-
-        let maximumRadius = min(bounds.width, bounds.height) / 2
-        let topRadius = AppAgentGeometry.clamp(topCornerRadius, 0, maximumRadius)
-        let bottomRadius = AppAgentGeometry.clamp(bottomCornerRadius, 0, maximumRadius)
-        let path = UIBezierPath()
-
-        // 从上边左侧开始，顺时针依次连接右上、右下、左下、左上四个圆角。
-        path.move(to: CGPoint(x: bounds.minX + topRadius, y: bounds.minY))
-        path.addLine(to: CGPoint(x: bounds.maxX - topRadius, y: bounds.minY))
-        if topRadius > 0 {
-            path.addArc(
-                withCenter: CGPoint(x: bounds.maxX - topRadius, y: bounds.minY + topRadius),
-                radius: topRadius,
-                startAngle: -.pi / 2,
-                endAngle: 0,
-                clockwise: true
-            )
-        }
-        path.addLine(to: CGPoint(x: bounds.maxX, y: bounds.maxY - bottomRadius))
-        if bottomRadius > 0 {
-            path.addArc(
-                withCenter: CGPoint(x: bounds.maxX - bottomRadius, y: bounds.maxY - bottomRadius),
-                radius: bottomRadius,
-                startAngle: 0,
-                endAngle: .pi / 2,
-                clockwise: true
-            )
-        }
-        path.addLine(to: CGPoint(x: bounds.minX + bottomRadius, y: bounds.maxY))
-        if bottomRadius > 0 {
-            path.addArc(
-                withCenter: CGPoint(x: bounds.minX + bottomRadius, y: bounds.maxY - bottomRadius),
-                radius: bottomRadius,
-                startAngle: .pi / 2,
-                endAngle: .pi,
-                clockwise: true
-            )
-        }
-        path.addLine(to: CGPoint(x: bounds.minX, y: bounds.minY + topRadius))
-        if topRadius > 0 {
-            path.addArc(
-                withCenter: CGPoint(x: bounds.minX + topRadius, y: bounds.minY + topRadius),
-                radius: topRadius,
-                startAngle: .pi,
-                endAngle: .pi * 1.5,
-                clockwise: true
-            )
-        }
-        path.close()
-        return path
     }
 }
 

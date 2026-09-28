@@ -5,23 +5,15 @@
 
 import Foundation
 
-/// Default context compressor using a three-phase algorithm:
+/// Default context compressor using transaction-aware message units.
 ///
-/// 1. **Prune tool results** — truncate old tool result content (keep first 200 chars).
-/// 2. **Protect head + tail** — preserve the first 2 messages and last N messages.
-/// 3. **Summarize middle** — replace the middle portion with a compact placeholder.
-///
-/// Token estimation uses a rough heuristic of ~4 UTF-8 bytes per token,
-/// matching hermes-agent's `_CHARS_PER_TOKEN = 4`.
+/// Tool calls and their immediately following results are kept together so a
+/// provider never receives a dangling tool transaction after compression.
 public struct SimpleContextCompressor: ContextCompressor, Sendable {
 
-    /// Characters per token estimate.
     private static let charsPerToken = 4
 
-    /// Number of leading messages to always preserve.
     private let headCount: Int
-
-    /// Maximum characters to keep in truncated tool results.
     private let toolResultMaxChars: Int
 
     public init(headCount: Int = 2, toolResultMaxChars: Int = 200) {
@@ -30,137 +22,242 @@ public struct SimpleContextCompressor: ContextCompressor, Sendable {
     }
 
     public func estimateTokens(messages: [AIAgentMessage]) -> Int {
-        var totalChars = 0
-        for message in messages {
-            for part in message.content {
-                switch part {
-                case .text(let text):
-                    totalChars += text.utf8.count
-                case .toolUse(let call):
-                    totalChars += call.name.utf8.count
-                    for (key, value) in call.arguments {
-                        totalChars += key.utf8.count + String(describing: value).utf8.count
-                    }
-                case .toolResult(let result):
-                    totalChars += result.content.utf8.count
-                }
-            }
+        let totalBytes = messages.reduce(into: 0) { total, message in
+            total += estimateBytes(message)
         }
-        return totalChars / Self.charsPerToken
+        return totalBytes / Self.charsPerToken
     }
 
-    public func compress(messages: [AIAgentMessage], targetTokens: Int) async -> [AIAgentMessage] {
-        guard !messages.isEmpty else { return messages }
+    public func compress(
+        messages: [AIAgentMessage],
+        targetTokens: Int
+    ) async -> [AIAgentMessage] {
+        guard !messages.isEmpty else {
+            return messages
+        }
 
-        // Phase 1: Prune old tool results
         let pruned = pruneToolResults(messages)
-
-        // Check if pruning was enough
         if estimateTokens(messages: pruned) <= targetTokens {
             return pruned
         }
 
-        // Phase 2 & 3: Protect head + tail, summarize middle
-        let head = min(headCount, pruned.count)
-
-        // Determine how many tail messages we can keep within budget
-        let headMessages = Array(pruned.prefix(head))
-        let headTokens = estimateTokens(messages: headMessages)
-        let remainingBudget = targetTokens - headTokens - 50 // 50 tokens for summary placeholder
-
-        var tailCount = 0
-        var tailTokens = 0
-        for msg in pruned.reversed() {
-            let msgTokens = estimateTokens(messages: [msg])
-            if tailTokens + msgTokens > remainingBudget {
-                break
-            }
-            tailTokens += msgTokens
-            tailCount += 1
-        }
-        tailCount = max(1, tailCount) // Always keep at least the last message
-
-        // If head + tail covers everything, no compression needed
-        if head + tailCount >= pruned.count {
+        let units = makeUnits(pruned)
+        guard !units.isEmpty else {
             return pruned
         }
 
-        let middleRange = head..<(pruned.count - tailCount)
-        let middleCount = middleRange.count
+        let headUnitCount = headUnits(units)
+        let head = Array(units.prefix(headUnitCount))
+        let headTokens = estimateTokens(messages: head.flatMap(\.messages))
+        let summaryBudget = 50
+        let remainingBudget = targetTokens - headTokens - summaryBudget
 
-        // Extract topics from middle messages for the summary
-        let topics = extractTopics(from: Array(pruned[middleRange]))
+        var tailUnitCount = 0
+        var tailTokens = 0
+        if remainingBudget > 0 {
+            for unit in units.dropFirst(headUnitCount).reversed() {
+                let unitTokens = estimateTokens(messages: unit.messages)
+                guard tailTokens + unitTokens <= remainingBudget else {
+                    break
+                }
+                tailTokens += unitTokens
+                tailUnitCount += 1
+            }
+        }
+        tailUnitCount = max(1, tailUnitCount)
 
-        let summaryText = """
-            [CONTEXT COMPACTED: \(middleCount) earlier messages were summarized.\
-            \(topics.isEmpty ? "" : " Key topics discussed: \(topics.joined(separator: ", ")).")\
-             Respond ONLY to the latest user message.]
-            """
-        let summaryMessage = AIAgentMessage(
+        let coveredUnitCount = headUnitCount + tailUnitCount
+        guard coveredUnitCount < units.count else {
+            return pruned
+        }
+
+        let middleStart = headUnitCount
+        let middleEnd = units.count - tailUnitCount
+        let middleUnits = Array(units[middleStart..<middleEnd])
+        let middleMessages = middleUnits.flatMap(\.messages)
+        let topics = extractTopics(from: middleMessages)
+        let summaryText = makeSummary(
+            messageCount: middleMessages.count,
+            topics: topics
+        )
+        let summary = AIAgentMessage(
             role: .assistant,
-            content: [.text(summaryText)]
+            content: [.text(summaryText)],
+            messageType: .assistant,
+            source: .agent,
+            displayPolicy: .hidden
         )
 
-        var result = Array(pruned.prefix(head))
-        result.append(summaryMessage)
-        result.append(contentsOf: pruned.suffix(tailCount))
-
+        var result = head.flatMap(\.messages)
+        result.append(summary)
+        result.append(
+            contentsOf: units
+                .suffix(tailUnitCount)
+                .flatMap(\.messages)
+        )
         return result
     }
 
-    // MARK: - Private
+    private struct MessageUnit: Sendable {
+        let messages: [AIAgentMessage]
+    }
 
-    /// Phase 1: Truncate tool result content in older messages.
-    private func pruneToolResults(_ messages: [AIAgentMessage]) -> [AIAgentMessage] {
-        // Only prune messages that are not in the last 4
-        let protectedTail = 4
-        guard messages.count > protectedTail else { return messages }
+    private func makeUnits(_ messages: [AIAgentMessage]) -> [MessageUnit] {
+        var units: [MessageUnit] = []
+        var index = 0
 
-        var result = [AIAgentMessage]()
-        for (index, message) in messages.enumerated() {
-            if index >= messages.count - protectedTail {
-                result.append(message)
+        while index < messages.count {
+            let message = messages[index]
+            if index + 1 < messages.count,
+               message.role == .assistant,
+               !message.toolCalls.isEmpty,
+               messages[index + 1].role == .user,
+               hasToolResult(messages[index + 1], matching: message.toolCalls) {
+                units.append(
+                    MessageUnit(
+                        messages: [
+                            message,
+                            messages[index + 1]
+                        ]
+                    )
+                )
+                index += 2
                 continue
             }
 
-            var newContent = [AIAgentMessage.Content]()
-            var modified = false
-            for part in message.content {
-                if case .toolResult(let toolResult) = part,
-                   toolResult.content.count > toolResultMaxChars {
-                    let truncated = String(toolResult.content.prefix(toolResultMaxChars)) + " [truncated]"
-                    newContent.append(.toolResult(AIAgentMessage.ToolCallResult(
-                        toolCallId: toolResult.toolCallId,
-                        content: truncated
-                    )))
-                    modified = true
-                } else {
-                    newContent.append(part)
-                }
-            }
-
-            if modified {
-                result.append(AIAgentMessage(
-                    id: message.id,
-                    role: message.role,
-                    content: newContent,
-                    createdAt: message.createdAt
-                ))
-            } else {
-                result.append(message)
-            }
+            units.append(MessageUnit(messages: [message]))
+            index += 1
         }
-        return result
+
+        return units
     }
 
-    /// Extract key topic words from messages for the summary placeholder.
+    private func headUnits(_ units: [MessageUnit]) -> Int {
+        guard headCount > 0 else {
+            return 0
+        }
+
+        var messageCount = 0
+        var unitCount = 0
+        for unit in units {
+            messageCount += unit.messages.count
+            unitCount += 1
+            if messageCount >= headCount {
+                break
+            }
+        }
+        return unitCount
+    }
+
+    private func hasToolResult(
+        _ message: AIAgentMessage,
+        matching calls: [AIAgentMessage.ToolCall]
+    ) -> Bool {
+        let callIDs = Set(calls.map(\.id))
+        let resultIDs: Set<String> = Set(
+            message.content.compactMap { part in
+                guard case .toolResult(let result) = part else {
+                    return nil
+                }
+                return result.toolCallId
+            }
+        )
+        return !callIDs.isEmpty && callIDs.isSubset(of: resultIDs)
+    }
+
+    private func pruneToolResults(
+        _ messages: [AIAgentMessage]
+    ) -> [AIAgentMessage] {
+        let protectedTail = 4
+        guard messages.count > protectedTail else {
+            return messages
+        }
+
+        return messages.enumerated().map { index, message in
+            guard index < messages.count - protectedTail else {
+                return message
+            }
+
+            var modified = false
+            let content = message.content.map { part in
+                guard case .toolResult(let result) = part,
+                      result.content.count > toolResultMaxChars else {
+                    return part
+                }
+
+                modified = true
+                let truncated = String(result.content.prefix(toolResultMaxChars))
+                    + " [truncated]"
+                return .toolResult(
+                    AIAgentMessage.ToolCallResult(
+                        toolCallId: result.toolCallId,
+                        content: truncated,
+                        images: result.images,
+                        isError: result.isError
+                    )
+                )
+            }
+
+            guard modified else {
+                return message
+            }
+
+            return AIAgentMessage(
+                id: message.id,
+                role: message.role,
+                content: content,
+                createdAt: message.createdAt,
+                turnID: message.turnID,
+                messageType: message.messageType,
+                source: message.source,
+                displayPolicy: message.displayPolicy,
+                trigger: message.trigger,
+                eventId: message.eventId,
+                stateCursor: message.stateCursor,
+                causedByToolCallId: message.causedByToolCallId
+            )
+        }
+    }
+
+    private func estimateBytes(_ message: AIAgentMessage) -> Int {
+        message.content.reduce(into: 0) { total, part in
+            switch part {
+            case .text(let text):
+                total += text.utf8.count
+            case .toolUse(let call):
+                total += call.name.utf8.count
+                for (key, value) in call.arguments {
+                    total += key.utf8.count
+                    total += String(describing: value).utf8.count
+                }
+            case .toolResult(let result):
+                total += result.content.utf8.count
+                total += result.images.reduce(into: 0) { imageTotal, image in
+                    imageTotal += image.base64.utf8.count
+                    imageTotal += image.mediaType.utf8.count
+                }
+            case .hostContext(let payload):
+                total += payload.modelText.utf8.count
+            }
+        }
+    }
+
+    private func makeSummary(messageCount: Int, topics: [String]) -> String {
+        let topicText = topics.isEmpty
+            ? ""
+            : " Key topics discussed: \(topics.joined(separator: ", "))."
+        return """
+            [CONTEXT COMPACTED: \(messageCount) earlier messages were summarized.\
+            \(topicText)\
+             Respond ONLY to the latest user message.]
+            """
+    }
+
     private func extractTopics(from messages: [AIAgentMessage]) -> [String] {
         var topics = Set<String>()
         for message in messages {
-            for part in message.content {
-                if case .toolUse(let call) = part {
-                    topics.insert(call.name)
-                }
+            for call in message.toolCalls {
+                topics.insert(call.name)
             }
         }
         return Array(topics.sorted().prefix(5))

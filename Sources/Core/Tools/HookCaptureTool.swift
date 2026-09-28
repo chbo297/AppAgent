@@ -3,8 +3,9 @@
 //  AppAgent — 宿主能力层
 //
 //  app agent 的「JS↔端消息捕获」诊断工具（app_hook_capture）。热修复排查时：在宿主
-//  四个消息边界（talos_in/out、shell_in/out）按 channel 开启 dormant tap，把命中的
-//  {方向, API, 入参, 结果} 落到本地沙盒 JSONL，再由本工具读回分析。捕获默认全关；本工具
+//  消息边界（talos_in/out、shell_in/out）与 web 侧输出（web_console、web_nav）按 channel
+//  开启 dormant tap，把命中的 {方向, API, 入参, 结果, status} 落到本地沙盒 JSONL，再由本工具
+//  读回分析。捕获默认全关；本工具
 //  通过共享的 NSUserDefaults 契约拨动开关，同进程的宿主写入方即时生效。自包含，无需 provider。
 //
 
@@ -16,7 +17,11 @@ public struct HookCaptureTool: ToolProtocol {
         Capture JS↔native bridge messages in the host app for hot-fix diagnosis, when a
         web/Talos page calls a native API but the app does not respond correctly. Channels:
         'talos_in' (page→native), 'talos_out' (native→page), 'shell_in' (Cordova/bdapi→native),
-        'shell_out' (native→page). Capture is OFF by default; you toggle it per channel.
+        'shell_out' (native→page), 'web_console' (page console + JS errors), 'web_nav' (page
+        load/navigation failures). Records carry a 'status' field: negative values mean the host
+        rejected or failed the call (e.g. -403 blocked by allow-list, -404 no native plugin for
+        that API, -500 handler refused, -501 callback eval failed) — check it before concluding
+        "the app never received the call". Capture is OFF by default; you toggle it per channel.
         Choose an 'op':
         - 'status': show which channels are on and list capture files.
         - 'start': turn on 'channel'; optional filters 'apiAllow'/'apiDeny' (comma-separated),
@@ -32,7 +37,7 @@ public struct HookCaptureTool: ToolProtocol {
             "op": .string(description: "Operation.",
                           enumValues: ["status", "start", "stop", "stop_all", "read", "clear"]),
             "channel": .string(description: "Channel name.",
-                               enumValues: ["talos_in", "talos_out", "shell_in", "shell_out"]),
+                               enumValues: HookCaptureStore.channels),
             "apiAllow": .string(description: "start: comma-separated API allow patterns (empty = all)."),
             "apiDeny": .string(description: "start: comma-separated API deny patterns."),
             "match": .string(description: "start: pattern match mode.",

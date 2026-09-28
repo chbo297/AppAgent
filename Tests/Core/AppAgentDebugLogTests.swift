@@ -69,6 +69,46 @@ final class AppAgentDebugLogTests: XCTestCase {
         log.record(.info, message: "dropped")
         XCTAssertEqual(log.snapshot().map { $0.message }, ["kept"])
     }
+
+    // MARK: - 落盘日志 + 诊断包
+
+    /// `install()` 之后 `Logger` 的输出要能在日志文件里找到；重复 install 不重复挂 handler。
+    func testRunLogCapturesLoggerOutput() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runlog-test-\(UUID().uuidString)", isDirectory: true)
+        let runLog = AppAgentRunLog(directory: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        runLog.append("[AppAgent] [INFO] [Test] hello disk")
+        runLog.flush()
+
+        let text = runLog.exportText()
+        XCTAssertTrue(text.contains("hello disk"), text)
+        XCTAssertFalse(runLog.files().isEmpty)
+    }
+
+    /// 诊断包必须是个真 zip，且概要里带上模型调用记录的条数。
+    func testDiagnosticsBundleIsAZipWithSummary() throws {
+        let log = AppAgentDebugLog(capacity: 10)
+        log.record(.failure, message: "boom", reason: "network")
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runlog-bundle-\(UUID().uuidString)", isDirectory: true)
+        let runLog = AppAgentRunLog(directory: dir)
+        runLog.append("[AppAgent] [ERROR] [Test] boom")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let bundle = try AppAgentDiagnostics.exportSync(debugLog: log, runLog: runLog)
+        defer { try? FileManager.default.removeItem(at: bundle.url) }
+
+        XCTAssertEqual(bundle.url.pathExtension, "zip")
+        XCTAssertGreaterThan(bundle.byteCount, 0)
+        // zip 的魔数是 "PK"。
+        let head = try Data(contentsOf: bundle.url).prefix(2)
+        XCTAssertEqual(Array(head), [0x50, 0x4B])
+        XCTAssertTrue(bundle.manifest.contains { $0.contains("模型调用记录 1 条") }, "\(bundle.manifest)")
+        XCTAssertTrue(bundle.manifest.contains { $0.hasPrefix("run-logs/ — 运行日志 1") }, "\(bundle.manifest)")
+    }
 }
 
 private final class EventCollector: @unchecked Sendable {

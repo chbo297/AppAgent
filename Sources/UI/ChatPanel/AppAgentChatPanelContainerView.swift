@@ -36,7 +36,10 @@ struct AppAgentChatPanelContainerLayout: Equatable {
               inputBarExpandedFrame.width > 0,
               inputBarExpandedFrame.height > 0 else {
             containerFrame = .zero
-            dragScrollFrame = .zero
+            // 容器是画布 frame 的唯一 writer，所以「inputBar 几何还没就绪」这一小段也得由它
+            // 给出画布尺寸 —— BODragScroll 需要一个尺寸正确的画布来建立自身几何。此时
+            // containerFrame 为零、panelAlpha 为 0，面板并不可见；bounds 本身无效时自然退化为零。
+            dragScrollFrame = CGRect(origin: .zero, size: bounds.size)
             panelAlpha = 0
             return
         }
@@ -57,6 +60,12 @@ struct AppAgentChatPanelContainerLayout: Equatable {
 
         // 画布保持控制器原始尺寸，横向根据展开态 container 的原点反向偏移；纵向保持在容器本地原点，
         // 因而容器被键盘整体顶起时会带着完整 ChatPanel 同步上移。
+        //
+        // **这里是 `dragScrollView.frame` 的唯一来源。** 画布是 `BODragScrollView`（UIScrollView），
+        // 给它写 frame 会顺带重算并夹取 `contentOffset`，而展示高度正由外层 offset 承载。曾经
+        // coordinator 也写一次（`origin: .zero`），两个目标值只在「iPhone 竖屏 + 满宽 inputBar」
+        // 时恰好相等；横屏（左安全区）/ iPad 居中 / 用户拖窄过 inputBar 时相差 47~200pt，于是
+        // 容器侧判等永远失败 —— 每次布局都停掉在飞的动画并多夹一次 offset。别再加第二个 writer。
         dragScrollFrame = CGRect(
             x: bounds.minX - expandedContainerFrame.minX,
             y: bounds.minY - expandedContainerFrame.minY,
@@ -109,6 +118,15 @@ final class AppAgentChatPanelContainerView: UIView {
     private var layoutAnimator: UIViewPropertyAnimator?
     private var alphaAnimator: UIViewPropertyAnimator?
 
+    /// model alpha 在动画开始时就变成终值；只有屏幕上确实消失才算结束连续阅读。
+    var isVisuallyHidden: Bool {
+        if let presentation = layer.presentation() {
+            return presentation.opacity <= 0.01
+        }
+        // 尚未提交首帧时 presentation 可能为空，不能把正在淡出的目标值当成已隐藏。
+        return alphaAnimator == nil && alpha <= 0.01
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         setup()
@@ -158,7 +176,12 @@ final class AppAgentChatPanelContainerView: UIView {
             let applyFrames = { [weak self] in
                 guard let self else { return }
                 self.frame = layout.containerFrame
-                self.contentView?.frame = contentTargetFrame
+                // **必须判等再写**：contentView 是 BODragScrollView（UIScrollView）。给 scrollView 写
+                // frame 会顺带重算并夹取 `contentOffset`，而这次夹取是一次直接的 model 写入，会把刚
+                // 起飞的 `bounds.origin` 隐式动画抹掉。实测踩过：键盘抬起时 coordinator 先让展示高度
+                // （= 外层 offset）进入动画，紧接这里写一次**值没变**的 frame，offset 动画当场消失、
+                // 瞬跳到终态，于是「面板先变矮、容器再慢慢上移」。
+                self.contentView?.bo_setFrame(contentTargetFrame)
             }
             if let animator = animation.makeAnimator(animations: applyFrames) {
                 startLayoutAnimation(animator)

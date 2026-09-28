@@ -139,7 +139,7 @@ final class AppAgentVoiceBottomPanelView: UIView {
     }
 }
 
-private final class AppAgentVoiceBottomPanelSelectionBackgroundView: UIView {
+private final class AppAgentVoiceBottomPanelSelectionBackgroundView: UIView, AppAgentRuntimeOwned {
     private let startColor: UIColor
     private let endColor: UIColor
     private var cachedPanelBounds: CGRect = .null

@@ -24,7 +24,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         // Headless capability self-check for simulator/CI: launch with
         // `-run-selfcheck` to run every tool once, write the report to
-        // Documents/selfcheck-report.txt and emit it to the log. It runs *after*
+        // Documents/AppAgent/diagnostics/selfcheck-report.txt and emit it to the log. It runs *after*
         // the overlay is mounted (see the end of the setup task below) so the
         // view-hierarchy dump covers the SDK's own overlay window too, and the
         // "no API key" alert is suppressed so it does not pollute that dump.
@@ -58,7 +58,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
 
             let agentProfile = AIAgentProfile(
-                identity: "You are a helpful AI assistant.",
                 additionalPromptBuilders: [
                     PromptBuilder("Be concise and helpful."),
                     PromptBuilder("If unsure, say so honestly.")
@@ -114,7 +113,17 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 overlay.show()
                 // show() 之后视图才加载完，列表内容要再灌一次才拿得到。
                 DispatchQueue.main.async {
-                    overlay.viewController.reloadFromSession(forceScrollToBottom: true)
+                    overlay.viewController.reloadFromSession(forceScrollToBottom: true, reason: .browsing)
+                }
+                // 可叠加 -focus-sample-activity / -expand-sample-activity 检查过程区。
+                // 只做程序化定位，不替代真实触摸的命中验证。
+                let expandsActivity = ProcessInfo.processInfo.arguments.contains("-expand-sample-activity")
+                if expandsActivity || ProcessInfo.processInfo.arguments.contains("-focus-sample-activity") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        SampleConversation.focusActivity(
+                            in: overlay.viewController, expanded: expandsActivity
+                        )
+                    }
                 }
             }
 

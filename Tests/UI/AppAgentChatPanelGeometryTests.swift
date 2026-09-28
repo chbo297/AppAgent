@@ -1,5 +1,6 @@
 #if canImport(UIKit)
 import XCTest
+import BOUIKit
 @testable import AppAgent
 
 /// ChatPanel 业务几何与 BODragScroll 接线测试；运动物理由 BODragScroll 自身测试覆盖。
@@ -35,7 +36,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     func testRegularGeometryProducesExpectedPanelAndDetents() throws {
         let geometry = try XCTUnwrap(makeGeometry())
 
-        XCTAssertEqual(geometry.panelSize.width, 369 + 24, accuracy: 0.5)
+        XCTAssertEqual(geometry.panelSize.width, bounds.width, accuracy: 0.5)
         XCTAssertEqual(
             geometry.maximumDisplayHeight,
             bounds.height - safeAreaInsets.top + AppAgentChatPanelGeometry.dragHandleAreaHeight,
@@ -53,7 +54,14 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             34 + AppAgentInputBar.barHeight + AppAgentChatPanelGeometry.dragHandleAreaHeight,
             accuracy: 0.5
         )
-        XCTAssertEqual(geometry.halfHeight, geometry.maximumDisplayHeight * 0.5, accuracy: 0.5)
+        XCTAssertEqual(
+            geometry.halfHeight,
+            geometry.maximumDisplayHeight * 0.5
+                + AppAgentChatPanelGeometry.dragHandleAreaHeight
+                + AppAgentChatPanelNavigationBar.height,
+            accuracy: 0.5
+        )
+        XCTAssertEqual(geometry.halfHeight, 486.5, accuracy: 0.001)
         XCTAssertEqual(
             bounds.height - geometry.peekHeight + AppAgentChatPanelGeometry.dragHandleAreaHeight,
             inputBarExpandedFrame.minY,
@@ -69,8 +77,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         let geometry = try XCTUnwrap(
             AppAgentChatPanelGeometry(
                 bounds: bounds,
-                safeAreaInsets: safeAreaInsets,
-                inputBarExpandedFrame: CGRect(x: 0, y: 0, width: 390, height: 56)
+                safeAreaInsets: safeAreaInsets
             )
         )
 
@@ -81,8 +88,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         let geometry = try XCTUnwrap(
             AppAgentChatPanelGeometry(
                 bounds: CGRect(x: 0, y: 0, width: 320, height: 100),
-                safeAreaInsets: UIEdgeInsets(top: 20, left: 0, bottom: 34, right: 0),
-                inputBarExpandedFrame: CGRect(x: 12, y: 0, width: 296, height: 56)
+                safeAreaInsets: UIEdgeInsets(top: 20, left: 0, bottom: 34, right: 0)
             )
         )
 
@@ -98,6 +104,36 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             geometry.nearestDetent(to: 100, preferredDetent: .full),
             .full
         )
+    }
+
+    func testHalfHeightAddsTopAreasToPeekLimitedBaseHeight() throws {
+        let geometry = try XCTUnwrap(
+            AppAgentChatPanelGeometry(
+                bounds: CGRect(x: 0, y: 0, width: 320, height: 200),
+                safeAreaInsets: UIEdgeInsets(top: 20, left: 0, bottom: 34, right: 0)
+            )
+        )
+
+        // 原 half 被 peek 托到 118，增加的是手柄区 28 + 标题栏 48。
+        XCTAssertEqual(geometry.peekHeight, 118, accuracy: 0.001)
+        XCTAssertEqual(geometry.halfHeight, 194, accuracy: 0.001)
+        XCTAssertEqual(geometry.maximumDisplayHeight, 200, accuracy: 0.001)
+        XCTAssertEqual(geometry.detentHeights, [118, 194, 200])
+    }
+
+    func testHalfHeightWithTopAreasClampsToFullAndDeduplicates() throws {
+        let geometry = try XCTUnwrap(
+            AppAgentChatPanelGeometry(
+                bounds: CGRect(x: 0, y: 0, width: 320, height: 140),
+                safeAreaInsets: UIEdgeInsets(top: 20, left: 0, bottom: 0, right: 0)
+            )
+        )
+
+        XCTAssertEqual(geometry.peekHeight, 84, accuracy: 0.001)
+        XCTAssertEqual(geometry.halfHeight, 140, accuracy: 0.001)
+        XCTAssertEqual(geometry.maximumDisplayHeight, 140, accuracy: 0.001)
+        XCTAssertEqual(geometry.detentHeights, [84, 140])
+        XCTAssertEqual(geometry.nearestDetent(to: 140, preferredDetent: .half), .half)
     }
 
     func testNearestDetentAndClampingUseCurrentGeometry() throws {
@@ -118,9 +154,8 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertTrue(
             listView.updateVisibleArea(visibleHeight: 350, bottomInset: 100)
         )
-        // 视口与展示区等高；被裁掉的面板高度不再折进 inset，inset 只保留 inputBar/键盘占位。
+        // 视口与展示区等高；被裁掉的面板高度不再折进 inset。
         XCTAssertEqual(listView.participantScrollView.bounds.height, 350, accuracy: 0.5)
-        XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 100, accuracy: 0.5)
         XCTAssertFalse(
             listView.updateVisibleArea(visibleHeight: 350, bottomInset: 100)
         )
@@ -129,7 +164,160 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             listView.updateVisibleArea(visibleHeight: 700, bottomInset: 100)
         )
         XCTAssertEqual(listView.participantScrollView.bounds.height, 700, accuracy: 0.5)
-        XCTAssertEqual(listView.participantScrollView.contentInset.bottom, 100, accuracy: 0.5)
+    }
+
+    func testFirstLoadAlignsContentBottomEvenWithEstimatedRowHeights() throws {
+        let listView = AppAgentChatMessageListView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 700)
+        )
+        // 长短不一的消息：自动行高下首屏 contentSize 只是按 estimatedRowHeight 估的，
+        // 只对齐一趟会停在离底几百 pt 的位置（启动时看到的就是这个）。
+        listView.setMessages(
+            // 尾行用用户消息，验证无 assistant 占位空白时仍对齐真实底部。
+            (0..<41).map { index in
+                ChatMessage(
+                    role: index.isMultiple(of: 2) ? .user : .assistant,
+                    text: String(repeating: "内容 \(index) ", count: index % 7 + 1)
+                )
+            }
+        )
+        listView.updateVisibleArea(visibleHeight: 480, bottomInset: 90)
+        listView.layoutIfNeeded()
+
+        let tableView = listView.participantScrollView
+        tableView.layoutIfNeeded()
+        try XCTSkipIf(
+            tableView.contentSize.height < 1_200,
+            "行高未展开，本用例依赖 tableView 已算出内容高度"
+        )
+        XCTAssertEqual(
+            tableView.contentOffset.y,
+            tableView.bo_maximumContentOffsetY,
+            accuracy: 0.5,
+            "首屏必须对齐到内容底部"
+        )
+    }
+
+    func testContentHeightEqualsSumOfSelfMeasuredRowHeights() throws {
+        let listView = AppAgentChatMessageListView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 700)
+        )
+        let messages = (0..<25).map { index in
+            ChatMessage(
+                role: index.isMultiple(of: 2) ? .user : .assistant,
+                text: String(repeating: "长度不一的内容 \(index) ", count: index % 5 + 1)
+            )
+        }
+        listView.setMessages(messages)
+        listView.updateVisibleArea(visibleHeight: 480, bottomInset: 90)
+        listView.layoutIfNeeded()
+
+        let tableView = listView.participantScrollView
+        tableView.layoutIfNeeded()
+        try XCTSkipIf(
+            tableView.contentSize.height < 400,
+            "行高未展开，本用例依赖 tableView 已算出内容高度"
+        )
+
+        // 关掉估算之后 contentSize 必须等于逐行精确高度之和；有估算参与就会对不上。
+        let table = try XCTUnwrap(tableView as? UITableView)
+        let delegate = try XCTUnwrap(table.delegate)
+        let summedHeight = (0..<messages.count).reduce(into: CGFloat(0)) { total, row in
+            total += delegate.tableView?(table, heightForRowAt: IndexPath(row: row, section: 0)) ?? 0
+        }
+        XCTAssertEqual(table.contentSize.height, summedHeight, accuracy: 0.5)
+    }
+
+    func testLatestReplyStartsAt400GrowsBy70AndKeepsHeightWhenDone() throws {
+        let listView = AppAgentChatMessageListView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 700)
+        )
+        let step = AppAgentChatMessageListView.latestReplyHeightStep
+        var streaming = ChatMessage(role: .assistant, text: "开始", status: .streaming)
+        installLegacy400LatestReplyFixture(on: listView)
+        listView.setMessages([ChatMessage(role: .user, text: "问题"), streaming])
+        listView.updateVisibleArea(visibleHeight: 480, bottomInset: 90)
+        listView.layoutIfNeeded()
+
+        let table = try XCTUnwrap(listView.participantScrollView as? UITableView)
+        let delegate = try XCTUnwrap(table.delegate)
+        let tailIndexPath = IndexPath(row: 1, section: 0)
+        func tailHeight() -> CGFloat {
+            delegate.tableView?(table, heightForRowAt: tailIndexPath) ?? 0
+        }
+
+        // 基准是 400，不是向上取整到 70 的倍数（420）。
+        let shortHeight = tailHeight()
+        XCTAssertEqual(shortHeight, 400)
+
+        // 同一个台阶里继续吐字：行高不变（宿主据此跳过 reloadRows）。
+        streaming.text = "开始，再多两个字"
+        listView.updateMessage(text: streaming.text, status: .streaming, messageID: listView.messages[1].id)
+        XCTAssertEqual(tailHeight(), shortHeight, accuracy: 0.5)
+
+        // 文本长到跨过台阶：行高抬一格以上，且仍是台阶整数倍。
+        let longText = String(repeating: "很长的流式内容，用来把回复撑过一个台阶。\n\n", count: 30)
+        listView.updateMessage(text: longText, status: .streaming, messageID: listView.messages[1].id)
+        let grownHeight = tailHeight()
+        XCTAssertGreaterThan(grownHeight, shortHeight)
+        XCTAssertEqual((grownHeight - 400).truncatingRemainder(dividingBy: step), 0, accuracy: 0.5)
+        let precise = ChatMessageHeightCache().height(for: listView.messages[1], width: table.bounds.width)
+        XCTAssertGreaterThanOrEqual(grownHeight, precise)
+        XCTAssertLessThan(grownHeight - precise, step)
+
+        // 成功、失败及内容缩短均不能让最新回复缩高。
+        listView.updateMessage(text: longText, status: .complete, messageID: listView.messages[1].id)
+        XCTAssertEqual(tailHeight(), grownHeight)
+        listView.updateMessage(text: "失败", status: .error, messageID: listView.messages[1].id)
+        XCTAssertEqual(tailHeight(), grownHeight)
+        listView.append(ChatMessage(role: .user, text: "下一问"), followLatest: false)
+        XCTAssertEqual(tailHeight(), ChatMessageHeightCache().height(
+            for: listView.messages[1], width: table.bounds.width
+        ))
+        XCTAssertLessThan(tailHeight(), 400)
+        listView.append(ChatMessage(role: .assistant, text: "", status: .streaming), followLatest: false)
+        XCTAssertEqual(delegate.tableView?(table, heightForRowAt: IndexPath(row: 3, section: 0)), 400)
+    }
+
+    func testStreamingActivityUsesSameHeightStepsAndKeepsVisibleCellWithinStep() throws {
+        let list = AppAgentChatMessageListView(frame: CGRect(x: 0, y: 0, width: 320, height: 700))
+        var timeline = AppAgentActivityTimeline()
+        timeline.setStage(.streaming)
+        timeline.appendThinking("分析")
+        let message = ChatMessage(role: .assistant, text: "", status: .streaming,
+                                  activity: timeline, isActivityExpanded: true)
+        installLegacy400LatestReplyFixture(on: list)
+        list.setMessages([message])
+        list.layoutIfNeeded()
+        let table = try XCTUnwrap(list.participantScrollView as? UITableView)
+        table.layoutIfNeeded()
+        let path = IndexPath(row: 0, section: 0)
+        let delegate = try XCTUnwrap(table.delegate)
+        func height() -> CGFloat { delegate.tableView?(table, heightForRowAt: path) ?? 0 }
+        let initialHeight = height()
+        let cell = table.cellForRow(at: path)
+        let size = table.contentSize
+        let offset = table.contentOffset
+        timeline.appendThinking("中")
+        list.updateActivity(timeline, messageID: message.id)
+        XCTAssertEqual(height(), initialHeight)
+        XCTAssertEqual(table.contentSize, size)
+        XCTAssertEqual(table.contentOffset, offset)
+        if let cell {
+            XCTAssertTrue(table.cellForRow(at: path) === cell, "同台阶只重配原 cell，不 reloadRows")
+        }
+
+        timeline.appendThinking(String(repeating: "\n继续分析新的细节", count: 15))
+        list.updateActivity(timeline, messageID: message.id)
+        let grown = height()
+        XCTAssertEqual(initialHeight, 400)
+        XCTAssertEqual(grown, initialHeight, "过程区超高后内部滚动，不撑高整行")
+        timeline.finish()
+        list.updateActivity(timeline, expanded: false, messageID: message.id)
+        list.updateMessage(text: "处理完成", status: .complete, messageID: message.id)
+        let precise = ChatMessageHeightCache().height(for: list.messages[0], width: table.bounds.width)
+        XCTAssertEqual(height(), grown)
+        XCTAssertGreaterThan(height(), precise)
     }
 
     func testViewportHeightChangeNeverRewritesContentOffset() throws {
@@ -153,7 +341,6 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         listView.updateVisibleArea(visibleHeight: 500, bottomInset: 90)
 
         XCTAssertEqual(tableView.bounds.height, 500, accuracy: 0.5)
-        XCTAssertEqual(tableView.contentInset.bottom, 90, accuracy: 0.5)
         XCTAssertEqual(tableView.contentOffset.y, 300, accuracy: 0.5)
 
         // 再变一次高度同样一个字节都不写：组合轴自己已经把面板位移折进内部 offset。
@@ -163,12 +350,40 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(tableView.contentOffset.y, 300, accuracy: 0.5)
     }
 
+    func testKeyboardLiftDoesNotChangePanelGeometry() throws {
+        let coordinator = AppAgentChatPanelCoordinator()
+        coordinator.updateLayout(
+            bounds: bounds,
+            safeAreaInsets: safeAreaInsets
+        )
+        coordinator.move(to: .full, animated: false)
+        let restingGeometry = try XCTUnwrap(makeGeometry())
+        let restingDisplayHeight = coordinator.dragScrollView.displayHeight
+
+        // 键盘顶起：宿主只把整个容器上移（inputBar 展开态跟着上移），面板几何与展示高度都不参与。
+        let liftedInputBarFrame = inputBarExpandedFrame.offsetBy(dx: 0, dy: -320)
+        coordinator.updateLayout(
+            bounds: bounds,
+            safeAreaInsets: safeAreaInsets
+        )
+
+        XCTAssertEqual(
+            coordinator.panelView.bounds.height,
+            restingGeometry.panelSize.height,
+            accuracy: 0.5
+        )
+        XCTAssertEqual(
+            coordinator.dragScrollView.displayHeight,
+            restingDisplayHeight,
+            accuracy: 0.5
+        )
+    }
+
     func testCoordinatorInstallsFixedPanelAndStartsAtHalfDetent() throws {
         let coordinator = AppAgentChatPanelCoordinator()
         coordinator.updateLayout(
             bounds: bounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame
+            safeAreaInsets: safeAreaInsets
         )
         let geometry = try XCTUnwrap(makeGeometry())
 
@@ -189,11 +404,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(coordinator.panelView.bounds.size.width, geometry.panelSize.width, accuracy: 0.5)
         XCTAssertEqual(coordinator.panelView.bounds.size.height, geometry.panelSize.height, accuracy: 0.5)
         XCTAssertEqual(coordinator.dragScrollView.displayHeight, geometry.halfHeight, accuracy: 0.5)
-        XCTAssertEqual(
-            coordinator.panelView.listView.participantScrollView.contentInset.bottom,
-            geometry.listBottomInset,
-            accuracy: 0.5
-        )
+        XCTAssertEqual(coordinator.dragScrollView.displayHeight, 486.5, accuracy: 0.5)
         // 底部 inset 固定等于展开态 inputBar 白色背景顶部到屏幕底部的高度。
         XCTAssertEqual(
             geometry.listBottomInset,
@@ -201,6 +412,12 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             accuracy: 0.5
         )
         // 列表视口高度 = 当前展示高度减去拖拽手柄区与导航栏。
+        // 新 half 补足两块顶部区域后，列表视口达到原半屏高度 410.5。
+        XCTAssertEqual(
+            coordinator.panelView.listView.participantScrollView.bounds.height,
+            410.5,
+            accuracy: 0.5
+        )
         XCTAssertEqual(
             coordinator.panelView.listView.participantScrollView.bounds.height,
             geometry.halfHeight
@@ -214,8 +431,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         let coordinator = AppAgentChatPanelCoordinator()
         coordinator.updateLayout(
             bounds: bounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame
+            safeAreaInsets: safeAreaInsets
         )
         let geometry = try XCTUnwrap(makeGeometry())
         let halfDetentBottomInset = coordinator.panelView.listView.participantScrollView.contentInset.bottom
@@ -245,8 +461,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         let coordinator = AppAgentChatPanelCoordinator()
         coordinator.updateLayout(
             bounds: bounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame
+            safeAreaInsets: safeAreaInsets
         )
         let geometry = try XCTUnwrap(makeGeometry())
         // iOS 下挂到 window 可让 tableView 完成正常布局；Catalyst 的 package test 尚未创建
@@ -259,8 +474,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         testWindow = window
 #endif
         defer { testWindow?.isHidden = true }
-        let fixedBottomInset = coordinator.panelView.listView.participantScrollView
-            .contentInset.bottom
+        let fixedBottomInset = geometry.listBottomInset
         let fixedTopAreaHeight = AppAgentChatPanelGeometry.dragHandleAreaHeight
             + AppAgentChatPanelNavigationBar.height
 
@@ -270,14 +484,12 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         let updatedGeometry = try XCTUnwrap(
             AppAgentChatPanelGeometry(
                 bounds: updatedBounds,
-                safeAreaInsets: safeAreaInsets,
-                inputBarExpandedFrame: updatedInputBarFrame
+                safeAreaInsets: safeAreaInsets
             )
         )
         coordinator.updateLayout(
             bounds: updatedBounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: updatedInputBarFrame
+            safeAreaInsets: safeAreaInsets
         )
         let expectedVisibleHeight = max(
             coordinator.dragScrollView.displayHeight,
@@ -291,11 +503,6 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         )
         // 安全区与 bar 高度没变，底部 inset 也就不变：它不参与面板/布局变化。
         XCTAssertEqual(updatedGeometry.listBottomInset, fixedBottomInset, accuracy: 0.5)
-        XCTAssertEqual(
-            coordinator.panelView.listView.participantScrollView.contentInset.bottom,
-            fixedBottomInset,
-            accuracy: 0.5
-        )
 
         coordinator.dragScrollView.scrollViewDidEndDragging(
             coordinator.dragScrollView,
@@ -310,11 +517,6 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             expectedVisibleHeight,
             accuracy: 0.5
         )
-        XCTAssertEqual(
-            coordinator.panelView.listView.participantScrollView.contentInset.bottom,
-            fixedBottomInset,
-            accuracy: 0.5
-        )
     }
 
     func testCoordinatorPreservesMoveRequestedBeforeFirstLayout() throws {
@@ -322,8 +524,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         coordinator.move(to: .full, animated: false)
         coordinator.updateLayout(
             bounds: bounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame
+            safeAreaInsets: safeAreaInsets
         )
         let geometry = try XCTUnwrap(makeGeometry())
 
@@ -338,8 +539,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         let coordinator = AppAgentChatPanelCoordinator()
         coordinator.updateLayout(
             bounds: bounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame
+            safeAreaInsets: safeAreaInsets
         )
         let initialGeometry = try XCTUnwrap(makeGeometry())
         let liveHeight = initialGeometry.halfHeight + 37
@@ -351,14 +551,12 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         let updatedGeometry = try XCTUnwrap(
             AppAgentChatPanelGeometry(
                 bounds: updatedBounds,
-                safeAreaInsets: safeAreaInsets,
-                inputBarExpandedFrame: updatedInputBarFrame
+                safeAreaInsets: safeAreaInsets
             )
         )
         coordinator.updateLayout(
             bounds: updatedBounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: updatedInputBarFrame
+            safeAreaInsets: safeAreaInsets
         )
 
         XCTAssertEqual(
@@ -386,11 +584,73 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.containerFrame, bounds)
         XCTAssertEqual(layout.dragScrollFrame, bounds)
         XCTAssertEqual(
-            inputBarExpandedFrame.width + AppAgentChatPanelGeometry.horizontalOutset * 2,
+            inputBarExpandedFrame.width + AppAgentChatPanelContainerLayout.horizontalOutset * 2,
             layout.containerFrame.width,
             accuracy: 0.5
         )
         XCTAssertEqual(layout.panelAlpha, 1, accuracy: 0.001)
+    }
+
+    /// 画布 frame 的 writer 只能有一个：容器。
+    ///
+    /// coordinator 曾经也写一次（`origin: .zero`），只在「满宽 inputBar」时与容器目标值恰好相等；
+    /// 横屏（左安全区）/ iPad 居中 / 拖窄过 inputBar 时两者相差 47~200pt，于是容器侧判等永远失败
+    /// —— 每次布局都停掉在飞的动画，并给 scrollView 多夹一次承载展示高度的 contentOffset。
+    func testCoordinatorDoesNotWriteDragScrollFrame() {
+        let coordinator = AppAgentChatPanelCoordinator()
+        let sentinel = CGRect(x: -123, y: -45, width: 320, height: 640)
+        coordinator.dragScrollView.frame = sentinel
+
+        coordinator.updateLayout(bounds: bounds, safeAreaInsets: safeAreaInsets)
+
+        XCTAssertEqual(coordinator.dragScrollView.frame, sentinel)
+    }
+
+    /// 展开态 inputBar 不贴着左边时画布必须横向反向偏移，且容器写入的就是 layout 算出的值。
+    func testContainerIsTheOnlyWriterOfOffsetDragScrollFrame() {
+        let narrowedExpandedFrame = CGRect(
+            x: 112,
+            y: inputBarExpandedFrame.minY,
+            width: 169,
+            height: inputBarExpandedFrame.height
+        )
+        let layout = AppAgentChatPanelContainerLayout(
+            bounds: bounds,
+            inputBarFrame: narrowedExpandedFrame,
+            inputBarExpandedFrame: narrowedExpandedFrame
+        )
+        XCTAssertEqual(
+            layout.dragScrollFrame.minX,
+            AppAgentChatPanelContainerLayout.horizontalOutset - narrowedExpandedFrame.minX,
+            accuracy: 0.5
+        )
+        // 这种形态下画布目标不可能是 origin .zero —— 正是两个 writer 会打架的地方。
+        XCTAssertNotEqual(layout.dragScrollFrame.minX, 0, accuracy: 0.5)
+
+        let container = AppAgentChatPanelContainerView()
+        let canvas = UIView()
+        container.installContentView(canvas)
+        container.apply(layout, animation: .immediate)
+
+        XCTAssertEqual(canvas.frame, layout.dragScrollFrame)
+
+        // 同一份 layout 再提交一次不该改动几何，也不该留下动画（容器侧判等生效）。
+        container.apply(layout, animation: .immediate)
+        XCTAssertEqual(canvas.frame, layout.dragScrollFrame)
+        XCTAssertNil(container.layer.animationKeys())
+    }
+
+    /// inputBar 几何尚未就绪时画布仍要拿到正确尺寸：容器是唯一 writer，得自己兜住这一段。
+    func testContainerLayoutKeepsCanvasSizeBeforeInputBarGeometryIsReady() {
+        let layout = AppAgentChatPanelContainerLayout(
+            bounds: bounds,
+            inputBarFrame: .zero,
+            inputBarExpandedFrame: .zero
+        )
+
+        XCTAssertEqual(layout.containerFrame, .zero)
+        XCTAssertEqual(layout.panelAlpha, 0, accuracy: 0.001)
+        XCTAssertEqual(layout.dragScrollFrame, CGRect(origin: .zero, size: bounds.size))
     }
 
     func testViewControllerMovesEntireChatPanelContainerWithKeyboardLiftedInputBar() {
@@ -617,7 +877,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.compactProgress, 0, accuracy: 0.001)
     }
 
-    func testContentLayoutAboveTransitionKeepsFullyExpandedBackgroundAndViewport() {
+    func testContentLayoutAboveTransitionTracksDisplayHeightNotPanelHeight() {
         let panelBounds = CGRect(x: 0, y: 0, width: 393, height: 793)
         let minimumHeight = safeAreaInsets.bottom
             + AppAgentInputBar.barHeight
@@ -630,7 +890,8 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             compactTransitionStartDisplayHeight: halfHeight
         )
 
-        XCTAssertEqual(layout.backgroundFrame, CGRect(x: 0, y: 0, width: 393, height: 765))
+        // 面板高度恒定，可见区只由展示高度决定：viewport = displayHeight - 拖拽手柄区。
+        XCTAssertEqual(layout.backgroundFrame, CGRect(x: 0, y: 0, width: 393, height: 369.5))
         XCTAssertEqual(layout.viewportFrame, layout.backgroundFrame)
         XCTAssertEqual(layout.contentFrame, CGRect(x: 0, y: 0, width: 393, height: 765))
         XCTAssertEqual(layout.navigationBarFrame, CGRect(x: 0, y: 0, width: 393, height: 48))
@@ -638,6 +899,22 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.topCornerRadius, 20, accuracy: 0.001)
         XCTAssertEqual(layout.bottomCornerRadius, 0, accuracy: 0.001)
         XCTAssertEqual(layout.compactProgress, 0, accuracy: 0.001)
+    }
+
+    func testContentLayoutAtPanelHeightUsesEntireContentArea() {
+        let panelBounds = CGRect(x: 0, y: 0, width: 393, height: 793)
+        let minimumHeight = safeAreaInsets.bottom
+            + AppAgentInputBar.barHeight
+            + AppAgentChatPanelGeometry.dragHandleAreaHeight
+        let layout = AppAgentChatPanelContentLayout(
+            bounds: panelBounds,
+            displayHeight: panelBounds.height,
+            minimumDisplayHeight: minimumHeight,
+            compactTransitionStartDisplayHeight: panelBounds.height * 0.5
+        )
+
+        XCTAssertEqual(layout.backgroundFrame, CGRect(x: 0, y: 0, width: 393, height: 765))
+        XCTAssertEqual(layout.viewportFrame, layout.backgroundFrame)
     }
 
     func testContentLayoutAtPeekMatchesInputBarAndDoesNotResizeActualContent() {
@@ -704,7 +981,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.messageListFrame, CGRect(x: -12, y: 48, width: 320, height: 4))
     }
 
-    func testPanelViewInstallsContentInsideMaskedViewport() {
+    func testPanelViewInstallsContentInsideClippedViewport() {
         let panelView = AppAgentChatPanelView(frame: CGRect(x: 0, y: 0, width: 393, height: 793))
         let minimumHeight = safeAreaInsets.bottom
             + AppAgentInputBar.barHeight
@@ -723,7 +1000,14 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertTrue(panelView.viewportView.superview === panelView.contentAreaView)
         XCTAssertTrue(panelView.navigationBar.superview === panelView.viewportView)
         XCTAssertTrue(panelView.listView.superview === panelView.viewportView)
-        XCTAssertNotNil(panelView.viewportView.layer.mask)
+        // 裁切靠 clipsToBounds + cornerRadius，不再挂 shape mask（mask 不吃 UIKit 动画块）。
+        XCTAssertNil(panelView.viewportView.layer.mask)
+        XCTAssertTrue(panelView.viewportView.clipsToBounds)
+        XCTAssertEqual(
+            panelView.viewportView.layer.cornerRadius,
+            AppAgentInputBar.expandedCornerRadius,
+            accuracy: 0.001
+        )
         XCTAssertEqual(panelView.viewportView.frame, CGRect(x: 12, y: 0, width: 369, height: 56))
         XCTAssertEqual(panelView.navigationBar.frame, CGRect(x: -12, y: 0, width: 393, height: 48))
         XCTAssertEqual(panelView.listView.frame, CGRect(x: -12, y: 48, width: 393, height: 717))
@@ -804,8 +1088,16 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     private func makeGeometry() -> AppAgentChatPanelGeometry? {
         AppAgentChatPanelGeometry(
             bounds: bounds,
-            safeAreaInsets: safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame
+            safeAreaInsets: safeAreaInsets
+        )
+    }
+
+    private func installLegacy400LatestReplyFixture(on list: AppAgentChatMessageListView) {
+        // Explicit fixture for independent list tests: preserve the historical
+        // 400pt ladder; 400pt is not the production default.
+        list.updateLatestReplyInitialHeight(
+            halfScreenVisibleHeight: 554,
+            bottomInset: 90
         )
     }
 }

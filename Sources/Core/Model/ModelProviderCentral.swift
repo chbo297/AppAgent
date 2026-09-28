@@ -9,11 +9,11 @@ import Foundation
 ///
 /// Both `primary` and `fallbacks` use compound "providerName/modelId" format.
 /// The primary model is used by default when creating sessions. Fallbacks are
-/// reserved for future runtime fallback support.
+/// tried in order when the current model becomes unavailable.
 public struct ModelPolicy: Sendable, Codable, Equatable {
     /// Primary model reference (e.g., "anthropic/claude-sonnet-4-20250514").
     public var primary: String
-    /// Ordered fallback model references, reserved for future use.
+    /// Ordered fallback model references.
     public var fallbacks: [String]
 
     public init(primary: String, fallbacks: [String] = []) {

@@ -18,8 +18,9 @@ public enum HookCaptureStore {
     public static let configKey = "appagent.msgcapture.config.v1"
     static let dirName = "AppAgentMsgCapture"
 
-    /// 四个消息边界，顺序（bitIndex）与宿主侧通道枚举一致。
-    public static let channels = ["talos_in", "talos_out", "shell_in", "shell_out"]
+    /// JS↔端消息边界 + web 侧输出/导航，顺序（bitIndex）与宿主侧通道枚举一致，**只能在末尾追加**。
+    /// web_console / web_nav 的写入方同样在宿主侧（如百度地图的 LijiMsgTap 缝点）。
+    public static let channels = ["talos_in", "talos_out", "shell_in", "shell_out", "web_console", "web_nav"]
 
     public static func isValidChannel(_ channel: String) -> Bool {
         channels.contains(channel)

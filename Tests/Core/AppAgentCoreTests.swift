@@ -293,6 +293,73 @@ final class AppAgentCoreTests: XCTestCase {
         }
     }
 
+    /// 续传分片把 `id` / `name` 写成空串（GLM 系 OneAPI 端点实测如此）时，名字不能被擦掉，
+    /// 否则收尾时整条调用被丢掉，表现为 `finish_reason=tool_calls` 却 0 个调用。
+    func testOpenAIChatCompletionsParserToolCallWithEmptyContinuationFields() {
+        var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
+        let chunks = [
+            #"{"choices":[{"index":0,"delta":{"content":"","tool_calls":[{"id":"call_abc","index":0,"type":"function","function":{"name":"app_runtime_inspect","arguments":"{"}}]}}]}"#,
+            #"{"choices":[{"index":0,"delta":{"content":"","tool_calls":[{"id":"","index":0,"type":"function","function":{"name":"","arguments":"\"op\": \"ui_hierarchy\""}}]}}]}"#,
+            #"{"choices":[{"index":0,"delta":{"content":"","tool_calls":[{"id":"","index":0,"type":"function","function":{"name":"","arguments":"}"}}]}}]}"#
+        ]
+
+        for chunk in chunks {
+            let events = OpenAIChatCompletionsMapper.parseSSEEvent(
+                SSEEvent(event: "", data: chunk),
+                activeToolCalls: &activeToolCalls
+            )
+            XCTAssertTrue(events.isEmpty, "工具调用要攒到 finish_reason 才 flush")
+        }
+
+        let finish = OpenAIChatCompletionsMapper.parseSSEEvent(
+            SSEEvent(event: "", data: #"{"choices":[{"index":0,"delta":{"content":""},"finish_reason":"tool_calls"}]}"#),
+            activeToolCalls: &activeToolCalls
+        )
+
+        XCTAssertEqual(finish.count, 2)
+        if case .toolCall(let call) = finish[0] {
+            XCTAssertEqual(call.id, "call_abc")
+            XCTAssertEqual(call.name, "app_runtime_inspect")
+            XCTAssertEqual(call.arguments["op"]?.stringValue, "ui_hierarchy")
+        } else {
+            XCTFail("Expected tool call, got \(finish[0])")
+        }
+        if case .done(let stopReason) = finish[1] {
+            XCTAssertEqual(stopReason, .toolUse)
+        } else {
+            XCTFail("Expected done event")
+        }
+    }
+
+    // MARK: - 失败轮不污染上下文
+
+    /// 失败 / 被中断的一轮只剩用户那句话，不能再发给模型：实测同一句提问在历史里堆了 4 条，
+    /// 模型据此认为「用户问了好几次」，wire 上还出现连续多条 user。
+    func testOrphanTurnsAreStrippedBeforeSendingToModel() {
+        let messages: [AIAgentMessage] = [
+            AIAgentMessage(role: .user, content: [.text("几点了")], turnID: 1),
+            AIAgentMessage(role: .assistant, content: [.text("10:07")], turnID: 1),
+            AIAgentMessage(role: .user, content: [.text("当前页面有哪些功能")], turnID: 2),
+            AIAgentMessage(role: .user, content: [.text("再问一次")], turnID: 3)
+        ]
+
+        // turnID 3 是正在跑的那一轮：它的 assistant 消息还没写进历史，必须留下。
+        let sent = LLMExecutor.strippingOrphanTurns(messages, keeping: 3)
+
+        XCTAssertEqual(sent.map(\.turnID), [1, 1, 3])
+        XCTAssertFalse(sent.contains { $0.text.contains("当前页面") })
+    }
+
+    /// 旧快照没有 turnID，无从判断归属，一条都不能丢。
+    func testStrippingOrphanTurnsKeepsMessagesWithoutTurnID() {
+        let messages: [AIAgentMessage] = [
+            AIAgentMessage(role: .user, content: [.text("老会话的提问")]),
+            AIAgentMessage(role: .assistant, content: [.text("老会话的回答")])
+        ]
+
+        XCTAssertEqual(LLMExecutor.strippingOrphanTurns(messages, keeping: nil).count, 2)
+    }
+
     // MARK: - OpenAI Responses protocol
 
     func testOpenAIResponsesParserTextDelta() {
@@ -417,6 +484,68 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(input[3]["call_id"] as? String, "call_1")
     }
 
+    func testHostEventSemanticsReachProviderWireMappings() throws {
+        let event = HostEvent(
+            eventId: "event-wire-1",
+            trigger: "tap",
+            action: "open-detail",
+            cursor: StateCursor(epoch: "epoch-2", revision: 7),
+            changes: .object([
+                "page": .string("detail")
+            ])
+        )
+        let message = AIAgentMessage.hostContext(.event(event))
+
+        XCTAssertTrue(message.isHostContext)
+        XCTAssertEqual(message.eventId, "event-wire-1")
+        XCTAssertEqual(message.trigger, "tap")
+        XCTAssertTrue(message.content.contains { content in
+            if case .hostContext(let payload) = content {
+                return payload.modelText.contains("\"action\":\"open-detail\"")
+                    && payload.modelText.contains("\"eventId\":\"event-wire-1\"")
+                    && payload.modelText.contains("\"revision\":7")
+            }
+            return false
+        })
+
+        let anthropic = AnthropicMapper.toAnthropicMessages([message])
+        let anthropicJSON = try XCTUnwrap(
+            String(
+                data: JSONEncoder().encode(anthropic),
+                encoding: .utf8
+            )
+        )
+        XCTAssertTrue(anthropicJSON.contains("event-wire-1"))
+        XCTAssertTrue(anthropicJSON.contains("open-detail"))
+
+        let chatMessages = OpenAIChatCompletionsMapper.toMessages(
+            [message],
+            system: []
+        )
+        let chatJSON = try XCTUnwrap(
+            String(
+                data: JSONSerialization.data(
+                    withJSONObject: chatMessages
+                ),
+                encoding: .utf8
+            )
+        )
+        XCTAssertTrue(chatJSON.contains("event-wire-1"))
+        XCTAssertTrue(chatJSON.contains("open-detail"))
+
+        let responses = OpenAIResponsesMapper.toInput([message])
+        let responseJSON = try XCTUnwrap(
+            String(
+                data: JSONSerialization.data(
+                    withJSONObject: responses
+                ),
+                encoding: .utf8
+            )
+        )
+        XCTAssertTrue(responseJSON.contains("event-wire-1"))
+        XCTAssertTrue(responseJSON.contains("open-detail"))
+    }
+
     func testOpenAIResponsesToolsAndInstructions() {
         let instructions = OpenAIResponsesMapper.toInstructions([
             .content(SystemPrompt("You are a map agent.")),
@@ -451,13 +580,20 @@ final class AppAgentCoreTests: XCTestCase {
         try await storage.delete(id: "test-1")
         let deleted = try await storage.load(id: "test-1")
         XCTAssertNil(deleted)
+        let archived = try await storage.loadArchived()
+        XCTAssertEqual(archived.map(\.id), ["test-1"])
     }
 
     // MARK: - Errors
 
     func testAgentErrorDescriptions() {
         XCTAssertNotNil(ModelError.invalidURL.errorDescription)
-        XCTAssertNotNil(AIAgentError.maxIterationsReached.errorDescription)
+        for limit in [3, 10, 25] {
+            XCTAssertEqual(
+                AIAgentError.maxIterationsReached(limit: limit).localizedDescription,
+                "AIAgent loop exceeded maximum(\(limit)) iterations"
+            )
+        }
         XCTAssertNotNil(AIAgentError.cancelled.errorDescription)
         XCTAssertTrue(ModelError.httpError(statusCode: 429, body: "rate limited")
             .errorDescription?.contains("429") ?? false)
@@ -477,6 +613,117 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(agent.id, "test")
         XCTAssertEqual(agent.profile.identity, "Test AIAgent")
         XCTAssertNil(agent.modelPolicy)
+    }
+
+    func testExecutionPolicyDefaultsAreSharedByBothProfileInitializers() {
+        let convenience = AIAgentProfile()
+        let primary = AIAgentProfile(promptBuilders: [])
+
+        XCTAssertEqual(AIAgentExecutionPolicy.defaultMaxIterations, 70)
+        XCTAssertEqual(AIAgentProfile.defaultMaxIterations, AIAgentExecutionPolicy.defaultMaxIterations)
+        XCTAssertEqual(convenience.maxIterations, AIAgentExecutionPolicy.defaultMaxIterations)
+        XCTAssertEqual(primary.maxIterations, AIAgentExecutionPolicy.defaultMaxIterations)
+        XCTAssertEqual(convenience.toolTimeout, AIAgentExecutionPolicy.defaultToolTimeout)
+        XCTAssertEqual(primary.toolTimeout, AIAgentExecutionPolicy.defaultToolTimeout)
+        XCTAssertEqual(convenience.toolOutputMaxBytes, AIAgentExecutionPolicy.defaultToolOutputMaxBytes)
+        XCTAssertEqual(primary.toolOutputMaxBytes, AIAgentExecutionPolicy.defaultToolOutputMaxBytes)
+        XCTAssertEqual(convenience.autoPersist, AIAgentExecutionPolicy.defaultAutoPersist)
+        XCTAssertEqual(primary.autoPersist, AIAgentExecutionPolicy.defaultAutoPersist)
+        XCTAssertEqual(convenience.toolMutationPolicy, AIAgentExecutionPolicy.defaultToolMutationPolicy)
+        XCTAssertEqual(primary.toolMutationPolicy, AIAgentExecutionPolicy.defaultToolMutationPolicy)
+    }
+
+    func testSessionFreezesExecutionPolicyUntilAIAgentCreatesAnotherSession() async {
+        let storage = InMemorySessionStorage()
+        let agent = AIAgent(
+            id: "policy-snapshot",
+            profile: AIAgentProfile(
+                identity: "Test",
+                maxIterations: 3,
+                toolTimeout: 11,
+                autoPersist: false,
+                toolOutputMaxBytes: 123,
+                toolMutationPolicy: Tool.MutationPolicy.readOnly,
+                registerBuiltInTools: false
+            ),
+            toolCentral: ToolCentral(),
+            providerCentral: ModelProviderCentral(),
+            memoryStorage: InMemoryMemoryStorage(),
+            sessionStorage: storage
+        )
+
+        let first = await agent.createSession(title: "First")
+        XCTAssertEqual(first.executionPolicy.maxIterations, 3)
+        XCTAssertEqual(first.executionPolicy.toolTimeout, 11)
+        XCTAssertEqual(first.executionPolicy.toolOutputMaxBytes, 123)
+        XCTAssertFalse(first.executionPolicy.autoPersist)
+        XCTAssertEqual(first.executionPolicy.toolMutationPolicy, Tool.MutationPolicy.readOnly)
+
+        agent.profile.maxIterations = 70
+        agent.profile.toolTimeout = 22
+        agent.profile.toolOutputMaxBytes = 456
+        agent.profile.autoPersist = true
+        agent.profile.toolMutationPolicy = Tool.MutationPolicy.allowed
+
+        XCTAssertEqual(first.executionPolicy.maxIterations, 3)
+        XCTAssertEqual(first.executionPolicy.toolTimeout, 11)
+        XCTAssertEqual(first.executionPolicy.toolOutputMaxBytes, 123)
+        XCTAssertFalse(first.executionPolicy.autoPersist)
+        XCTAssertEqual(first.executionPolicy.toolMutationPolicy, Tool.MutationPolicy.readOnly)
+
+        let second = await agent.createSession(title: "Second")
+        XCTAssertEqual(second.executionPolicy.maxIterations, 70)
+        XCTAssertEqual(second.executionPolicy.toolTimeout, 22)
+        XCTAssertEqual(second.executionPolicy.toolOutputMaxBytes, 456)
+        XCTAssertTrue(second.executionPolicy.autoPersist)
+        XCTAssertEqual(second.executionPolicy.toolMutationPolicy, Tool.MutationPolicy.allowed)
+    }
+
+    func testPersistedExecutionPolicySurvivesSessionRestoreWithChangedAgentDefaults() async throws {
+        let storage = InMemorySessionStorage()
+        let original = AIAgent(
+            id: "policy-restore",
+            profile: AIAgentProfile(
+                identity: "Original",
+                maxIterations: 5,
+                toolTimeout: 13,
+                autoPersist: false,
+                toolOutputMaxBytes: 321,
+                toolMutationPolicy: Tool.MutationPolicy.readOnly,
+                registerBuiltInTools: false
+            ),
+            toolCentral: ToolCentral(),
+            providerCentral: ModelProviderCentral(),
+            memoryStorage: InMemoryMemoryStorage(),
+            sessionStorage: storage
+        )
+        let session = await original.createSession(title: "Persisted")
+        try await original.sessionManager.saveSession(session)
+
+        let restarted = AIAgent(
+            id: "policy-restore",
+            profile: AIAgentProfile(
+                identity: "Current",
+                maxIterations: 70,
+                toolTimeout: 60,
+                autoPersist: true,
+                toolOutputMaxBytes: 8192,
+                toolMutationPolicy: Tool.MutationPolicy.allowed,
+                registerBuiltInTools: false
+            ),
+            toolCentral: ToolCentral(),
+            providerCentral: ModelProviderCentral(),
+            memoryStorage: InMemoryMemoryStorage(),
+            sessionStorage: storage
+        )
+        try await restarted.restoreAll()
+
+        let restored: AISession = try XCTUnwrap(restarted.session(id: session.id))
+        XCTAssertEqual(restored.executionPolicy.maxIterations, 5)
+        XCTAssertEqual(restored.executionPolicy.toolTimeout, 13)
+        XCTAssertEqual(restored.executionPolicy.toolOutputMaxBytes, 321)
+        XCTAssertFalse(restored.executionPolicy.autoPersist)
+        XCTAssertEqual(restored.executionPolicy.toolMutationPolicy, Tool.MutationPolicy.readOnly)
     }
 
     func testAgentCreateAndFindSession() async {
@@ -509,6 +756,8 @@ final class AppAgentCoreTests: XCTestCase {
         try await agent.deleteSession(session.id)
         XCTAssertEqual(agent.allSessions.count, 0)
         XCTAssertNil(agent.session(id: session.id))
+        let archived = try await agent.sessionManager.archivedSessions()
+        XCTAssertEqual(archived.map(\.id), [session.id])
     }
 
     func testSessionSaveAndRestore() async throws {
@@ -523,7 +772,7 @@ final class AppAgentCoreTests: XCTestCase {
         try await agent1.sessionManager.saveSession(session)
 
         // Create new agent and restore
-        let agent2 = await central.create(name: "test2", profile: config, sessionStorage: storage)
+        let agent2 = await AIAgentCentral().create(name: "test1", profile: config, sessionStorage: storage)
         try await agent2.restoreAll()
 
         XCTAssertEqual(agent2.allSessions.count, 1)
@@ -1278,7 +1527,7 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(config.identity, "Test")
         XCTAssertEqual(config.promptBuilders.count, 1) // identity as promptBuilders[0]
         XCTAssertTrue(config.messageContextProviders.isEmpty)
-        XCTAssertEqual(config.maxIterations, 10)
+        XCTAssertEqual(config.maxIterations, 70)
         XCTAssertTrue(config.autoPersist)
         XCTAssertTrue(config.memoryConfig.longTermEnabled)
     }
@@ -1519,7 +1768,7 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertFalse(session.isRunning)
     }
 
-    func testExecutorTracksAndCancelsActiveRun() async throws {
+    func testExecutorTracksAndCancelsActiveRun() async {
         let provider = BlockingModelProvider()
         let providerCentral = ModelProviderCentral()
         await providerCentral.register(name: "mock", provider: provider)
@@ -1539,18 +1788,104 @@ final class AppAgentCoreTests: XCTestCase {
 
         let session = await agent.createSession(title: "Running")
         let stream = session.sendMessage("Hello")
+        let finished = expectation(description: "Cancelled run drained")
         let drain = Task {
             for await _ in stream {}
+            finished.fulfill()
         }
 
         await provider.waitUntilStarted()
         XCTAssertTrue(session.isRunning)
 
         session.cancel()
-        try await Task.sleep(nanoseconds: 50_000_000)
+        await fulfillment(of: [finished], timeout: 2)
         XCTAssertFalse(session.isRunning)
         XCTAssertFalse(session.uiState.isStreaming)
+        XCTAssertEqual(session.turnRecord(turnID: 1)?.isFinished, true)
+        XCTAssertEqual(session.turnRecord(turnID: 1)?.roundCount, 1)
         drain.cancel()
+    }
+
+    func testSupersededRunClosesOnlyItsOwnTurnRecord() async {
+        let firstEntered = expectation(description: "First run reached prompt assembly")
+        let secondEntered = expectation(description: "Replacement reached prompt assembly")
+        let firstFinished = expectation(description: "Superseded run drained")
+        let secondFinished = expectation(description: "Replacement drained")
+        let firstGate = ReadySignal()
+        let secondGate = ReadySignal()
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: FixedTextReplyProvider(reply: "完成"))
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(
+                identity: "Test",
+                additionalPromptBuilders: [PromptBuilder("controlled-run-order") { session in
+                    if session.currentTurnID == 1 {
+                        firstEntered.fulfill()
+                        await firstGate.wait()
+                    } else {
+                        secondEntered.fulfill()
+                        await secondGate.wait()
+                    }
+                    return nil
+                }],
+                autoPersist: false,
+                registerBuiltInTools: false
+            ),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/fixed-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+        let session = await agent.createSession(title: "Superseded")
+        let firstStream = session.sendMessage("第一问")
+        let firstDrain = Task {
+            var terminals = 0
+            for await event in firstStream {
+                switch event {
+                case .completed, .error: terminals += 1
+                default: break
+                }
+            }
+            XCTAssertEqual(terminals, 1)
+            firstFinished.fulfill()
+        }
+        await fulfillment(of: [firstEntered], timeout: 2)
+
+        let secondStream = session.sendMessage("第二问")
+        let secondDrain = Task {
+            var terminals = 0
+            for await event in secondStream {
+                switch event {
+                case .completed, .error: terminals += 1
+                default: break
+                }
+            }
+            XCTAssertEqual(terminals, 1)
+            secondFinished.fulfill()
+        }
+        await fulfillment(of: [secondEntered], timeout: 2)
+        XCTAssertEqual(session.currentTurnID, 2)
+
+        // 先让已被替换的旧任务收尾，新任务仍停在准备阶段；不靠 sleep 猜测竞态。
+        await firstGate.signal()
+        await fulfillment(of: [firstFinished], timeout: 2)
+        let firstRecord = session.turnRecord(turnID: 1)
+        XCTAssertEqual(firstRecord?.isFinished, true)
+        XCTAssertEqual(firstRecord?.roundCount, 1)
+        XCTAssertNil(session.turnRecord(turnID: 2)?.outcome)
+        XCTAssertEqual(session.turnRecord(turnID: 2)?.stage, .preparing)
+        XCTAssertTrue(session.uiState.isStreaming)
+
+        await secondGate.signal()
+        await fulfillment(of: [secondFinished], timeout: 2)
+        XCTAssertEqual(session.turnRecord(turnID: 1)?.outcome, firstRecord?.outcome)
+        XCTAssertEqual(session.turnRecord(turnID: 1)?.endedAt, firstRecord?.endedAt)
+        XCTAssertEqual(session.turnRecord(turnID: 2)?.outcome, .answered)
+        XCTAssertEqual(session.turnRecord(turnID: 2)?.roundCount, 1)
+        XCTAssertEqual(session.messages.filter { $0.role == .assistant }.map(\.turnID), [2])
+        firstDrain.cancel()
+        secondDrain.cancel()
     }
 
     func testExecutorSetsUIErrorWhenProviderFails() async {
@@ -1586,6 +1921,295 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertNotNil(session.uiState.lastError)
     }
 
+    /// 每一轮必须恰好一个终止事件，且失败阶段停在出错那一步。
+    ///
+    /// 漏发终止事件就是真机上「回复一直是 …」的成因；重复发会让 UI 把一轮收两次。
+    func testFailedRunEmitsExactlyOneTerminalEventAndKeepsFailedStage() async {
+        let provider = FailingModelProvider(error: ModelError.invalidResponse)
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: provider)
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(identity: "Test", autoPersist: false, registerBuiltInTools: false),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/failing-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Stage")
+        var terminalCount = 0
+        for await event in session.sendMessage("Hello") {
+            switch event {
+            case .completed, .error: terminalCount += 1
+            default: break
+            }
+        }
+
+        XCTAssertEqual(terminalCount, 1)
+        XCTAssertFalse(session.uiState.isStreaming)
+        // 请求已发出、消费流时才炸，所以失败停在 .requesting。
+        XCTAssertEqual(session.uiState.failedStage, .requesting)
+        XCTAssertEqual(session.uiState.runStage, .requesting)
+    }
+
+    /// 正常一轮走完：阶段推到 .finished，且没有失败阶段。
+    func testSuccessfulRunEndsAtFinishedStage() async {
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: FixedTextReplyProvider(reply: "hi"))
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(identity: "Test", autoPersist: false, registerBuiltInTools: false),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/fixed-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Stage")
+        var terminalCount = 0
+        for await event in session.sendMessage("Hello") {
+            switch event {
+            case .completed, .error: terminalCount += 1
+            default: break
+            }
+        }
+
+        XCTAssertEqual(terminalCount, 1)
+        XCTAssertEqual(session.uiState.runStage, .finished)
+        XCTAssertNil(session.uiState.failedStage)
+        XCTAssertFalse(session.uiState.isStreaming)
+    }
+
+    /// 同一会话连续跑很多轮：终止事件的去重便签（只留最近 32 条）会反复执行淘汰。
+    ///
+    /// 淘汰**不能**碰当前 run —— 否则 `run` 的 `defer` 兜底会误判「没人发过终止事件」，
+    /// 补发第二个 `.error` 并写 `lastError`，界面上正常答案后面莫名多出一条错误。
+    /// 旧实现用 `Set.first` 淘汰（无序），每轮约 1/33 概率删掉刚登记的自己。
+    func testManyRunsInOneSessionEmitExactlyOneTerminalEventEach() async {
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: FixedTextReplyProvider(reply: "hi"))
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(identity: "Test", autoPersist: false, registerBuiltInTools: false),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/fixed-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Terminal dedup")
+        for round in 1...200 {
+            var terminalCount = 0
+            for await event in session.sendMessage("Hello \(round)") {
+                switch event {
+                case .completed, .error: terminalCount += 1
+                default: break
+                }
+            }
+            XCTAssertEqual(terminalCount, 1, "第 \(round) 轮的终止事件个数不对")
+            XCTAssertNil(session.uiState.lastError, "第 \(round) 轮不该被兜底补一个错误")
+        }
+    }
+
+    // MARK: - turnRecord（每一轮的落盘状态）
+
+    /// 成功一轮：turnRecord 落到 .answered、停在 .finished，并记下用到的模型。
+    func testSuccessfulRunWritesAnsweredTurnRecord() async {
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: FixedTextReplyProvider(reply: "hi"))
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(identity: "Test", autoPersist: false, registerBuiltInTools: false),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/fixed-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Record")
+        for await _ in session.sendMessage("Hello") {}
+
+        let record = session.turnRecord(turnID: session.currentTurnID)
+        XCTAssertNotNil(record)
+        XCTAssertEqual(record?.outcome, .answered)
+        XCTAssertEqual(record?.stage, .finished)
+        XCTAssertTrue(record?.isFinished == true)
+        XCTAssertNotNil(record?.endedAt)
+        XCTAssertEqual(record?.modelRef, "mock/fixed-model")
+        XCTAssertEqual(record?.roundCount, 1)
+        XCTAssertNil(record?.failedStage)
+    }
+
+    /// 失败一轮：turnRecord 落到 .failed 且带上出错的阶段与文案（UI 靠它渲染红色的那一格）。
+    func testFailedRunWritesFailedTurnRecordWithStage() async {
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: FailingModelProvider(error: ModelError.invalidResponse))
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(identity: "Test", autoPersist: false, registerBuiltInTools: false),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/failing-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Record")
+        for await _ in session.sendMessage("Hello") {}
+
+        let record = session.turnRecord(turnID: session.currentTurnID)
+        XCTAssertEqual(record?.failedStage, .requesting)
+        XCTAssertNotNil(record?.failureMessage)
+        XCTAssertTrue(record?.isFinished == true)
+        XCTAssertNotEqual(record?.stage, .finished, "失败的一轮不许推进到 .finished")
+    }
+
+    /// 没配 provider 连请求都发不出去：这种一个 item 都没有的轮次也必须有终局记录，
+    /// 否则界面上是彻底的静默（真机踩过）。
+    func testRunWithoutProviderStillClosesTurnRecord() async {
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(identity: "Test", autoPersist: false, registerBuiltInTools: false),
+            providerCentral: ModelProviderCentral(),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "Record")
+        for await _ in session.sendMessage("Hello") {}
+
+        let record = session.turnRecord(turnID: session.currentTurnID)
+        XCTAssertEqual(record?.failedStage, .preparing)
+        XCTAssertTrue(record?.isFinished == true)
+    }
+
+    /// turnRecords 随快照往返；旧快照（没有这个键）照常能解开。
+    func testTurnRecordsSurviveSnapshotRoundTrip() throws {
+        let session = AISession(
+            id: "s1",
+            title: "Record",
+            turnRecords: [
+                AIAgentTurnRecord(
+                    turnID: 1,
+                    startedAt: Date(),
+                    endedAt: Date(),
+                    stage: .finished,
+                    outcome: .answered,
+                    roundCount: 2
+                ),
+                AIAgentTurnRecord(turnID: 2, startedAt: Date(), stage: .streaming, roundCount: 0)
+            ]
+        )
+
+        let data = try JSONEncoder().encode(session.toSnapshot())
+        let decoded = try JSONDecoder().decode(SessionSnapshot.self, from: data)
+        XCTAssertEqual(decoded.turnRecords?.count, 2)
+        XCTAssertEqual(decoded.turnRecords?.first?.outcome, .answered)
+        XCTAssertEqual(decoded.turnRecords?.first?.roundCount, 2)
+        XCTAssertEqual(decoded.turnRecords?.last?.roundCount, 0)
+        XCTAssertNil(decoded.turnRecords?.last?.outcome)
+
+        // 旧快照：没有 turnRecords 键也要能解开（FileSessionStorage 否则会整段丢会话）
+        let legacy = """
+        {"id":"s2","title":"Old","messages":[],"createdAt":0,"updatedAt":0}
+        """.data(using: .utf8)!
+        let old = try JSONDecoder().decode(SessionSnapshot.self, from: legacy)
+        XCTAssertNil(old.turnRecords)
+
+        // 旧的 turn record 可能存在，但其中没有 roundCount 键；缺键只能表示未知，
+        // 不能让整条记录解码失败。
+        let encodedRecord = try JSONEncoder().encode(
+            AIAgentTurnRecord(
+                turnID: 3,
+                startedAt: Date(timeIntervalSince1970: 0),
+                stage: .streaming,
+                roundCount: 4
+            )
+        )
+        var recordObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encodedRecord) as? [String: Any]
+        )
+        recordObject.removeValue(forKey: "roundCount")
+        let legacyRecordData = try JSONSerialization.data(withJSONObject: recordObject)
+        let legacyRecord = try JSONDecoder().decode(AIAgentTurnRecord.self, from: legacyRecordData)
+        XCTAssertNil(legacyRecord.roundCount)
+    }
+
+    func testTurnRoundCountOnlyIncreasesBeforeTerminal() {
+        let session = AISession(id: "round-count")
+        session.addUserMessage("一问")
+        let turnID = session.currentTurnID
+        session.openTurnRecord(turnID: turnID, modelRef: "mock/model")
+
+        XCTAssertEqual(session.turnRecord(turnID: turnID)?.roundCount, 0)
+
+        session.advanceTurnRound(turnID: turnID, roundCount: 2)
+        session.advanceTurnRound(turnID: turnID, roundCount: 1)
+        XCTAssertEqual(session.turnRecord(turnID: turnID)?.roundCount, 2)
+
+        session.closeTurnRecord(turnID: turnID, outcome: .answered, stage: .finished)
+        session.advanceTurnRound(turnID: turnID, roundCount: 3)
+        XCTAssertEqual(session.turnRecord(turnID: turnID)?.roundCount, 2)
+    }
+
+    /// 重启恢复时，上次没跑完的那一轮标成 .interrupted——不自动重放（SSE 不可续、工具非幂等）。
+    func testUnfinishedTurnsAreMarkedInterrupted() {
+        let session = AISession(
+            id: "s1",
+            title: "Record",
+            turnRecords: [
+                AIAgentTurnRecord(turnID: 1, startedAt: Date(), endedAt: Date(), stage: .finished, outcome: .answered),
+                AIAgentTurnRecord(turnID: 2, startedAt: Date(), stage: .tooling)
+            ]
+        )
+
+        let marked = session.markUnfinishedTurnsAsInterrupted()
+        XCTAssertEqual(marked, [2])
+        XCTAssertEqual(session.turnRecord(turnID: 2)?.outcome, .interrupted)
+        XCTAssertNotNil(session.turnRecord(turnID: 2)?.endedAt)
+        // 已有终局的不许被改写
+        XCTAssertEqual(session.turnRecord(turnID: 1)?.outcome, .answered)
+        XCTAssertTrue(session.markUnfinishedTurnsAsInterrupted().isEmpty)
+    }
+
+    /// 模型说「这一轮要调工具」却没给出任何调用：必须报错，不能当成一次空回复静默结束。
+    ///
+    /// 真机上遇到过（GLM 的 OpenAI 兼容端点）：界面 loading 转一圈，然后什么都没有。
+    func testToolUseStopWithoutCallsSurfacesAsError() async {
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: EmptyToolUseProvider())
+
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "test",
+            profile: AIAgentProfile(identity: "Test", autoPersist: false, registerBuiltInTools: false),
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/empty-tooluse-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+
+        let session = await agent.createSession(title: "EmptyToolUse")
+        var terminalCount = 0
+        var sawError = false
+        for await event in session.sendMessage("当前页面有哪些功能") {
+            switch event {
+            case .completed: terminalCount += 1
+            case .error: terminalCount += 1; sawError = true
+            default: break
+            }
+        }
+
+        XCTAssertTrue(sawError, "空的 tool_use 必须以错误结束，而不是静默的空回复")
+        XCTAssertEqual(terminalCount, 1)
+        XCTAssertFalse(session.uiState.isStreaming)
+        XCTAssertNotNil(session.uiState.lastError)
+    }
+
     func testToolLoopWarningCompletesStartedToolCall() async {
         let provider = RepeatingToolCallModelProvider()
         let providerCentral = ModelProviderCentral()
@@ -1609,12 +2233,18 @@ final class AppAgentCoreTests: XCTestCase {
         let stream = session.sendMessage("Loop")
         var startedCount = 0
         var completedWarning = false
+        var terminalErrors: [Error] = []
+        var completedCount = 0
         for await event in stream {
             switch event {
             case .toolCallStarted:
                 startedCount += 1
             case .toolCallCompleted(let toolCallId, _):
                 completedWarning = toolCallId == "loop-call"
+            case .error(let error):
+                terminalErrors.append(error)
+            case .completed:
+                completedCount += 1
             default:
                 break
             }
@@ -1622,6 +2252,53 @@ final class AppAgentCoreTests: XCTestCase {
 
         XCTAssertEqual(startedCount, 3)
         XCTAssertTrue(completedWarning)
+        XCTAssertEqual(terminalErrors.count, 1)
+        XCTAssertEqual(completedCount, 0)
+        guard case .maxIterationsReached(let limit) = terminalErrors.first as? AIAgentError else {
+            return XCTFail("工具往返用尽 loop 预算应返回带实际上限的错误")
+        }
+        XCTAssertEqual(limit, 3)
+        let expected = "AIAgent loop exceeded maximum(3) iterations"
+        XCTAssertEqual(session.uiState.lastError?.localizedDescription, expected)
+        XCTAssertEqual(session.turnRecord(turnID: session.currentTurnID)?.failureMessage, expected)
+        XCTAssertEqual(session.turnRecord(turnID: session.currentTurnID)?.roundCount, 3)
+    }
+
+    /// 真实工具返回 .error 而不 throw：事件和 wire 都必须保留结构化失败。
+    func testReturnedToolErrorIsPersistedAsErrorResult() async throws {
+        let providerCentral = ModelProviderCentral()
+        await providerCentral.register(name: "mock", provider: ScriptedToolCallProvider(
+            toolName: "web_fetch",
+            arguments: ["url": .string("file:///not-allowed")]
+        ))
+        let toolCentral = ToolCentral()
+        await toolCentral.register(WebFetchTool())
+        let central = AIAgentCentral()
+        let agent = await central.create(
+            name: "structured-tool-error",
+            profile: AIAgentProfile(identity: "Test", autoPersist: false, registerBuiltInTools: false),
+            toolCentral: toolCentral,
+            providerCentral: providerCentral,
+            modelPolicy: ModelPolicy(primary: "mock/scripted-model"),
+            sessionStorage: InMemorySessionStorage()
+        )
+        let session = await agent.createSession(title: "Structured failure")
+        var returnedError: String?
+        for await event in session.sendMessage("读取一个不支持的 URL") {
+            if case .toolCallCompleted(_, let output) = event,
+               case .error(let message) = output {
+                returnedError = message
+            }
+        }
+        XCTAssertNotNil(returnedError, "必须覆盖返回 .error 的真实路径，而不是 throw 路径")
+        let result = try XCTUnwrap(session.messages.flatMap(\.content).compactMap { content in
+            if case .toolResult(let result) = content { return result }
+            return nil
+        }.first)
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.content.contains(try XCTUnwrap(returnedError)))
+        XCTAssertEqual(session.turnRecord(turnID: session.currentTurnID)?.outcome, .answered,
+                       "工具失败后模型仍可以正常回答，但不能丢掉工具的失败标记")
     }
 
     // MARK: - Offer / execute parity
@@ -1761,6 +2438,8 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(session.messages.filter(\.isGenuineUserInput).count, 1,
                        "工具结果虽然也是 user 角色，但不能算用户发言")
         XCTAssertTrue(session.messages.contains { !$0.isGenuineUserInput })
+        XCTAssertEqual(session.turnRecord(turnID: 1)?.roundCount, 2,
+                       "一次工具往返应记录为两轮模型执行，而不是一个工具调用")
     }
 
     /// 恢复出来的会话接着已有编号继续数，否则新一轮会被并进上一轮。
@@ -1771,7 +2450,8 @@ final class AppAgentCoreTests: XCTestCase {
         ])
         XCTAssertEqual(restored.currentTurnID, 3)
 
-        restored.addUserMessage("新问")
+        let allocatedTurnID = restored.addUserMessage("新问")
+        XCTAssertEqual(allocatedTurnID, 4)
         XCTAssertEqual(restored.currentTurnID, 4)
         XCTAssertEqual(restored.messages.last?.turnID, 4)
     }
@@ -1895,8 +2575,30 @@ private final class ScriptedToolCallProvider: ModelProvider, @unchecked Sendable
 }
 
 /// 固定回一句文本，用于驱动子会话跑完一轮。
-private final class FixedTextReplyProvider: ModelProvider, @unchecked Sendable {
+/// 只回一个 `stop=toolUse`、既没有工具调用也没有正文的端点（真机上 GLM 兼容端点出现过）。
+private final class EmptyToolUseProvider: ModelProvider, @unchecked Sendable {
     let name = "mock"
+    let baseURL = ""
+    let apiKey = ""
+    let apiProtocol: APIProtocol = .openaiCompletions
+    let customHeaders: [String: String] = [:]
+    let models = [ModelSpec(id: "empty-tooluse-model")]
+    let requestTimeout: TimeInterval = 5
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.done(stopReason: .toolUse))
+            continuation.finish()
+        }
+    }
+}
+
+private final class FixedTextReplyProvider: ModelProvider, @unchecked Sendable {    let name = "mock"
     let baseURL = ""
     let apiKey = ""
     let apiProtocol: APIProtocol = .anthropicMessages

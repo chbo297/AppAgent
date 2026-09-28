@@ -17,6 +17,7 @@ public final class AISessionManager: @unchecked Sendable {
 
     /// Persistent storage backend.
     public let storage: any SessionStorage
+    private let lifecycleQueue = SessionLifecycleQueue()
 
     /// Back-reference to the owning AIAgent.
     @WeakLocked
@@ -43,10 +44,6 @@ public final class AISessionManager: @unchecked Sendable {
                                  isAlreadyRunning: session.isRunning)
     }
 
-    // Session ID generation state
-    @Locked private var lastPrefix: String = ""
-    @Locked private var sequence: Int = 0
-
     public init(storage: any SessionStorage) {
         self.storage = storage
         self._agent = WeakLocked(wrappedValue: nil)
@@ -56,11 +53,11 @@ public final class AISessionManager: @unchecked Sendable {
 
     /// Generate a unique session ID, checking against existing sessions.
     ///
-    /// Format: `<agentId>_YYYYMMDD_HHMMSS_<cs><seq>`
+    /// Format: `<agentId>_YYYYMMDD_HHMMSS_<cs>_<uuid>`
     /// - `agentId`: the agent's registered name
     /// - `YYYYMMDD_HHMMSS`: creation timestamp (local timezone)
     /// - `cs`: centiseconds (00-99)
-    /// - `seq`: single-digit sequence number (0-9), increments on collision
+    /// - `uuid`: never reuse an archived/purged session identity
     private func generateSessionID(agentId: String, now: Date = Date()) -> String {
         let comps = Calendar.current.dateComponents(
             [.year, .month, .day, .hour, .minute, .second, .nanosecond], from: now)
@@ -74,28 +71,8 @@ public final class AISessionManager: @unchecked Sendable {
             cs
         )
 
-        if prefix == lastPrefix {
-            sequence += 1
-        } else {
-            lastPrefix = prefix
-            sequence = 0
-        }
-
-        var candidate = "\(prefix)\(sequence)"
-
-        // Deduplicate against existing sessions
-        while sessions[candidate] != nil && sequence < 9 {
-            sequence += 1
-            candidate = "\(prefix)\(sequence)"
-        }
-
-        // sequence == 9 and still duplicate — this is abnormal (10 sessions in the same centisecond),
-        // overwrite the existing session entry as a last resort.
-        if sessions[candidate] != nil {
-            Logger.warning("AISessionManager", "Session ID collision at max sequence (9), overwriting: \(candidate)")
-        }
-
-        return candidate
+        // Uniqueness must include archived/purged IDs and concurrent creation, not only active memory.
+        return "\(prefix)_\(UUID().uuidString.lowercased())"
     }
 
     // MARK: - AISession Lifecycle
@@ -137,19 +114,71 @@ public final class AISessionManager: @unchecked Sendable {
         )
         session.toolPolicy = toolPolicy
 
-        sessions[session.id] = session
+        $sessions.mutate { $0[session.id] = session }
         Logger.info("AISessionManager", "createSession: id=\(session.id), title=\"\(title)\", modelId=\(modelId ?? "nil"), installedTools=\(installedTools.count)")
         return session
     }
 
-    /// Delete a session by ID.
+    /// Compatibility alias: deletion is always recoverable archival.
     public func deleteSession(_ id: String) async throws {
-        Logger.info("AISessionManager", "deleteSession: id=\(id)")
-        if let session = sessions[id] {
-            session.cancel()
+        try await archiveSession(id)
+    }
+
+    public func archiveSession(_ id: String) async throws {
+        try await lifecycleQueue.run { [self] in
+            guard let session = session(id: id) else { throw SessionLifecycleError.notFound(id) }
+            try session.lifecycle.suspend(session)
+            do {
+                try await storage.archive(session: session.toSnapshot())
+            } catch {
+                session.lifecycle.resume()
+                throw error
+            }
+            _ = $sessions.mutate { $0.removeValue(forKey: id) }
         }
-        sessions.removeValue(forKey: id)
-        try await storage.delete(id: id)
+    }
+
+    public func archivedSessions() async throws -> [SessionSnapshot] {
+        try await lifecycleQueue.run { [self] in
+            try await storage.loadArchived().filter { owns($0) }
+                .sorted { ($0.archivedAt ?? $0.updatedAt) > ($1.archivedAt ?? $1.updatedAt) }
+        }
+    }
+
+    public func restoreArchivedSession(_ id: String) async throws -> AISession {
+        await agent?.ensureReady()
+        return try await lifecycleQueue.run { [self] in
+            guard sessions[id] == nil else { throw SessionLifecycleError.conflict(id) }
+            guard let archived = try await storage.loadArchived().first(where: { $0.id == id && owns($0) }) else {
+                throw SessionLifecycleError.notFound(id)
+            }
+            // Resolve current policy before committing storage. No old prompt/provider is restored.
+            let session = await materialize(archived)
+            _ = try await storage.restoreArchived(id: id)
+            $sessions.mutate { $0[id] = session }
+            return session
+        }
+    }
+
+    /// Trusted manual UI entry point only. Never exposed by a model tool.
+    public func purgeArchivedSession(_ id: String) async throws {
+        try await lifecycleQueue.run { [self] in
+            guard sessions[id] == nil else { throw SessionLifecycleError.conflict(id) }
+            guard try await storage.loadArchived().contains(where: { $0.id == id && owns($0) }) else {
+                throw SessionLifecycleError.notFound(id)
+            }
+            try await storage.purgeArchived(id: id)
+        }
+    }
+
+    private func owns(_ snapshot: SessionSnapshot) -> Bool {
+        guard let agent else { return snapshot.ownerAgentID == nil }
+        if let owner = snapshot.ownerAgentID { return owner == agent.id }
+        // Legacy snapshots only have the generated ID. Do not claim arbitrary snapshots from a
+        // shared repository, and do not use a loose prefix ("a" must not claim "a_b").
+        let prefix = NSRegularExpression.escapedPattern(for: agent.id)
+        return snapshot.id.range(of: "^\(prefix)_[0-9]{8}_[0-9]{6}_[0-9]{3,}$",
+                                 options: .regularExpression) != nil
     }
 
     /// Cancel all running agent loops across all sessions.
@@ -168,37 +197,48 @@ public final class AISessionManager: @unchecked Sendable {
         // 所以闸门放在这里才真的守得住（`ensureReady` 幂等）。
         await agent?.ensureReady()
 
-        let snapshots = try await storage.loadAll()
-        let mask = agent?.buildMask()
+        try await lifecycleQueue.run { [self] in
+            let snapshots = try await storage.loadAll().filter { owns($0) }
+            for snapshot in snapshots where sessions[snapshot.id] == nil {
+                let session = await materialize(snapshot)
+                $sessions.mutate { $0[session.id] = session }
+            }
+            Logger.info("AISessionManager", "restoreAll: loaded \(snapshots.count) owned sessions")
+        }
+    }
+
+    private func materialize(_ snapshot: SessionSnapshot) async -> AISession {
+        var mask = agent?.buildMask()
+        if let persistedPolicy = snapshot.executionPolicy, let currentMask = mask {
+            var profile = currentMask.profile
+            profile.executionPolicy = persistedPolicy
+            mask = AIAgentMask(
+                profile: profile,
+                toolPolicy: currentMask.toolPolicy,
+                toolCentral: currentMask.toolCentral,
+                agent: currentMask.agent
+            )
+        }
 
         // Resolve provider + model from agent for restored sessions
         let resolved = await agent?.resolveProvider()
 
-        for snapshot in snapshots {
-            // 和 createSession 走同一条策略链：恢复出来的会话不该比新建的多拿工具。
-            var policies: [ToolCentral.ToolPolicy] = []
-            if let agentPolicy = mask?.toolPolicy {
-                policies.append(agentPolicy)
-            }
-            var installedTools: [String: any ToolProtocol] = [:]
-            if let registry = mask?.toolCentral ?? agent?.toolCentral {
-                installedTools = await registry.resolveTools(policies: policies)
-            }
-
-            let session = AISession(
-                id: snapshot.id,
-                title: snapshot.title,
-                agentMask: mask,
-                installedTools: installedTools,
-                messages: snapshot.messages,
-                provider: resolved?.provider,
-                modelId: resolved?.modelId,
-                createdAt: snapshot.createdAt,
-                updatedAt: snapshot.updatedAt
-            )
-            sessions[session.id] = session
+        // 和 createSession 走同一条策略链：恢复出来的会话不该比新建的多拿工具。
+        var policies: [ToolCentral.ToolPolicy] = []
+        if let agentPolicy = mask?.toolPolicy { policies.append(agentPolicy) }
+        var installedTools: [String: any ToolProtocol] = [:]
+        if let registry = mask?.toolCentral ?? agent?.toolCentral {
+            installedTools = await registry.resolveTools(policies: policies)
         }
-        Logger.info("AISessionManager", "restoreAll: restored \(snapshots.count) sessions")
+        let session = AISession(
+            id: snapshot.id, title: snapshot.title, agentMask: mask, installedTools: installedTools,
+            messages: snapshot.messages, provider: resolved?.provider, modelId: resolved?.modelId,
+            createdAt: snapshot.createdAt, updatedAt: snapshot.updatedAt,
+            turnRecords: snapshot.turnRecords ?? [], metadata: snapshot.metadata
+        )
+        // 进程死过一次：标「上次中断」，不自动重放有副作用的工具。
+        session.markUnfinishedTurnsAsInterrupted()
+        return session
     }
 
     /// Find a session by ID.
@@ -215,15 +255,83 @@ public final class AISessionManager: @unchecked Sendable {
 
     /// Save a single session to storage.
     public func saveSession(_ session: AISession) async throws {
-        Logger.debug("AISessionManager", "saveSession: id=\(session.id), messageCount=\(session.messages.count)")
-        let snapshot = session.toSnapshot()
-        try await storage.save(session: snapshot)
+        try await lifecycleQueue.run { [self] in
+            // Reject old executor tasks even after an archive was restored with the same ID.
+            guard sessions[session.id] === session else { throw SessionLifecycleError.inactive(session.id) }
+            try await storage.save(session: session.toSnapshot())
+        }
     }
 
     /// Save all sessions to storage (call on app backgrounding/termination).
     public func saveAll() async throws {
-        for session in sessions.values {
-            try await storage.save(session: session.toSnapshot())
+        try await lifecycleQueue.run { [self] in
+            for session in sessions.values {
+                try await storage.save(session: session.toSnapshot())
+            }
+        }
+    }
+
+    /// Transactional rename: errors are visible and the in-memory title is published after saving.
+    func renameSession(_ id: String, title: String) async throws {
+        try await lifecycleQueue.run { [self] in
+            guard let session = session(id: id) else { throw SessionLifecycleError.notFound(id) }
+            let old = session.toSnapshot()
+            let next = SessionSnapshot(id: old.id, title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       createdAt: old.createdAt, updatedAt: old.updatedAt,
+                                       messages: old.messages, metadata: old.metadata,
+                                       turnRecords: old.turnRecords,
+                                       executionPolicy: old.executionPolicy,
+                                       ownerAgentID: old.ownerAgentID)
+            try await storage.save(session: next)
+            session.rename(title)
+        }
+    }
+
+    /// Creates a persisted session without publishing a half-created result on storage failure.
+    func createPersistedSession(title: String, modelReference: String? = nil) async throws -> AISession {
+        await agent?.ensureReady()
+        return try await lifecycleQueue.run { [self] in
+            let snapshot = SessionSnapshot(id: generateSessionID(agentId: agent?.id ?? "unknown"),
+                                           title: title, createdAt: Date(), updatedAt: Date(),
+                                           messages: [], executionPolicy: agent?.buildMask().executionPolicy,
+                                           ownerAgentID: agent?.id)
+            let result = await materialize(snapshot)
+            if let modelReference, !(await result.switchModel(reference: modelReference)) {
+                throw SessionLifecycleError.invalid("Could not resolve model '\(modelReference)'.")
+            }
+            try await storage.save(session: result.toSnapshot())
+            $sessions.mutate { $0[result.id] = result }
+            return result
+        }
+    }
+
+    /// Local full-fidelity concatenation in caller-specified source order; never invokes a model.
+    public func mergeSessions(_ sourceIDs: [String], title: String = "Merged Chat") async throws -> AISession {
+        await agent?.ensureReady()
+        return try await lifecycleQueue.run { [self] in
+            guard sourceIDs.count >= 2, Set(sourceIDs).count == sourceIDs.count else {
+                throw SessionLifecycleError.invalid("source_session_ids must contain at least two distinct session IDs.")
+            }
+            var sources: [AISession] = []
+            defer { sources.forEach { $0.lifecycle.resume() } }
+            for id in sourceIDs {
+                guard let source = session(id: id) else { throw SessionLifecycleError.notFound(id) }
+                try source.lifecycle.suspend(source)
+                sources.append(source)
+            }
+            let merged = try SessionHistoryMerge.merge(sources.map { $0.toSnapshot() })
+            let snapshot = SessionSnapshot(
+                id: generateSessionID(agentId: agent?.id ?? "unknown"), title: title,
+                createdAt: Date(), updatedAt: Date(), messages: merged.messages,
+                metadata: ["mergedSourceSessionIDs": sourceIDs.joined(separator: ",")],
+                turnRecords: merged.records,
+                executionPolicy: agent?.buildMask().executionPolicy,
+                ownerAgentID: agent?.id
+            )
+            let result = await materialize(snapshot)
+            try await storage.save(session: result.toSnapshot())
+            $sessions.mutate { $0[result.id] = result }
+            return result
         }
     }
 }

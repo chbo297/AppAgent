@@ -111,6 +111,10 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         for try await line in bytes.lines {
             try Task.checkCancellation()
             if let sseEvent = parser.processLine(line) {
+                // 响应侧的原始 SSE 也要落日志：请求体一直有记录、回来的东西却没有，
+                // 于是「模型说 stop=tool_calls 但我们解析出 0 个调用」这种问题在诊断包里
+                // 查不到根因（实测遇到过，只能靠猜端点的 tool_calls 格式）。截断防刷爆。
+                Logger.debug("Anthropic", "sse<< \(sseEvent.data.prefix(800))")
                 for providerEvent in parseProviderSSEEvent(
                     apiProtocol: apiProtocol,
                     sseEvent: sseEvent,

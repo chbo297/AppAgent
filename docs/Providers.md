@@ -150,6 +150,13 @@ public final class OpenAICompatibleProvider: ModelProvider, @unchecked Sendable 
 
 ## Error Classification
 
-`LLMExecutor` uses `ErrorClassifier` to decide whether an error is retryable, whether context compression should be attempted, and whether fallback is appropriate.
+`LLMExecutor` uses `ErrorClassifier.retryable` to decide whether to retry a failed model request. Transport errors such as `URLError`, HTTP 429, and server errors are retryable; authentication errors such as HTTP 401/403 are not retried on the same model.
 
-Fallback policy exists in `ModelPolicy`, but full runtime fallback execution is still a planned enhancement.
+### Retry and turn limits
+
+- `RetryPolicy.maxRetries` defaults to **3 retries**, excluding the initial request: up to **4 attempts** for consecutive failures on the current model. The counter resets after a successful stream or a model fallback. Retry delays use exponential backoff (normally about 1, 2, and 4 seconds, with ±25% jitter).
+- `AIAgentProfile.maxIterations` defaults to **70 iterations per user turn**. Requests after tool execution, retry requests, and fallback requests all consume this same budget; retries are not an extra allowance on top of the 70 iterations. A successful final answer on the last allowed iteration completes normally.
+- When an error is not retryable, or retries are exhausted, the executor tries the next available, untried model in `ModelPolicy`. If none is available, it returns the last original provider/transport error, such as `HTTP 503: ...` or the system's localized network error. There is no separate “retry limit exceeded” error.
+- When the loop budget runs out before a final answer, the error is `AIAgentError.maxIterationsReached(limit:)`, displayed as `AIAgent loop exceeded maximum(70) iterations` with the actual configured limit. This can also happen before all retries or fallback models have been attempted.
+
+The classifier's `shouldCompress` and `shouldFallback` fields are recommendations, not gates currently consumed by the executor. Context compression is checked separately before requests based on estimated context usage; runtime fallback follows `ModelPolicy` after the retry decision.

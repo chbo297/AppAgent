@@ -11,13 +11,32 @@
 
 //  Demo target 直接编译 SDK 源码（没有独立的 AppAgent module），所以这里不 import。
 #if DEBUG
-import Foundation
+import UIKit
 
 enum SampleConversation {
 
     static func install(into session: AISession) {
         session.clearHistory()
         session.updateMessages(messages)
+    }
+
+    /// 只用于截图验收：定位过程区，可选通过列表的正式折叠链路展开。
+    @MainActor
+    static func focusActivity(in viewController: AppAgentViewController, expanded: Bool) {
+        guard let index = viewController.chatMessages.lastIndex(where: {
+            $0.role == .assistant && $0.activity != nil
+        }) else { return }
+        let coordinator = viewController.chatPanelCoordinator
+        coordinator.move(to: .full, animated: false)
+        viewController.view.layoutIfNeeded()
+        let list = coordinator.panelView.listView
+        if expanded, !viewController.chatMessages[index].isActivityExpanded {
+            list.toggleActivityExpanded(messageID: viewController.chatMessages[index].id)
+        }
+        list.layoutIfNeeded()
+        (list.participantScrollView as? UITableView)?.scrollToRow(
+            at: IndexPath(row: index, section: 0), at: .top, animated: false
+        )
     }
 
     private static let messages: [AIAgentMessage] = [
@@ -33,17 +52,26 @@ enum SampleConversation {
                            arguments: ["url": .string("https://github.com/search?q=ios+agent")])),
         ], turnID: 2),
         AIAgentMessage(role: .user, content: [
-            .toolResult(.init(toolCallId: "call_1", content: "Error: Tool 'web_fetch' not found")),
+            .toolResult(.init(toolCallId: "call_1", content: "Error: Tool 'web_fetch' not found",
+                              isError: true)),
         ], turnID: 2),
         AIAgentMessage(role: .assistant, content: [
             .toolUse(.init(id: "call_2", name: "delegate_task",
                            arguments: ["goal": .string("列出 iOS 上可运行的 agent 项目")])),
         ], turnID: 2),
         AIAgentMessage(role: .user, content: [
-            .toolResult(.init(toolCallId: "call_2", content: "Error: Sub-agent error: Provider error: No provider configured")),
+            .toolResult(.init(toolCallId: "call_2", content: subAgentError, isError: true)),
         ], turnID: 2),
         AIAgentMessage(role: .assistant, content: [.text(answerMarkdown)], turnID: 2),
     ]
+
+    private static let subAgentError = """
+        Error: Sub-agent error: Provider error: No provider configured
+        阶段：为子代理解析模型配置。
+        原因：没有可用的 provider / model，尚未发起网络请求。
+        请在设置中填写 API Key 并选择模型，然后重新发起任务。
+        原始错误尾部：No provider configured
+        """
 
     private static let answerMarkdown = """
         抓取工具不可用，下面是训练时的了解。

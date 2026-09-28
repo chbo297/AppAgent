@@ -9,6 +9,8 @@ import Foundation
 ///
 /// The host app implements this to expose navigable routes (pages/screens)
 /// that the agent can direct the user to.
+/// Routes belong to the host, not AppAgent's settings/debug/chat UI. The provider
+/// is responsible for this boundary; route strings are not an ownership proof.
 public protocol AppNavigationProvider: Sendable {
     /// List all navigable routes (so the LLM knows what's available).
     func availableRoutes() async -> [AppRoute]

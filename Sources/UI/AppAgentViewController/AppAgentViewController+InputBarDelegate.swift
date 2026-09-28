@@ -118,6 +118,12 @@ extension AppAgentViewController: AppAgentInputBarDelegate {
         // Override in subclass or set up delegate chain
     }
 
+    // 场景：loop 运行中输入框为空，加号位置显示为停止按钮，点击它时触发。
+    public func inputBarDidTapStop(_ bar: AppAgentInputBar) {
+        logInputBarDelegate("inputBarDidTapStop")
+        stopCurrentRun()
+    }
+
     func logInputBarDelegate(_ message: @autoclosure () -> String) {
         guard Self.isInputBarDelegateDebugLoggingEnabled else { return }
         print("[AppAgentInputBarDelegate] \(message())")

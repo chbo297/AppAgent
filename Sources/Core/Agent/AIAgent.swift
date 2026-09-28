@@ -293,7 +293,7 @@ public final class AIAgent: @unchecked Sendable {
         try await sessionManager.restoreAll()
     }
 
-    /// Delete a session by ID.
+    /// Compatibility alias for recoverable archive. Never permanently deletes history.
     public func deleteSession(_ id: String) async throws {
         try await sessionManager.deleteSession(id)
         delegate?.aiAgent(self, didDeleteSession: id)
@@ -337,9 +337,10 @@ public final class AIAgent: @unchecked Sendable {
 
     /// Called by AISession after a successful agent run. Handles auto-save and delegate notification.
     func sessionDidCompleteRun(_ session: AISession, result: AIAgentFinish) {
-        Logger.info("AIAgent", "sessionDidCompleteRun: sessionId=\(session.id), textLength=\(result.text.count), autoPersist=\(profile.autoPersist)")
+        let autoPersist = session.executionPolicy.autoPersist
+        Logger.info("AIAgent", "sessionDidCompleteRun: sessionId=\(session.id), textLength=\(result.text.count), autoPersist=\(autoPersist)")
         delegate?.aiAgent(self, session: session, didCompleteRun: result)
-        if profile.autoPersist && session.isDirty {
+        if autoPersist && session.isDirty {
             Task { [weak self] in
                 do {
                     try await self?.sessionManager.saveSession(session)

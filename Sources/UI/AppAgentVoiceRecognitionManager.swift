@@ -61,11 +61,26 @@ protocol AppAgentVoiceRecognitionProviding: AnyObject {
     /// 识别语言优先级列表，按顺序取第一个系统可用的识别器。
     var preferredLocales: [Locale] { get set }
 
+    /// 是否允许「预热」：只有系统语音 + 麦克风权限都已授权、且当前没有其他音频在播放时才允许。
+    /// 预热会激活 `.record` 会话并 duck 其他音频，因此有其他音频在放时不预热。
+    var canPrewarmNow: Bool { get }
+
+    /// 当前是否已进入录音/识别阶段。预热会在面板展示前就就绪，UI 展示时需据此把初始态
+    /// 直接置为「录音中」而不是「loading」（否则那条 `.recording` 事件在预热期被丢，面板卡在转圈）。
+    var isRecording: Bool { get }
+
     /// 开始录音识别；locale 传 nil 时按 preferredLocales 解析。
     func startRecording(locale: Locale?) -> AsyncStream<AppAgentVoiceRecognitionEvent>
 
     /// 请求停止（异步清理，结束事件经事件流投递）。
+    /// 立即停止、不等尾音——用于取消 / 系统中断。
     func requestStopRecording(reason: AppAgentVoiceRecognitionEndReason)
+
+    /// 请求「优雅收尾」：继续采集 `trailingCapture` 秒尾音后停止喂音频，
+    /// 再等识别器吐出 `isFinal` 最终结果（上限 `finalizationTimeout`）才结束，
+    /// 保证松手前后的音频都转成文字。结束仍经事件流的 `.ended` 投递（携带最终文本）。
+    /// 用于「松手发送 / 松手编辑」。
+    func requestFinishRecording(trailingCapture: TimeInterval, finalizationTimeout: TimeInterval)
 }
 
 extension AppAgentVoiceRecognitionProviding {
@@ -135,18 +150,27 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
     private var _isConsoleLoggingEnabled = false
     private var _isAudioSystemBypassForDebugEnabled = false
     private var _preferredLocales: [Locale] = [Locale(identifier: "zh-CN"), .current]
+    /// `state == .recording` 的缓存镜像，供跨线程 `isRecording` 读取；由 `setState` 在 audioQueue 上更新。
+    private var _isRecording = false
+    /// 最近一次音频缓冲估算出的归一化音量（0…1），供录音态波形起伏用。
+    /// 写在音频线程、读在 audioQueue，统一用 configLock 保护。
+    private var _currentAudioLevel: Double = 0
+    /// 音量事件节流用的帧累计（只在音频线程读写，无需加锁）。
+    private var framesSinceLevelEmit: AVAudioFramePosition = 0
 
     private enum InternalState {
         case idle
         case starting(UUID)
         case recording(UUID)
+        /// 用户已松手请求「优雅收尾」：仍在采集尾音 / 等识别器吐出最终结果，尚未真正停止。
+        case finalizing(UUID)
         case stopping(UUID)
 
         var sessionID: UUID? {
             switch self {
             case .idle:
                 return nil
-            case .starting(let id), .recording(let id), .stopping(let id):
+            case .starting(let id), .recording(let id), .finalizing(let id), .stopping(let id):
                 return id
             }
         }
@@ -162,9 +186,33 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
     private var partialText = ""
     private var activeSessionUsesDebugAudioBypass = false
 
+    /// 是否允许「预热」：系统语音识别 + 麦克风权限都已授权、且当前没有其他音频在播放。
+    /// 预热会激活 `.record` 会话并 duck 其他音频，所以有其他音频在放（或系统要求次要音频静音）时不预热。
+    public var canPrewarmNow: Bool {
+        guard SFSpeechRecognizer.authorizationStatus() == .authorized else { return false }
+        let session = AVAudioSession.sharedInstance()
+        guard session.recordPermission == .granted else { return false }
+        if session.isOtherAudioPlaying { return false }
+        if session.secondaryAudioShouldBeSilencedHint { return false }
+        return true
+    }
+
+    /// 当前是否已进入录音/识别阶段。跨线程读取，用 `configLock` 保护。
+    public var isRecording: Bool {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return _isRecording
+    }
+
+    /// 最近一次估算的归一化音量（0…1）。跨线程读取，用 `configLock` 保护。
+    private var currentAudioLevel: Double {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return _currentAudioLevel
+    }
+
     /// 开始录音识别。`locale` 传 nil 时按 `preferredLocales` 优先级自动解析识别语言。
-    public func startRecording(locale: Locale? = nil) -> AsyncStream<AppAgentVoiceRecognitionEvent> {
-        let sessionID = UUID()
+    public func startRecording(locale: Locale? = nil) -> AsyncStream<AppAgentVoiceRecognitionEvent> {        let sessionID = UUID()
         log("startRecording requested locale=\(locale?.identifier ?? "auto") session=\(shortSessionID(sessionID))")
 
         return AsyncStream { continuation in
@@ -210,6 +258,68 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
         audioQueue.async { [weak self] in
             self?.finishCurrentRecording(reason: reason, resumes: nil)
         }
+    }
+
+    func requestFinishRecording(trailingCapture: TimeInterval, finalizationTimeout: TimeInterval) {
+        audioQueue.async { [weak self] in
+            self?.beginFinalizing(
+                trailingCapture: max(0, trailingCapture),
+                finalizationTimeout: max(0, finalizationTimeout)
+            )
+        }
+    }
+
+    /// 优雅收尾：从「录音中」切到「收尾中」，继续采集尾音，然后等最终识别结果。
+    /// 必须在 `audioQueue` 上调用。
+    private func beginFinalizing(trailingCapture: TimeInterval, finalizationTimeout: TimeInterval) {
+        guard let sessionID = state.sessionID else {
+            log("finalize ignored: already idle")
+            return
+        }
+        // 只有真正在录音时才需要收尾；其余状态（仍在准备 / 已在停）直接按立即停止收尾。
+        guard case .recording = state else {
+            log("finalize while state=\(describe(state)) → immediate finish session=\(shortSessionID(sessionID))")
+            finishCurrentSession(reason: .userStopped)
+            return
+        }
+
+        setState(.finalizing(sessionID), reason: "finalize trailing=\(trailingCapture) timeout=\(finalizationTimeout)")
+
+        // 调试假录音：没有真实识别器会吐 isFinal，直接用当前文本收尾。
+        if activeSessionUsesDebugAudioBypass {
+            finishCurrentSession(reason: .userStopped)
+            return
+        }
+
+        // 1) 继续采集 trailingCapture 秒尾音，到点停止喂音频并请求最终结果。
+        audioQueue.asyncAfter(deadline: .now() + trailingCapture) { [weak self] in
+            guard let self = self, self.state.sessionID == sessionID else { return }
+            guard case .finalizing = self.state else { return }
+            self.stopAudioFeedRequestingFinal(sessionID: sessionID)
+        }
+
+        // 2) 兜底：最终结果迟迟不来（离线模型慢 / 网络差），到点用当前最好文本强制收尾，
+        //    绝不把面板永久挂在收尾态。
+        audioQueue.asyncAfter(deadline: .now() + trailingCapture + finalizationTimeout) { [weak self] in
+            guard let self = self, self.state.sessionID == sessionID else { return }
+            guard case .finalizing = self.state else { return }
+            self.log("finalization timeout → finish with best text session=\(self.shortSessionID(sessionID))")
+            self.finishCurrentSession(reason: .userStopped)
+        }
+    }
+
+    /// 停止喂音频（停引擎 + `endAudio`），但**保留识别任务**等待 `isFinal`，不 `cancel`。
+    /// 必须在 `audioQueue` 上调用。
+    private func stopAudioFeedRequestingFinal(sessionID: UUID) {
+        guard state.sessionID == sessionID, case .finalizing = state else { return }
+        log("stop audio feed, request final session=\(shortSessionID(sessionID))")
+        if let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            if engine.isRunning {
+                engine.stop()
+            }
+        }
+        recognitionRequest?.endAudio()
     }
 
     func stopRecording(reason: AppAgentVoiceRecognitionEndReason) async -> AppAgentVoiceRecognitionStopResult {
@@ -354,8 +464,23 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
         }
 
         inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+        // 音量事件节流：约每 0.08s（≈12Hz）向 UI 投递一次音量，够反映声音变化又省 CPU。
+        let levelEmitIntervalFrames = AVAudioFramePosition(max(1, format.sampleRate * 0.08))
+        framesSinceLevelEmit = 0
+        setAudioLevel(0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             request.append(buffer)
+            guard let self = self else { return }
+            // 估算音量并缓存（音频线程），按帧数节流后再切到 audioQueue 投递 .recording。
+            self.setAudioLevel(self.normalizedAudioLevel(from: buffer))
+            self.framesSinceLevelEmit += AVAudioFramePosition(buffer.frameLength)
+            guard self.framesSinceLevelEmit >= levelEmitIntervalFrames else { return }
+            self.framesSinceLevelEmit = 0
+            self.audioQueue.async { [weak self] in
+                guard let self = self, self.state.sessionID == sessionID else { return }
+                guard case .recording = self.state else { return }
+                self.emitRecording(sessionID: sessionID)
+            }
         }
 
         do {
@@ -404,23 +529,43 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
             log("recognition callback ignored for stale session=\(shortSessionID(sessionID)) current=\(shortSessionID(state.sessionID))")
             return
         }
-        guard case .recording = state else {
-            if case .stopping = state { return }
-            log("recognition callback ignored while state=\(describe(state)) session=\(shortSessionID(sessionID))")
-            return
-        }
 
-        if let result = result {
-            partialText = result.bestTranscription.formattedString
-            if result.isFinal {
-                finalText = partialText
+        switch state {
+        case .recording:
+            if let result = result {
+                partialText = result.bestTranscription.formattedString
+                if result.isFinal {
+                    finalText = partialText
+                }
+                emitRecording(sessionID: sessionID)
             }
-            emitRecording(sessionID: sessionID)
-        }
+            if let error = error {
+                log("recognition callback error=\(error.localizedDescription) session=\(shortSessionID(sessionID))")
+                finishSessionIfCurrent(sessionID, reason: .failed(error.localizedDescription))
+            }
 
-        if let error = error {
-            log("recognition callback error=\(error.localizedDescription) session=\(shortSessionID(sessionID))")
-            finishSessionIfCurrent(sessionID, reason: .failed(error.localizedDescription))
+        case .finalizing:
+            // 收尾期：继续吸收识别结果；拿到最终结果（或出错）即用当前最好文本结束，
+            // 不能像录音期那样把 error 当失败——收尾阶段的目标是「尽量不丢已识别内容」。
+            if let result = result {
+                partialText = result.bestTranscription.formattedString
+                if result.isFinal {
+                    finalText = partialText
+                    log("final result received during finalize session=\(shortSessionID(sessionID))")
+                    finishCurrentSession(reason: .userStopped)
+                    return
+                }
+            }
+            if let error = error {
+                log("recognition error during finalize=\(error.localizedDescription) session=\(shortSessionID(sessionID))")
+                finishCurrentSession(reason: .userStopped)
+            }
+
+        case .stopping:
+            return
+
+        default:
+            log("recognition callback ignored while state=\(describe(state)) session=\(shortSessionID(sessionID))")
         }
     }
 
@@ -496,6 +641,8 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
 
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         activeSessionUsesDebugAudioBypass = false
+        setAudioLevel(0)
+        framesSinceLevelEmit = 0
     }
 
     private func emitLoading(_ reason: AppAgentVoiceRecognitionLoadingReason, sessionID: UUID) {
@@ -508,11 +655,43 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
                 partialText: partialText,
                 finalText: finalText,
                 combinedText: combinedText,
-                audioLevel: 0,
+                audioLevel: currentAudioLevel,
                 timestamp: now
             )),
             sessionID: sessionID
         )
+    }
+
+    /// 写入最近一次归一化音量（音频线程调用），供 UI 读取起伏。
+    private func setAudioLevel(_ level: Double) {
+        configLock.lock()
+        _currentAudioLevel = level
+        configLock.unlock()
+    }
+
+    /// 从音频缓冲估算归一化音量（0…1）。低采样（最多 256 点）估 RMS，再按 dB 映射，够反映响度变化即可。
+    private func normalizedAudioLevel(from buffer: AVAudioPCMBuffer) -> Double {
+        guard let channel = buffer.floatChannelData?[0] else { return 0 }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return 0 }
+
+        let step = max(1, frameCount / 256)
+        var sumSquares: Float = 0
+        var count = 0
+        var index = 0
+        while index < frameCount {
+            let sample = channel[index]
+            sumSquares += sample * sample
+            count += 1
+            index += step
+        }
+        guard count > 0 else { return 0 }
+
+        let rms = sqrt(sumSquares / Float(count))
+        guard rms > 0 else { return 0 }
+        // -50dB…0dB 线性映射到 0…1，弱声也有可见起伏。
+        let db = 20 * log10(Double(rms))
+        return min(1, max(0, (db + 50) / 50))
     }
 
     private func emit(_ event: AppAgentVoiceRecognitionEvent, sessionID: UUID) {
@@ -541,6 +720,13 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
 
     private func setState(_ newState: InternalState, reason: String) {
         state = newState
+        configLock.lock()
+        if case .recording = newState {
+            _isRecording = true
+        } else {
+            _isRecording = false
+        }
+        configLock.unlock()
         log("state -> \(describe(newState)) reason=\(reason)")
     }
 
@@ -562,6 +748,8 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
             return "starting(\(shortSessionID(id)))"
         case .recording(let id):
             return "recording(\(shortSessionID(id)))"
+        case .finalizing(let id):
+            return "finalizing(\(shortSessionID(id)))"
         case .stopping(let id):
             return "stopping(\(shortSessionID(id)))"
         }

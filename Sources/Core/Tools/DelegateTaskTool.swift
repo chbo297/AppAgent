@@ -73,12 +73,13 @@ public struct DelegateTaskTool: ToolProtocol {
             delegationDepth: session.delegationDepth + 1
         )
 
-        // Exclude delegate_task from sub-session to prevent recursion
-        subSession.toolPolicy = ToolCentral.ToolPolicy(excludedNames: ["delegate_task"])
+        Self.inheritBoundaries(from: session, into: subSession)
         await subSession.reinstallTools()
 
         // Send the message and collect the final response
+        try Task.checkCancellation()
         let stream = subSession.sendMessage(userMessage)
+        defer { subSession.executor.cancel() }
         var finalText = ""
 
         for await event in stream {
@@ -100,5 +101,15 @@ public struct DelegateTaskTool: ToolProtocol {
             "result": .string(finalText),
             "goal": .string(goal)
         ]))
+    }
+
+    static func inheritBoundaries(from parent: AISession, into child: AISession) {
+        var policy = parent.toolPolicy ?? ToolCentral.ToolPolicy()
+        policy.excludedNames = (policy.excludedNames ?? []).union(["delegate_task"])
+        child.toolPolicy = policy
+        child.inspectionSceneIdentifier = parent.inspectionSceneIdentifier
+        child.allowsAppAgentInspection = parent.allowsAppAgentInspection
+        child.decisionResponders = parent.decisionResponders
+        child.decisionParent = parent
     }
 }

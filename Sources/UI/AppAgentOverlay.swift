@@ -49,6 +49,9 @@ public final class AppAgentOverlay {
     // MARK: - Init
 
     private init(windowScene: UIWindowScene) {
+        // 真机排查全靠这份落盘日志：挂上 overlay 就开始记，宿主不用写代码。
+        // 调试面板的「导出全部数据」把它和会话快照一起打包带走。
+        AppAgentRunLog.shared.install()
         let viewController = AppAgentViewController()
         self.viewController = viewController
         self.window = AppAgentWindow(
@@ -63,11 +66,16 @@ public final class AppAgentOverlay {
     public func bind(agent: AIAgent, sessionId: String) {
         viewController.agent = agent
         viewController.switchSession(to: sessionId)
+        viewController.currentSession?.inspectionSceneIdentifier = window.windowScene?.session.persistentIdentifier
     }
 
     // MARK: - Visibility
 
     public func show() {
+        // window 隐藏/显示不保证触发 VC appearance；已可见时重复 show 不打断连续阅读。
+        if window.isHidden {
+            viewController.prepareChatForPresentation()
+        }
         window.isHidden = false
         viewController.presentationDelegate?.appAgentChatPanelWillShow()
     }

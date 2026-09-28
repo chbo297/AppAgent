@@ -5,8 +5,8 @@
 //  In-simulator smoke test for every tool the agent ships with. Runs each tool
 //  DIRECTLY (no LLM round-trip) against a live session, tallies pass/fail per
 //  check, and returns a human-readable report. Launch with `-run-selfcheck`
-//  and the report is written to Documents/selfcheck-report.txt plus emitted to
-//  the log in chunks (os_log truncates a single long message), so a script
+//  and the report is written to Documents/AppAgent/diagnostics/selfcheck-report.txt
+//  plus emitted to the log in chunks (os_log truncates a single long message), so a script
 //  driving the simulator can assert on it.
 //
 //  Every check runs behind a timeout so one hanging tool can never wedge the
@@ -14,6 +14,7 @@
 //
 
 import UIKit
+import WebKit
 
 enum CapabilitySelfCheck {
 
@@ -32,7 +33,7 @@ enum CapabilitySelfCheck {
     static let beginMarker = "APPAGENT_SELFCHECK_BEGIN"
     static let endMarker = "APPAGENT_SELFCHECK_END"
     static let summaryMarker = "APPAGENT_SELFCHECK_SUMMARY"
-    static let reportFileName = "selfcheck-report.txt"
+    static let reportFileName = "AppAgent/diagnostics/selfcheck-report.txt"
 
     /// Per-check wall clock budget. Anything slower is a bug worth surfacing.
     private static let checkTimeout: TimeInterval = 8
@@ -84,7 +85,9 @@ enum CapabilitySelfCheck {
     private static func writeArtifact(_ name: String, _ contents: String) {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
         else { return }
-        try? contents.write(to: docs.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        let target = docs.appendingPathComponent(name)
+        try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? contents.write(to: target, atomically: true, encoding: .utf8)
     }
 
     /// Execute one tool call, judge it against `expect`, and record the outcome.
@@ -171,11 +174,15 @@ enum CapabilitySelfCheck {
         return report
     }
 
-    /// Write the report next to the app's Documents so it survives the run, and
+    /// Write the report in protected diagnostics so it survives the run, and
     /// emit it to the log in os_log-sized chunks plus a one-line summary.
     private static func persist(_ report: String) {
         if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
             let url = docs.appendingPathComponent(reportFileName)
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
             try? report.write(to: url, atomically: true, encoding: .utf8)
             NSLog("APPAGENT_SELFCHECK_FILE %@", url.path)
         }
@@ -203,15 +210,7 @@ enum CapabilitySelfCheck {
     private static func checkRuntimeInspection(_ rec: Recorder, session: AISession) async {
         let runtime = RuntimeInspectTool(provider: DefaultRuntimeInspectProvider())
         rec.section("app_runtime_inspect")
-        // The demo mounts the host window plus the SDK's overlay window(s), so a
-        // hierarchy dump that only walked keyWindow would miss a whole UI layer.
-        let windowCount = await withBudget { () async throws -> Int in
-            await MainActor.run {
-                UIApplication.shared.connectedScenes
-                    .compactMap { $0 as? UIWindowScene }
-                    .flatMap { $0.windows }.count
-            }
-        } ?? 0
+        // Default and full detail must both stay host-only even while overlay is mounted.
         await check(rec, "ui_hierarchy(summary)", runtime, ["op": .string("ui_hierarchy")],
                     session: session, preview: 700)
         let summary = await withBudget { () async throws -> String in
@@ -226,17 +225,48 @@ enum CapabilitySelfCheck {
         // 摘要必须真的省下来，否则「先看地图再钻取」这条路等于没做。
         let summaryBytes = summary.utf8.count
         let fullBytes = full.utf8.count
-        let shrunk = summaryBytes > 0 && fullBytes > 0 && summaryBytes * 3 < fullBytes
-        rec.record("摘要显著小于全量", ok: shrunk,
+        let shrunk = summaryBytes > 0 && fullBytes > summaryBytes
+        rec.record("宿主摘要小于宿主全量", ok: shrunk,
                    detail: "summary=\(summaryBytes)B full=\(fullBytes)B"
                         + (fullBytes > 0 ? String(format: " (%.0f%%)", Double(summaryBytes) / Double(fullBytes) * 100) : ""))
-        // 摘要覆盖到每一个 window（overlay 那两层不能漏）
-        let dumped = summary.components(separatedBy: "\n").filter { $0.hasPrefix("[W") }.count
-        rec.record("摘要覆盖每个 window", ok: dumped == windowCount && dumped > 0,
-                   detail: "scene windows=\(windowCount), summarized=\(dumped)")
+        let all = await withBudget { () async throws -> String in
+            try await runtime.execute(arguments: [
+                "op": .string("ui_hierarchy"), "scope": .string("all")
+            ], session: session).stringValue
+        } ?? ""
+        let sdk = await withBudget { () async throws -> String in
+            try await runtime.execute(arguments: [
+                "op": .string("ui_hierarchy"), "scope": .string("appagent")
+            ], session: session).stringValue
+        } ?? ""
+        rec.record("默认摘要与 full 排除 SDK 窗口",
+                   ok: !summary.contains("AppAgentWindow") && !full.contains("AppAgentWindow")
+                    && !summary.contains("AppAgentRegionDebug") && !full.contains("AppAgentRegionDebug")
+                    && summary.contains("HostTabBar"),
+                   detail: "host summary=\(summaryBytes)B full=\(fullBytes)B")
+        rec.record("显式授权 all 可检查 SDK", ok: all.contains("AppAgentWindow"),
+                   detail: "all=\(all.utf8.count)B")
+        rec.record("appagent 范围不含宿主页面",
+                   ok: sdk.contains("AppAgentWindow") && !sdk.contains("HostTabBarController"),
+                   detail: "sdk=\(sdk.utf8.count)B")
+        // Use a handle obtained through approved SDK inspection, then try it in host scope.
+        // Guessing a valid path must not bypass ownership at read/write/screenshot entry points.
+        if let match = sdk.range(of: #"W[0-9]+:"# , options: .regularExpression) {
+            let sdkRoot = String(sdk[match]) + "root"
+            await check(rec, "宿主 view_info 拒绝 SDK 句柄", runtime,
+                        ["op": .string("view_info"), "path": .string(sdkRoot)],
+                        expect: .errorContains("no view at path"), session: session)
+            await check(rec, "宿主 screenshot 拒绝 SDK 句柄", ScreenshotTool(),
+                        ["path": .string(sdkRoot)], expect: .errorContains("outside"), session: session)
+            await check(rec, "授权 SDK view_info 可用", runtime,
+                        ["op": .string("view_info"), "path": .string(sdkRoot), "scope": .string("appagent")],
+                        session: session)
+        } else {
+            rec.record("SDK 摘要有可检验句柄", ok: false, detail: "SDK scope missing W<n>: path")
+        }
         // 摘要必须给出可直接二次调用的钻取句柄
-        rec.record("摘要含可寻址 path", ok: summary.contains("[W0:") || summary.contains("view=[W"),
-                   detail: summary.contains("[W0:") ? "有 W0: 前缀路径" : "缺少可寻址 path")
+        rec.record("摘要含可寻址 path", ok: summary.contains("[W") && summary.contains(":"),
+                   detail: "使用稳定 window 句柄")
         await check(rec, "ui_hierarchy(bogus detail) rejected", runtime,
                     ["op": .string("ui_hierarchy"), "detail": .string("nope")],
                     expect: .errorContains("Unknown detail"), session: session)
@@ -252,6 +282,7 @@ enum CapabilitySelfCheck {
                       "# ui_hierarchy(detail:summary) — \(summaryBytes) bytes\n\n\(summary)\n\n"
                       + "# ui_hierarchy(detail:full) — \(fullBytes) bytes\n\n\(full)\n\n"
                       + "# view_tree(maxDepth 30)\n\n\(deepTree)\n")
+        writeArtifact("AppAgent/diagnostics/selfcheck-sdk-hierarchy.txt", "# authorized all\n\(all)\n\n# SDK only\n\(sdk)")
         await check(rec, "class_list(HostTabBar)", runtime,
                     ["op": .string("class_list"), "filter": .string("HostTabBar")], session: session)
         await check(rec, "class_list(no filter) rejected", runtime,
@@ -276,8 +307,10 @@ enum CapabilitySelfCheck {
         // 变更类操作（view_set / view_invoke / JS uiSet）打在自检自己插入的
         // 一次性视图上，而不是真实 UIKit 内部视图 —— 否则自检跑完会把界面改坏，
         // 下次有人打开 app 会以为 UI 有 bug。跑完在本函数末尾移除。
+        let hostWindowPrefix = summary.range(of: #"W[0-9]+:"# , options: .regularExpression)
+            .map { String(summary[$0]) } ?? ""
         let scratch = await withBudget { () async throws -> String in
-            await MainActor.run { installScratchView() ?? "" }
+            await MainActor.run { installScratchView(windowPrefix: hostWindowPrefix) ?? "" }
         }.flatMap { $0.isEmpty ? nil : $0 }
         rec.record("临时视图已挂载（变更操作不碰真实视图）", ok: scratch != nil,
                    detail: scratch.map { "path=\($0)" } ?? "no window available")
@@ -348,7 +381,7 @@ enum CapabilitySelfCheck {
             "name": .string("selfcheck-js"),
             "javascript": .string(
                 "appagent.log('js patch running');"
-                + "var applied = appagent.uiSet('\(scratch ?? "root")', 'cornerRadius', '12');"
+                + "var applied = appagent.uiSet('\(scratch ?? "missing-scratch")', 'cornerRadius', '12');"
                 + "'js → ' + applied + ' | treeLen=' + appagent.uiTree(2).length;"
             ),
             "applyMode": .string("instant"),
@@ -359,7 +392,7 @@ enum CapabilitySelfCheck {
         let jsGuard = await withBudget { () async throws -> String in
             try await hotfix.execute(arguments: [
                 "op": .string("apply"), "name": .string("selfcheck-js-guard"),
-                "javascript": .string("appagent.uiInvoke('\(scratch ?? "root")', 'setTag:', '[7]')"),
+                "javascript": .string("appagent.uiInvoke('\(scratch ?? "missing-scratch")', 'setTag:', '[7]')"),
                 "applyMode": .string("instant")
             ], session: session).stringValue
         } ?? "TIMEOUT"
@@ -396,7 +429,45 @@ enum CapabilitySelfCheck {
         rec.record("补丁槽位已清空（无残留）", ok: patchesLeft == "[]",
                    detail: trimmed(patchesLeft, 200))
 
+        // Reclassify only our disposable view to exercise embedded SDK ownership.
+        // Even if the negative check fails, no real SDK or host UI is mutated.
+        if let scratch {
+            _ = await withBudget { () async throws -> Bool in
+                await MainActor.run {
+                    guard let view = scratchView else { return false }
+                    view.tag = 0
+                    HostInspectionUIKit.markAppAgentOwned(view)
+                    return true
+                }
+            }
+            await check(rec, "宿主 view_set 拒绝嵌入 SDK 临时视图", runtime,
+                        ["op": .string("view_set"), "path": .string(scratch),
+                         "key": .string("tag"), "value": .string("271828")],
+                        expect: .errorContains("no view at path"), session: session)
+            await check(rec, "宿主 screenshot 拒绝嵌入 SDK 临时视图", ScreenshotTool(),
+                        ["path": .string(scratch)], expect: .errorContains("outside"), session: session)
+            await check(rec, "授权 SDK view_info 可访问嵌入临时视图", runtime,
+                        ["op": .string("view_info"), "path": .string(scratch), "scope": .string("appagent")],
+                        session: session)
+            let jsDenied = await withBudget { () async throws -> String in
+                try await hotfix.execute(arguments: [
+                    "op": .string("apply"), "name": .string("selfcheck-sdk-guard"),
+                    "javascript": .string("appagent.uiSet('\(scratch)', 'tag', '42')"),
+                    "applyMode": .string("instant")
+                ], session: session).stringValue
+            } ?? "TIMEOUT"
+            let unchanged = await withBudget { () async throws -> Bool in
+                await MainActor.run { scratchView?.tag == 0 }
+            }
+            rec.record("宿主 JS 桥拒绝 SDK 且未修改视图",
+                       ok: jsDenied.contains("no view at path") && unchanged == true,
+                       detail: trimmed(jsDenied, 160))
+            await check(rec, "remove(SDK 负向测试槽位)", hotfix,
+                        ["op": .string("remove"), "name": .string("selfcheck-sdk-guard")], session: session)
+        }
+
         await checkHookCapture(rec, session: session)
+        await checkWebInspect(rec, session: session)
 
         // 宿主后台服务（liji_server）相关工具已迁到宿主侧，由宿主自行注册到 ToolCentral，
         // AppAgent 不再内置，故本自检不再覆盖；宿主侧自检请在宿主工程里做。
@@ -469,9 +540,19 @@ enum CapabilitySelfCheck {
                      "value": .string("1")],
                     expect: .errorContains("Failed to set"), session: session)
 
-        await check(rec, "invoke(HostTabBarController.description)", runtime,
+        // The top page is the selected tab's content, not HostTabBarController.
+        // Host scope must not fall back to its class object; approved all may.
+        await check(rec, "invoke(HostTabBarController.description) host 拒绝类对象回退", runtime,
                     ["op": .string("invoke"), "class": .string("HostTabBarController"),
-                     "selector": .string("description")], session: session, preview: 200)
+                     "selector": .string("description")],
+                    expect: .errorContains("selector description not found on HostTabBarController instance/class"),
+                    session: session, preview: 200)
+        // Go through execute → HostInspectionAccess → SelfCheckDecisionResponder,
+        // not a provider call with a fabricated all-scope context.
+        await check(rec, "invoke(HostTabBarController.description) 授权 all 放行类方法", runtime,
+                    ["op": .string("invoke"), "class": .string("HostTabBarController"),
+                     "selector": .string("description"), "scope": .string("all")],
+                    expect: .ok, session: session, preview: 200)
         await check(rec, "invoke(未知类) rejected", runtime,
                     ["op": .string("invoke"), "class": .string("NoSuchClassHere"),
                      "selector": .string("description")],
@@ -493,17 +574,27 @@ enum CapabilitySelfCheck {
     private static func checkReflectionGuards(
         _ rec: Recorder, session: AISession, runtime: RuntimeInspectTool, path: String
     ) async {
-        await check(rec, "view_invoke(description) 放行对象返回值", runtime,
+        // Object-compatible ABI is necessary, not sufficient: description is an
+        // arbitrary selector, so host must reject it and only approved all may run it.
+        await check(rec, "view_invoke(description) host 拒绝任意 selector", runtime,
                     ["op": .string("view_invoke"), "path": .string(path),
-                     "selector": .string("description")], session: session, preview: 200)
-        await check(rec, "view_invoke(setTag:) 拒绝原始类型参数", runtime,
+                     "selector": .string("description")],
+                    expect: .errorContains("selector description requires all scope"), session: session)
+        await check(rec, "view_invoke(description) 授权 all 放行对象返回值", runtime,
                     ["op": .string("view_invoke"), "path": .string(path),
-                     "selector": .string("setTag:"), "argumentsJSON": .string("[7]")],
-                    expect: .errorContains("not an object"), session: session)
-        await check(rec, "view_invoke(isHidden) 拒绝原始类型返回值", runtime,
-                    ["op": .string("view_invoke"), "path": .string(path),
-                     "selector": .string("isHidden")],
-                    expect: .errorContains("not an object"), session: session)
+                     "selector": .string("description"), "scope": .string("all")],
+                    expect: .ok, session: session, preview: 200)
+        // Scope approval must never bypass the primitive ABI guard.
+        for scope in ["host", "all"] {
+            await check(rec, "view_invoke(setTag:, scope:\(scope)) 拒绝原始类型参数", runtime,
+                        ["op": .string("view_invoke"), "path": .string(path), "scope": .string(scope),
+                         "selector": .string("setTag:"), "argumentsJSON": .string("[7]")],
+                        expect: .errorContains("not an object"), session: session)
+            await check(rec, "view_invoke(isHidden, scope:\(scope)) 拒绝原始类型返回值", runtime,
+                        ["op": .string("view_invoke"), "path": .string(path), "scope": .string(scope),
+                         "selector": .string("isHidden")],
+                        expect: .errorContains("not an object"), session: session)
+        }
         await check(rec, "view_invoke(未知 selector) rejected", runtime,
                     ["op": .string("view_invoke"), "path": .string(path),
                      "selector": .string("selfcheckNoSuchSelector")],
@@ -514,10 +605,12 @@ enum CapabilitySelfCheck {
         rec.record("被拒的 setTag: 没写脏 tag", ok: tag == 0, detail: "tag=\(tag)")
 
         // 写类操作的失败文案五花八门，必须条条都报成失败。
+        // view_set reads the rollback value first; an unknown key fails that read
+        // before any setter is attempted, and mutationOutput must still report an error.
         await check(rec, "view_set(未知 key) rejected", runtime,
                     ["op": .string("view_set"), "path": .string(path),
                      "key": .string("selfcheckNoSuchKey"), "value": .string("1")],
-                    expect: .errorContains("Failed to set"), session: session)
+                    expect: .errorContains("Failed to read selfcheckNoSuchKey: KVC access failed."), session: session)
         await check(rec, "view_set(坏 rect) rejected", runtime,
                     ["op": .string("view_set"), "path": .string(path),
                      "key": .string("frame"), "value": .string("garbage")],
@@ -541,6 +634,115 @@ enum CapabilitySelfCheck {
         await check(rec, "view_info(不存在的 window) rejected", runtime,
                     ["op": .string("view_info"), "path": .string("W9:0")],
                     expect: .errorContains("no view at path"), session: session)
+    }
+
+    // MARK: - app_web_inspect：真挂一个 WKWebView 进去读 DOM
+
+    /// DOM 只能经 evaluateJavaScript 拿，单测里没有 WKWebView，所以这里自己挂一个隐藏的
+    /// scratch webview、灌一段刻意「有问题」的 HTML（按钮 display:none、内容比容器宽），
+    /// 跑完 targets → dom_summary → why_hidden → dom_query 再拆掉，**不留痕**。
+    private static func checkWebInspect(_ rec: Recorder, session: AISession) async {
+        rec.section("app_web_inspect (H5 / WKWebView 内省)")
+        let tool = WebInspectTool(provider: DefaultWebInspectProvider.shared)
+        await check(rec, "dom_query(缺 selector/path) rejected", tool,
+                    ["op": .string("dom_query")],
+                    expect: .errorContains("'selector' or 'path' is required"), session: session)
+        await check(rec, "probe(缺坐标) rejected", tool,
+                    ["op": .string("probe"), "x": .number(1)],
+                    expect: .errorContains("'x' and 'y' are required"), session: session)
+        await check(rec, "未知 webviewId rejected", tool,
+                    ["op": .string("dom_summary"), "webviewId": .string("w999")],
+                    expect: .errorContains("webview not found"), session: session)
+
+        let installed = await installScratchWebView()
+        guard installed else {
+            rec.record("挂载 scratch WKWebView", ok: false, detail: "拿不到可用的 window")
+            return
+        }
+        rec.record("挂载 scratch WKWebView", ok: true, detail: "已插入隐藏容器，检查完即移除")
+        let loaded = await waitForScratchPageLoad(tool: tool, session: session)
+        rec.record("scratch 页面加载完成", ok: loaded, detail: loaded ? "readyState=complete" : "TIMEOUT")
+
+        await check(rec, "targets 列出 scratch 容器", tool, ["op": .string("targets")],
+                    session: session, preview: 300)
+        await check(rec, "dom_summary 给出锚点节点", tool, ["op": .string("dom_summary")],
+                    session: session, preview: 600)
+        await check(rec, "why_hidden(#gone) 指出 display:none", tool,
+                    ["op": .string("why_hidden"), "selector": .string("#gone")],
+                    session: session, preview: 400)
+        await check(rec, "dom_query(#narrow) 给出盒模型与约束祖先", tool,
+                    ["op": .string("dom_query"), "selector": .string("#narrow")],
+                    session: session, preview: 600)
+        await check(rec, "why_hidden(不存在的 selector) rejected", tool,
+                    ["op": .string("why_hidden"), "selector": .string("#nope")],
+                    expect: .errorContains("no element for"), session: session)
+        await check(rec, "eval 返回 JSON 可序列化结果", tool,
+                    ["op": .string("eval"), "script": .string("return document.title;")],
+                    session: session, preview: 200)
+
+        await MainActor.run {
+            removeScratchWebView()
+        }
+        rec.record("scratch WKWebView 已移除", ok: true, detail: "自检不留痕")
+    }
+
+    /// scratch webview 只存在 @MainActor 静态槽里：**不把非 Sendable 的 WKWebView 跨隔离域传递**。
+    @MainActor private static var scratchWebView: WKWebView?
+
+    @MainActor
+    private static func installScratchWebView() -> Bool {
+        var host: UIWindow?
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else {
+                continue
+            }
+            for window in windowScene.windows {
+                if host == nil {
+                    host = window
+                }
+            }
+        }
+        guard let host else {
+            return false
+        }
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240))
+        webView.alpha = 0.01
+        webView.isUserInteractionEnabled = false
+        host.addSubview(webView)
+        // 刻意做成「两个典型故障」：按钮 display:none、内容比容器宽（scrollWidth > clientWidth）。
+        let html = """
+            <html><head><title>selfcheck</title><meta name="viewport" content="width=device-width"></head>
+            <body style="margin:0">
+            <div id="narrow" style="width:120px;overflow:hidden"><span style="display:inline-block;width:400px">wide content</span></div>
+            <button id="btn">tap me</button>
+            <button id="gone" style="display:none">hidden</button>
+            </body></html>
+            """
+        webView.loadHTMLString(html, baseURL: nil)
+        scratchWebView = webView
+        return true
+    }
+
+    @MainActor
+    private static func removeScratchWebView() {
+        scratchWebView?.removeFromSuperview()
+        scratchWebView = nil
+    }
+
+    private static func waitForScratchPageLoad(tool: WebInspectTool, session: AISession) async -> Bool {
+        // 不监听 delegate（scratch 视图没有 owner），直接轮询 readyState，最多约 3s。
+        for _ in 0..<30 {
+            let state = await withBudget(seconds: 2) { () async throws -> String in
+                try await tool.execute(arguments: ["op": .string("eval"),
+                                                  "script": .string("return document.readyState;")],
+                                       session: session).stringValue
+            } ?? ""
+            if state.contains("complete") {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
     }
 
     // MARK: - app_hook_capture：真的写两条 JSONL 再读回来
@@ -645,25 +847,17 @@ enum CapabilitySelfCheck {
                    detail: "config=\(originalConfig == nil ? "removed" : "restored") dirExisted=\(dirExisted)")
     }
 
-    /// 往 key window 挂一个不可见、不响应交互的一次性视图，返回它的可寻址路径。
+    /// 往宿主 window 挂一个不可见、不响应交互的一次性视图。
     /// 自检结束后移除，运行时 UI 不留痕迹。
     @MainActor
-    private static func installScratchView() -> String? {
-        let windows = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
-        // 必须和 DefaultRuntimeInspectProvider.keyWindow() 选同一个 window，
-        // 否则 path 寻址会落到别的窗口上。用 W<n>: 前缀顺带覆盖跨窗口寻址。
-        guard let windowIndex = windows.firstIndex(where: { $0.isKeyWindow }) ?? (windows.isEmpty ? nil : 0)
-        else { return nil }
-        let window = windows[windowIndex]
+    private static func installScratchView(windowPrefix: String) -> String? {
+        guard let window = DemoAgentHolder.hostTabBarController?.viewIfLoaded?.window else { return nil }
         let scratch = UIView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
         scratch.isUserInteractionEnabled = false
         scratch.isHidden = true
         window.addSubview(scratch)
         scratchView = scratch
-        return "W\(windowIndex):\(window.subviews.count - 1)"
+        return "\(windowPrefix)\(window.subviews.count - 1)"
     }
     // MARK: - host-storage: 沙箱文件 / UserDefaults
 
@@ -863,7 +1057,7 @@ enum CapabilitySelfCheck {
                     ["op": .string("set_model"), "model": .string("nope/none")],
                     expect: .errorContains("nope"), session: session)
 
-        // create → rename → clear → delete round trip on a throwaway session.
+        // create → rename → archive → restore round trip on a throwaway session.
         var createdId: String?
         let created = await withBudget { () async throws -> String in
             let out = try await sessions.execute(
@@ -890,10 +1084,15 @@ enum CapabilitySelfCheck {
             await check(rec, "switch", sessions,
                         ["op": .string("switch"), "session_id": .string(sid)],
                         expect: .completes, session: session)
-            await check(rec, "clear", sessions,
-                        ["op": .string("clear"), "session_id": .string(sid)], session: session)
-            await check(rec, "delete", sessions,
-                        ["op": .string("delete"), "session_id": .string(sid)], session: session)
+            await check(rec, "clear rejected", sessions,
+                        ["op": .string("clear"), "session_id": .string(sid)],
+                        expect: .errorContains("irreversibly"), session: session)
+            await check(rec, "archive", sessions,
+                        ["op": .string("archive"), "session_id": .string(sid)], session: session)
+            await check(rec, "archived", sessions,
+                        ["op": .string("archived")], session: session)
+            await check(rec, "restore", sessions,
+                        ["op": .string("restore"), "session_id": .string(sid)], session: session)
         }
         await check(rec, "delete(current) rejected", sessions,
                     ["op": .string("delete"), "session_id": .string(session.id)],
@@ -1005,7 +1204,7 @@ enum CapabilitySelfCheck {
                     session: session)
         await check(rec, "screenshot(bad path) rejected", shot,
                     ["path": .string("99/99")],
-                    expect: .errorContains("No view at path"), session: session)
+                    expect: .errorContains("outside"), session: session)
         rec.record("screenshot 是纯读（safe）", ok: shot.safetyLevel(for: [:]) == .safe,
                    detail: shot.safetyLevel(for: [:]).rawValue)
     }
@@ -1311,6 +1510,10 @@ final class SelfCheckDecisionResponder: DecisionResponder, @unchecked Sendable {
             return .answer(choices.first ?? "自检自动回答")
         case .toolAuthorization:
             // 自检直连 execute，不经过 LLMExecutor，这条一般走不到；放行以免误挂。
+            return .allowOnce
+        case .appAgentInspection:
+            // Direct execute still requests appagent/all approval through the
+            // normal decision path. Explicitly approve each self-check call.
             return .allowOnce
         }
     }

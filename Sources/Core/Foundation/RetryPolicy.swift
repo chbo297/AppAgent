@@ -7,10 +7,11 @@ import Foundation
 
 /// Configuration for automatic retry with exponential backoff and jitter.
 ///
-/// Used by `AIAgentExecutor` to retry transient API errors (rate limits, server errors, etc.).
+/// Used by `LLMExecutor` to retry transient API errors (rate limits, server errors, etc.).
 /// Reference: hermes-agent `retry_utils.py`.
 public struct RetryPolicy: Sendable {
-    /// Maximum number of retry attempts. Default: 3.
+    /// Maximum consecutive retries for the current model, excluding the initial request. Default: 3.
+    /// Resets after a successful stream or model fallback; retries also consume the turn's maxIterations.
     public var maxRetries: Int
     /// Base delay in seconds for the first retry. Default: 1.0.
     public var baseDelay: TimeInterval

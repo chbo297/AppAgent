@@ -41,12 +41,14 @@ public struct HotfixApplyResult: Sendable, Codable {
 }
 
 public protocol HotfixProvider: Sendable {
+    // Providers must enforce context for slot metadata AND execution. Re-enabling a patch
+    // cannot broaden its original scope or reuse an earlier turn's tool approval.
     /// 应用一段 JS 补丁到命名槽；applyMode 由服务端建议（instant/restart）。
-    func apply(name: String, javascript: String, applyMode: String, summary: String) async -> HotfixApplyResult
+    func apply(name: String, javascript: String, applyMode: String, summary: String, context: HostInspectionContext) async -> HotfixApplyResult
     /// 开/关某命名补丁槽（重启生效被视为可接受）。
-    func setEnabled(name: String, enabled: Bool) async -> Bool
+    func setEnabled(name: String, enabled: Bool, context: HostInspectionContext) async -> Bool
     /// 列出已安装的补丁槽。
-    func list() async -> [HotfixPatchInfo]
+    func list(context: HostInspectionContext) async -> [HotfixPatchInfo]
     /// 移除某命名补丁槽。
-    func remove(name: String) async -> Bool
+    func remove(name: String, context: HostInspectionContext) async -> Bool
 }

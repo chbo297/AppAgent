@@ -99,10 +99,11 @@ final class AppAgentDecisionCardView: UIView {
     }
 
     /// 选项 → 结果。放成 static 纯函数，方便单测锁住「点第几个 = 什么语义」。
-    static func outcome(for request: DecisionRequest, optionIndex: Int) -> DecisionOutcome {
+    nonisolated static func outcome(for request: DecisionRequest, optionIndex: Int) -> DecisionOutcome {
+        guard request.options.indices.contains(optionIndex) else { return .deny }
         let option = request.options[optionIndex]
         switch request {
-        case .privateNetworkAccess, .toolAuthorization:
+        case .privateNetworkAccess, .toolAuthorization, .appAgentInspection:
             switch option.id {
             case "allow_once": return .allowOnce
             case "allow_session": return .allowForSession

@@ -142,12 +142,23 @@ public struct WebFetchTool: ToolProtocol {
         // 落盘：长内容不该整篇进上下文，写下来再用 file_read 按需读。
         if let savePath = arguments["save_as"]?.stringValue, !savePath.isEmpty {
             let resolver = SandboxPathResolver()
-            guard let destination = resolver.resolve(savePath) else {
+            guard let paths = resolver.paths(for: savePath) else {
                 return .error("Invalid save_as path '\(savePath)' — path traversal is not allowed.")
             }
+            if let denial = SessionRepositoryProtection.mutationDenial(logical: paths.logical, resolved: paths.resolved) {
+                return .error(denial)
+            }
+            let destination = paths.resolved
             do {
                 try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
                                                         withIntermediateDirectories: true)
+                guard let current = resolver.paths(for: savePath),
+                      SandboxPathResolver.samePath(current.resolved, destination) else {
+                    return .error("Save destination changed.")
+                }
+                if let denial = SessionRepositoryProtection.mutationDenial(logical: current.logical, resolved: current.resolved) {
+                    return .error(denial)
+                }
                 try fetched.data.write(to: destination, options: .atomic)
                 result["saved_path"] = .string(savePath)
                 result["note"] = .string("Body written to the workspace; read it with file_read.")

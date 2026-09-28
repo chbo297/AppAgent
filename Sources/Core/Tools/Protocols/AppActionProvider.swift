@@ -9,6 +9,8 @@ import Foundation
 ///
 /// Actions are pre-registered operations the agent can trigger
 /// (e.g., "add_to_cart", "toggle_favorite", "submit_order").
+/// Expose only host-owned business actions; do not use this provider to bypass
+/// inspection scope for AppAgent settings, UI or raw conversation storage.
 public protocol AppActionProvider: Sendable {
     /// List all available actions (so the LLM knows what it can do).
     func availableActions() async -> [AppAction]

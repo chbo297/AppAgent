@@ -91,25 +91,37 @@ extension AppAgentViewController {
 
     // MARK: 布局分发
 
+    /// 每次布局变化（首次上屏、旋转、键盘、拖拽中容器重排）都从这里统一算出 inputBar 该待在哪。
+    /// 优先级从上到下：首帧 → 正在拖拽（跟手，不能被策略值拽回去）→ 静止时按收起/展开取偏好位置。
     func layoutInputBar(reason: AppAgentInputBarFrameChangeReason) {
+        // 容器还没有有效尺寸（view 尚未布局完），算出来的 frame 没有意义，直接跳过等下一次。
         guard inputBarContainerAvailableFrame.width > 0, inputBarContainerAvailableFrame.height > 0 else {
             return
         }
 
+        // context = 这一刻的环境快照：bounds、safeArea、键盘高度、已持久化的宽度/贴边位置。
         let context = inputBarLayoutContext
         let targetFrame: CGRect
         if !hasLaidOutInputBar {
+            // 第一次布局：没有任何历史状态，一律以展开态首帧落位（之后置位，不再走这支）。
             targetFrame = AppAgentInputBarFramePolicy.preferredExpandedFrame(context)
             hasLaidOutInputBar = true
         } else if isDraggingExpandedInputBar {
+            // 展开态正在被左右拖拽改宽度：用「最近一次手指原始位置」重算约束后的 frame，
+            // 而不是回到偏好位置，否则拖拽中途来一次布局就会把手里的 bar 弹回去。
             targetFrame = currentConstrainedExpandedInputBarFrame(context: context)
         } else if isDraggingCollapsedInputBar {
+            // 收起态（小圆胶囊）正在被拖着移动：同理用最近一次原始位置重算橡皮筋效果，
+            // 保证越界回弹的阻尼不会被重复施加。
             targetFrame = currentRubberBandedCollapsedInputBarFrame(context: context)
         } else if inputBar.isCollapsed {
+            // 静止 + 收起态：回到策略算出的收起位置（含上次保存的贴边落点）。
             targetFrame = AppAgentInputBarFramePolicy.preferredCollapsedFrame(context)
         } else {
+            // 静止 + 展开态：回到策略算出的展开位置（含上次保存的宽度、避让键盘）。
             targetFrame = AppAgentInputBarFramePolicy.preferredExpandedFrame(context)
         }
+        // 布局分发不做动画：动画只属于「抬手落位」那条路径（expand/collapse/松手结算）。
         applyInputBarFrame(targetFrame, animation: .immediate, reason: reason)
     }
 

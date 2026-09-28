@@ -55,16 +55,26 @@ public extension AppAgentEndpointSettings {
 }
 
 public extension AIAgent {
-    /// 应用一份接口设置：注册/替换本接口的所有 Provider，并把 `modelPolicy` 指向启用模型。
-    /// 之后创建的新会话会使用新配置（既有会话仍持有创建时快照的 provider）。
+    /// 应用一份接口设置：刷新本接口的 Provider 注册项，并把 `modelPolicy` 指向启用模型。
+    /// 旧的 AppAgent endpoint provider 会被移除，避免失效模型继续留在注册表里。
     func applyEndpointSettings(_ settings: AppAgentEndpointSettings) async {
-        for entry in settings.makeProviders() {
+        let entries = settings.makeProviders()
+        let desiredNames = Set(entries.map { entry in
+            entry.name
+        })
+        let staleNames = await providerCentral.registeredNames.filter {
+            $0.hasPrefix("appagent-") && !desiredNames.contains($0)
+        }
+        for name in staleNames {
+            await providerCentral.unregister(name: name)
+        }
+        for entry in entries {
             await providerCentral.register(name: entry.name, provider: entry.provider)
         }
         modelPolicy = settings.modelPolicy
         Logger.info(
             "AIAgent",
-            "applyEndpointSettings: providers=\(settings.makeProviders().count), primary=\(settings.primaryModelRef ?? "nil")"
+            "applyEndpointSettings: providers=\(entries.count), primary=\(settings.primaryModelRef ?? "nil")"
         )
     }
 }
@@ -73,7 +83,7 @@ public extension ModelProviderCentral {
     /// 便捷：把一份接口设置的所有 Provider 注册进本中心（供宿主 app 启动时使用）。
     func register(settings: AppAgentEndpointSettings) async {
         for entry in settings.makeProviders() {
-            await register(name: entry.name, provider: entry.provider)
+            register(name: entry.name, provider: entry.provider)
         }
     }
 }

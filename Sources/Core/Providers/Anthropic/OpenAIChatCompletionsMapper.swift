@@ -98,6 +98,11 @@ enum OpenAIChatCompletionsMapper {
                 }
             case .toolUse:
                 break
+            case .hostContext(let payload):
+                if !textBuffer.isEmpty {
+                    textBuffer += "\n\n"
+                }
+                textBuffer += payload.modelText
             }
         }
 
@@ -158,24 +163,30 @@ enum OpenAIChatCompletionsMapper {
         }
 
         for choice in chunk.choices {
-            if let reasoning = choice.delta.reasoningContent ?? choice.delta.reasoning, !reasoning.isEmpty {
+            let delta = choice.payload
+            if let reasoning = delta?.reasoningContent ?? delta?.reasoning, !reasoning.isEmpty {
                 events.append(.reasoningDelta(reasoning))
             }
-            if let content = choice.delta.content, !content.isEmpty {
+            if let content = delta?.content, !content.isEmpty {
                 events.append(.textDelta(content))
             }
 
-            for toolCall in choice.delta.toolCalls ?? [] {
+            for toolCall in delta?.toolCalls ?? [] {
                 let index = toolCall.index ?? 0
                 var active = activeToolCalls[index] ?? (
-                    id: toolCall.id ?? "call_\(index)",
+                    id: nonEmpty(toolCall.id) ?? "call_\(index)",
                     name: "",
                     arguments: ""
                 )
-                if let id = toolCall.id {
+                // 续传分片里 `id` / `name` 常是**空字符串**而不是缺键（实测 GLM 系的 OneAPI
+                // 端点就这样：首片给全名，后续每片都带 `"id":"","name":""`）。`if let` 挡不住
+                // 空串，直接覆盖会把首片的名字擦掉，收尾时 `flushToolCalls` 又按「名字为空」
+                // 整条丢掉 —— 于是 `finish_reason=tool_calls` 却解析出 0 个调用，界面上就是
+                // loading 转一圈什么都没有。空串一律当「这一片没给」。
+                if let id = nonEmpty(toolCall.id) {
                     active.id = id
                 }
-                if let name = toolCall.function?.name {
+                if let name = nonEmpty(toolCall.function?.name) {
                     active.name = name
                 }
                 if let arguments = toolCall.function?.arguments {
@@ -184,10 +195,27 @@ enum OpenAIChatCompletionsMapper {
                 activeToolCalls[index] = active
             }
 
+            // 老式 `function_call`：并到 0 号槽，和 `tool_calls` 走同一套收尾。
+            if let legacy = delta?.functionCall {
+                var active = activeToolCalls[0] ?? (id: "call_0", name: "", arguments: "")
+                if let name = nonEmpty(legacy.name) { active.name = name }
+                if let arguments = legacy.arguments { active.arguments += arguments }
+                activeToolCalls[0] = active
+            }
+
             if let finishReason = choice.finishReason {
                 switch finishReason {
                 case "tool_calls", "function_call":
-                    events.append(contentsOf: flushToolCalls(&activeToolCalls))
+                    let flushed = flushToolCalls(&activeToolCalls)
+                    if flushed.isEmpty {
+                        // 端点说这一轮是工具调用、却没给出可用的调用。留一条日志，
+                        // 否则上层只看到「空回复」，根因在诊断包里无迹可寻。
+                        Logger.warning(
+                            "OpenAIChatCompletions",
+                            "finish_reason=\(finishReason) 但没有解析到任何工具调用，chunk=\(payload.prefix(500))"
+                        )
+                    }
+                    events.append(contentsOf: flushed)
                     events.append(.done(stopReason: .toolUse))
                 case "stop":
                     events.append(.done(stopReason: .endTurn))
@@ -200,6 +228,12 @@ enum OpenAIChatCompletionsMapper {
         }
 
         return events
+    }
+
+    /// 空字符串按「这一片没给这个字段」处理：流式续传分片里 `id` / `name` 经常是 `""`。
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 
     private static func flushToolCalls(_ activeToolCalls: inout [Int: ActiveToolCall]) -> [ProviderStreamEvent] {
@@ -324,11 +358,18 @@ private struct OpenAIStreamChunk: Decodable {
 }
 
 private struct OpenAIChoice: Decodable {
-    let delta: OpenAIDelta
+    let delta: OpenAIDelta?
+    /// 有些 OpenAI 兼容端点在**流式**分片里用 `message` 而不是 `delta`（非标准，但确实存在）。
+    /// `delta` 以前是非 Optional，这类分片会整块解码失败被静默丢掉 —— 模型带着
+    /// `finish_reason: "tool_calls"` 回来、我们却一个调用都没解析到，就是这么来的。
+    let message: OpenAIDelta?
     let finishReason: String?
 
+    /// 这一片真正承载内容的那个字段。
+    var payload: OpenAIDelta? { delta ?? message }
+
     enum CodingKeys: String, CodingKey {
-        case delta
+        case delta, message
         case finishReason = "finish_reason"
     }
 }
@@ -336,6 +377,8 @@ private struct OpenAIChoice: Decodable {
 private struct OpenAIDelta: Decodable {
     let content: String?
     let toolCalls: [OpenAIToolCallDelta]?
+    /// 老式单函数调用。新端点都用 `tool_calls`，但兼容层里仍有发这个的。
+    let functionCall: OpenAIFunctionDelta?
     /// 推理模型的思考增量：DeepSeek / OneAPI 系用 `reasoning_content`，部分网关用 `reasoning`。
     let reasoningContent: String?
     let reasoning: String?
@@ -343,6 +386,7 @@ private struct OpenAIDelta: Decodable {
     enum CodingKeys: String, CodingKey {
         case content, reasoning
         case toolCalls = "tool_calls"
+        case functionCall = "function_call"
         case reasoningContent = "reasoning_content"
     }
 }

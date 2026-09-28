@@ -35,6 +35,8 @@ final class ModelFallbackTests: XCTestCase {
 
         XCTAssertEqual(streamed, "hello from B")
         XCTAssertEqual(session.messages.last?.text, "hello from B")
+        XCTAssertEqual(session.modelId, "B")
+        XCTAssertEqual(session.uiState.get(SessionUIState.activeModelKey), "pb/B")
 
         let events = AppAgentDebugLog.shared.snapshot()
         XCTAssertTrue(events.contains { $0.kind == .failure && $0.reason == "model_not_found" })
@@ -65,6 +67,39 @@ final class ModelFallbackTests: XCTestCase {
         XCTAssertFalse(AppAgentDebugLog.shared.snapshot().contains { $0.kind == .fallback })
     }
 
+    /// 注册但真实请求失败的候选必须跳过，继续按用户顺序探测下一个模型。
+    func testSkipsRegisteredButUnavailableFallback() async throws {
+        let central = ModelProviderCentral()
+        await central.register(name: "pa", provider: AlwaysFailingProvider(modelId: "A", statusCode: 404))
+        await central.register(name: "pb", provider: AlwaysFailingProvider(modelId: "B", statusCode: 404))
+        await central.register(name: "pc", provider: FixedReplyProvider(modelId: "C", reply: "hello from C"))
+
+        let agent = AIAgent(
+            id: "fallback-probe",
+            profile: AIAgentProfile(autoPersist: false, registerBuiltInTools: false),
+            providerCentral: central,
+            modelPolicy: ModelPolicy(primary: "pa/A", fallbacks: ["pb/B", "pc/C"]),
+            memoryStorage: InMemoryMemoryStorage(),
+            sessionStorage: InMemorySessionStorage()
+        )
+        let session = await agent.createSession(title: "t")
+
+        var streamed = ""
+        for await event in session.sendMessage("hi") {
+            if case .streamingContent(let delta) = event {
+                streamed += delta
+            }
+        }
+
+        XCTAssertEqual(streamed, "hello from C")
+        XCTAssertEqual(session.modelId, "C")
+        XCTAssertEqual(session.uiState.get(SessionUIState.activeModelKey), "pc/C")
+        let failures = AppAgentDebugLog.shared.snapshot().filter { event in
+            event.kind == .failure && event.reason == "fallback_probe_model_not_found"
+        }
+        XCTAssertEqual(failures.count, 1)
+    }
+
     /// 会话可以按模型引用切换模型（下一轮生效）。
     func testSwitchModelRepointsSession() async throws {
         let central = ModelProviderCentral()
@@ -90,6 +125,95 @@ final class ModelFallbackTests: XCTestCase {
         let bad = await session.switchModel(reference: "nope/none")
         XCTAssertFalse(bad)
         XCTAssertEqual(session.modelId, "B")
+    }
+
+    /// 默认是三次重试（共四次请求）；网络错误与 loop 预算耗尽必须区分。
+    func testRetryExhaustionAndIterationExhaustionReportDifferentErrors() async throws {
+        let retryExhaustionLimit = RetryPolicy().maxRetries + 1
+        let limitedBudget = 2
+        XCTAssertEqual(AIAgentProfile().maxIterations, AIAgentExecutionPolicy.defaultMaxIterations)
+
+        for loopLimit in [retryExhaustionLimit, limitedBudget] {
+            let central = ModelProviderCentral()
+            await central.register(name: "pa", provider: AlwaysFailingProvider(modelId: "A", statusCode: 503))
+            let agent = AIAgent(
+                id: "retry-limit-\(loopLimit)",
+                profile: AIAgentProfile(maxIterations: loopLimit, autoPersist: false, registerBuiltInTools: false),
+                providerCentral: central,
+                modelPolicy: ModelPolicy(primary: "pa/A"),
+                memoryStorage: InMemoryMemoryStorage(),
+                sessionStorage: InMemorySessionStorage()
+            )
+            let session = await agent.createSession(title: "Retry limits")
+            // 保留真实默认重试次数，只关闭退避等待；不出网。
+            let executor = LLMExecutor(session: session, retryPolicy: RetryPolicy(baseDelay: 0, jitterFactor: 0))
+            var iterations: [Int] = []
+            var errors: [Error] = []
+            var completions = 0
+            for await event in executor.run("hi") {
+                switch event {
+                case .started(let turn): iterations.append(turn)
+                case .error(let error): errors.append(error)
+                case .completed: completions += 1
+                default: break
+                }
+            }
+            XCTAssertEqual(iterations, Array(1...loopLimit))
+            XCTAssertEqual(errors.count, 1)
+            XCTAssertEqual(completions, 0)
+            let error = try XCTUnwrap(errors.first)
+            if loopLimit == retryExhaustionLimit {
+                guard case .httpError(let statusCode, _) = error as? ModelError else {
+                    return XCTFail("重试耗尽且无备用模型时应保留原始 HTTP 错误")
+                }
+                XCTAssertEqual(statusCode, 503)
+                XCTAssertEqual(error.localizedDescription, "HTTP 503: no such model")
+            } else {
+                guard case .maxIterationsReached(let limit) = error as? AIAgentError else {
+                    return XCTFail("重试也消耗 loop 预算，应返回带本轮 limit 的错误")
+                }
+                XCTAssertEqual(limit, loopLimit)
+                XCTAssertEqual(
+                    error.localizedDescription,
+                    AIAgentError.maxIterationsReached(limit: loopLimit).localizedDescription
+                )
+            }
+            XCTAssertEqual(session.uiState.lastError?.localizedDescription, error.localizedDescription)
+            XCTAssertEqual(session.turnRecord(turnID: session.currentTurnID)?.failureMessage, error.localizedDescription)
+            XCTAssertEqual(session.turnRecord(turnID: session.currentTurnID)?.roundCount, iterations.count)
+        }
+    }
+
+    /// 真实探测会跳过失效候选，找到的候选仍受主执行循环的 iteration 预算约束。
+    func testModelFallbackSkipsUnavailableCandidateWithinIterationBudget() async throws {
+        let central = ModelProviderCentral()
+        await central.register(name: "pa", provider: AlwaysFailingProvider(modelId: "A", statusCode: 404))
+        await central.register(name: "pb", provider: AlwaysFailingProvider(modelId: "B", statusCode: 404))
+        await central.register(name: "pc", provider: FixedReplyProvider(modelId: "C", reply: "unreachable"))
+        let agent = AIAgent(
+            id: "fallback-loop-limit",
+            profile: AIAgentProfile(maxIterations: 2, autoPersist: false, registerBuiltInTools: false),
+            providerCentral: central,
+            modelPolicy: ModelPolicy(primary: "pa/A", fallbacks: ["pb/B", "pc/C"]),
+            memoryStorage: InMemoryMemoryStorage(),
+            sessionStorage: InMemorySessionStorage()
+        )
+        let session = await agent.createSession(title: "Fallback budget")
+        var iterations: [Int] = []
+        var errors: [Error] = []
+        for await event in session.sendMessage("hi") {
+            switch event {
+            case .started(let turn): iterations.append(turn)
+            case .error(let error): errors.append(error)
+            case .streamingContent, .completed:
+                break
+            default: break
+            }
+        }
+        XCTAssertEqual(iterations, [1, 2])
+        XCTAssertTrue(errors.isEmpty)
+        XCTAssertEqual(session.modelId, "C")
+        XCTAssertEqual(session.messages.last?.text, "unreachable")
     }
 }
 

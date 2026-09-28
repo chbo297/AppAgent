@@ -22,7 +22,7 @@ public struct AppDeviceInfoTool: ToolProtocol {
         - 'os': system name and version, process/system uptime.
         - 'app': bundle id, version, build.
         - 'storage': free/total capacity of the app's volume.
-        - 'memory': physical memory and this app's current footprint.
+        - 'memory': physical memory and whole-process footprint (includes SDKs, not a heap dump).
         - 'locale': locale, preferred languages, time zone and UTC offset.
         - 'power': low-power mode, thermal state, battery level and charging state.
         """

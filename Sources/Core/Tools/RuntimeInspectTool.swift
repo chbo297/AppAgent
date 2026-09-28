@@ -12,12 +12,16 @@ public struct RuntimeInspectTool: ToolProtocol {
     public let name = "app_runtime_inspect"
     public let description = """
         Inspect and modify the host app runtime. Choose an 'op':
+        Scope defaults to 'host', excluding AppAgent UI and classes. 'appagent'/'all' require separate \
+        authorization; detail='full' never widens scope. UI is limited to the bound scene, or the single \
+        active scene. W<n> are stable window handles, not positions in a filtered list. Limited scopes \
+        reject collection KVC, class-singleton access and arbitrary selectors; this is not a code sandbox.
         - 'ui_hierarchy': the map of what is on screen. Default 'detail'="summary" gives every window, \
         the view-controller/page stack, and only the meaningful views (text, controls, host classes) — \
         UIKit wrapper layers are skipped and large subtrees collapse to "⊞ N views" plus the path to expand. \
         Start here, then drill in. 'detail'="full" dumps everything and is large — avoid unless you truly need it.
-        - 'view_tree': expand one subtree. Pass the 'path' from a collapsed "⊞" node; omit 'path' for the key \
-        window root. Optional 'maxDepth' (default 12). Paths look like "0/2/1" (key window) or "W1:0/2/1" (window #1).
+        - 'view_tree': expand one subtree. Pass the 'path' from a collapsed "⊞" node; omit 'path' for the scoped \
+        window root (host window even when an SDK overlay is key). Optional 'maxDepth' (default 12).
         - 'view_info': dump one view's live state (class, frame, colors, text, subview count) at 'path'
         - 'view_set': change one view at 'path': 'key' = frame|bounds|center|alpha|hidden|cornerRadius|backgroundColor|text \
         (anything else falls back to KVC) with 'value' ("x,y,w,h" for rects, "#RRGGBB" for colors). \
@@ -39,6 +43,7 @@ public struct RuntimeInspectTool: ToolProtocol {
         """
     public let parameters = Tool.Schema(
         properties: [
+            "scope": HostInspectionScope.parameter,
             "op": .string(description: "Operation.",
                           enumValues: ["ui_hierarchy", "view_tree", "view_info", "view_set", "view_invoke",
                                        "class_list", "method_list", "property_list", "property_value", "property_set", "invoke"]),
@@ -48,7 +53,7 @@ public struct RuntimeInspectTool: ToolProtocol {
             "_why": .string(description: "One sentence on why this is needed. Shown to the user when they are asked to approve; supply it for view_invoke / invoke."),
             "class": .string(description: "Class name for method_list/property_list/property_value/property_set/invoke."),
             "filter": .string(description: "Substring filter for class_list. Required."),
-            "path": .string(description: "View path. \"0/2/1\" is relative to the key window, \"W1:0/2/1\" targets window #1, \"root\" is the window itself. Used by view_tree/view_info/view_set/view_invoke."),
+            "path": .string(description: "View path using actual subviews indices. \"0/2/1\" is relative to the scoped default window; \"W1:0/2/1\" uses stable window handle W1; \"root\" is the default window."),
             "key": .string(description: "Property name for view_set (frame/alpha/backgroundColor/text/...)."),
             "maxDepth": .integer(description: "Depth limit for view_tree (default 12).", minimum: 1, maximum: 40),
             "keyPath": .string(description: "Key path for property_value/property_set."),
@@ -90,7 +95,7 @@ public struct RuntimeInspectTool: ToolProtocol {
         let failurePrefixes = [
             "(class not found", "(no view at path", "(selector ", "(no target)",
             "(no windows)", "(no key window)", "(no target object for KVC",
-            "Invoke failed:", "Failed to set ", "Failed to read "
+            "Invoke failed:", "Failed to set ", "Failed to read ", "Inspection denied:"
         ]
         return failurePrefixes.contains(where: { text.hasPrefix($0) }) ? .error(text) : .text(text)
     }
@@ -106,6 +111,10 @@ public struct RuntimeInspectTool: ToolProtocol {
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
         let op = arguments["op"]?.stringValue ?? ""
         let className = arguments["class"]?.stringValue
+        let context = try await HostInspectionAccess.context(
+            arguments: arguments, session: session, tool: name,
+            isMutation: safetyLevel(for: arguments) != .safe
+        )
         switch op {
         case "ui_hierarchy":
             // 默认只给摘要。全量在真实 app 里几十 KB，一次就能把上下文吃光，
@@ -113,51 +122,50 @@ public struct RuntimeInspectTool: ToolProtocol {
             let detail = arguments["detail"]?.stringValue ?? "summary"
             switch detail {
             case "summary":
-                return output(await provider.uiHierarchySummary())
+                return output(await provider.uiHierarchySummary(context: context))
             case "full":
-                return output(await provider.uiHierarchy())
+                return output(await provider.uiHierarchy(context: context))
             default:
                 return .error("Unknown detail '\(detail)'. Use 'summary' (default) or 'full'.")
             }
         case "view_tree":
             let depth = arguments["maxDepth"]?.numberValue.map { Int($0) } ?? 12
             let path = arguments["path"]?.stringValue ?? ""
-            return output(await provider.viewSubtree(path: path, maxDepth: depth))
+            return output(await provider.viewSubtree(path: path, maxDepth: max(1, min(40, depth)), context: context))
         case "view_info":
             guard let path = arguments["path"]?.stringValue else { return .error("'path' is required for view_info") }
-            return output(await provider.viewInfo(path: path))
+            return output(await provider.viewInfo(path: path, context: context))
         case "view_set":
             guard let path = arguments["path"]?.stringValue else { return .error("'path' is required for view_set") }
             guard let key = arguments["key"]?.stringValue else { return .error("'key' is required for view_set") }
             guard let value = arguments["value"]?.stringValue else { return .error("'value' is required for view_set") }
-            return mutationOutput(await provider.setViewValue(path: path, key: key, value: value))
+            return mutationOutput(await provider.setViewValue(path: path, key: key, value: value, context: context))
         case "view_invoke":
             guard let path = arguments["path"]?.stringValue else { return .error("'path' is required for view_invoke") }
             guard let selector = arguments["selector"]?.stringValue else { return .error("'selector' is required for view_invoke") }
             let argsJSON = arguments["argumentsJSON"]?.stringValue ?? "[]"
-            return output(await provider.invokeOnView(path: path, selector: selector, argumentsJSON: argsJSON))
+            return output(await provider.invokeOnView(path: path, selector: selector, argumentsJSON: argsJSON, context: context))
 
         case "class_list":
             // 无过滤时进程内 ObjC 类是万级规模，直接返回等于烧掉整个上下文。
             let filter = arguments["filter"]?.stringValue
             guard let filter, !filter.isEmpty else {
-                let total = (await provider.classList(matching: nil)).count
-                return .error("'filter' is required for class_list — the process has \(total) classes. "
+                return .error("'filter' is required for class_list — the process has many classes. "
                               + "Pass a substring such as the app's class prefix.")
             }
-            let list = await provider.classList(matching: filter)
+            let list = await provider.classList(matching: filter, context: context)
             return .text(list.isEmpty ? "(no class matches '\(filter)')" : list.joined(separator: "\n"))
         case "method_list":
             guard let className else { return .error("'class' is required for method_list") }
-            return output((await provider.methodList(ofClass: className)).joined(separator: "\n"))
+            return output((await provider.methodList(ofClass: className, context: context)).joined(separator: "\n"))
         case "property_list":
             guard let className else { return .error("'class' is required for property_list") }
-            return output((await provider.propertyList(ofClass: className)).joined(separator: "\n"))
+            return output((await provider.propertyList(ofClass: className, context: context)).joined(separator: "\n"))
         case "property_value":
             guard let keyPath = arguments["keyPath"]?.stringValue else {
                 return .error("'keyPath' is required for property_value")
             }
-            let value = await provider.propertyValue(keyPath: keyPath, ofClass: className)
+            let value = await provider.propertyValue(keyPath: keyPath, ofClass: className, context: context)
             guard let value else { return .text("(nil)") }
             return output(value)
         case "property_set":
@@ -167,13 +175,13 @@ public struct RuntimeInspectTool: ToolProtocol {
             guard let value = arguments["value"]?.stringValue else {
                 return .error("'value' is required for property_set")
             }
-            return mutationOutput(await provider.setPropertyValue(keyPath: keyPath, value: value, ofClass: className))
+            return mutationOutput(await provider.setPropertyValue(keyPath: keyPath, value: value, ofClass: className, context: context))
         case "invoke":
             guard let className, let selector = arguments["selector"]?.stringValue else {
                 return .error("'class' and 'selector' are required for invoke")
             }
             let argsJSON = arguments["argumentsJSON"]?.stringValue ?? "[]"
-            return output(await provider.invoke(className: className, selector: selector, argumentsJSON: argsJSON))
+            return output(await provider.invoke(className: className, selector: selector, argumentsJSON: argsJSON, context: context))
         default:
             return .error("unknown op: \(op)")
         }

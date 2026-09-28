@@ -24,6 +24,8 @@ public enum DecisionRequest: Sendable, Equatable {
     case toolAuthorization(tool: String, safetyLevel: Tool.SafetyLevel, detail: String?)
     /// Agent 需要用户澄清或在几个方案里挑一个。
     case clarification(question: String, choices: [String])
+    /// Explicit SDK access; an approval is capped to this turn, not the session.
+    case appAgentInspection(scope: HostInspectionScope, isMutation: Bool)
 
     /// 卡片标题，UI 不必自己 switch。
     public var title: String {
@@ -31,6 +33,7 @@ public enum DecisionRequest: Sendable, Equatable {
         case .privateNetworkAccess: return "允许访问内网？"
         case .toolAuthorization(let tool, _, _): return "允许执行 \(tool)？"
         case .clarification: return "需要你确认"
+        case .appAgentInspection: return "允许检查 AppAgent 自身？"
         }
     }
 
@@ -44,6 +47,10 @@ public enum DecisionRequest: Sendable, Equatable {
             return "\(tool)（\(level.rawValue)）会改变状态或访问敏感数据。\(why)"
         case .clarification(let question, _):
             return question
+        case .appAgentInspection(let scope, let isMutation):
+            let operation = isMutation ? "读取或修改" : "读取"
+            let target = scope == .all ? "宿主及 AppAgent" : "AppAgent"
+            return "本轮将\(operation)\(target)的内部内容，可能包含聊天界面、设置或诊断数据。仅在你要求检查 SDK 本身时允许；读取授权不会授权修改。"
         }
     }
 
@@ -64,6 +71,11 @@ public enum DecisionRequest: Sendable, Equatable {
                 DecisionOption(id: "choice_\(index)", label: choice,
                                style: index == 0 ? .primary : .normal)
             }
+        case .appAgentInspection:
+            return [
+                DecisionOption(id: "allow_once", label: "仅本轮允许", style: .primary),
+                DecisionOption(id: "deny", label: "拒绝", style: .destructive)
+            ]
         }
     }
 }

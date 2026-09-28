@@ -4,6 +4,7 @@
 //
 
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 
 /// AppAgentViewController 实际应用 inputBar frame 变化的原因。
@@ -64,6 +65,11 @@ open class AppAgentViewController: UIViewController {
     /// The agent powering this chat.
     public var agent: AIAgent? {
         didSet {
+            if oldValue !== agent {
+                // 不等旧归档 await 返回就解除 UI 锁；旧 completion 必须匹配自己的 token。
+                archiveOperationToken = nil
+                sessionSidebarView.sessionListView.finishArchiving()
+            }
             // 绑定了真实 agent 就走真实 session/模型；未绑定时回落到本地固定回复，
             // 让纯 UI 调试无需模型配置也能跑。
             usesFixedDebugReply = (agent == nil)
@@ -103,12 +109,17 @@ open class AppAgentViewController: UIViewController {
         currentSessionId = sessionId
         // 展开态是「这个会话里用户点开了哪些轮」，换会话就不再适用。
         expandedActivityTurnIDs.removeAll()
+        collapsedActivityTurnIDs.removeAll()
+        // reload 会保留当前轮尚未落库的内容；换会话先清空，不能按相同 turnID 串轮。
+        chatMessages.removeAll()
         // 卡片是面板全局的一张：先撤掉上一个会话的，再贴新会话正在等的那张（如果有）。
         if isViewLoaded {
             chatPanelView.dismissDecision()
+            // 一并清除已分配高度和过程阅读位置，避免相同 turn/start 跨会话继承。
+            chatPanelView.listView.setMessages([])
         }
         // 换会话要回到最新一条。
-        reloadFromSession(forceScrollToBottom: true)
+        reloadFromSession(forceScrollToBottom: true, reason: .browsing)
         bindUIState()
         if isViewLoaded {
             presentPendingDecision(for: sessionId)
@@ -131,6 +142,8 @@ open class AppAgentViewController: UIViewController {
 
     /// 决策卡片的呈现者（强持有；注册表里是弱引用）。
     private var decisionPresenter: AppAgentDecisionPresenter?
+    /// 独立诊断页面在加载视图前关闭注册，不能抢走宿主会话的授权请求。
+    var registersDecisionPresenter = true
     let sessionSidebarView = AppAgentSessionSidebarView()
 
     /// ChatPanel 的固定内容视图；拖拽容器与状态由 coordinator 统一持有。
@@ -143,6 +156,8 @@ open class AppAgentViewController: UIViewController {
     /// 重建，只有把这个状态记在 VC 层、再传给 assembler，才能让用户点开的过程区
     /// 在重建后保持展开。切换会话时清空。
     var expandedActivityTurnIDs: Set<Int> = []
+    /// 显式收起与“没点过”不同：运行中阶段刷新也必须尊重收起选择。
+    var collapsedActivityTurnIDs: Set<Int> = []
     /// 还在等用户拍板的请求，按 session 排队。
     ///
     /// 卡片是面板全局的一张（`AppAgentChatPanelView.decisionCard`），但请求属于某个
@@ -151,6 +166,13 @@ open class AppAgentViewController: UIViewController {
     /// 后面，不能覆盖掉前一个（那会把它的 continuation 永远挂住）。
     var pendingDecisions: [String: [AppAgentPendingDecision]] = [:]
     var currentStreamTask: Task<Void, Never>?
+    /// 用户已经按过停止的那一轮（会话 id + turnID）。
+    ///
+    /// executor 可能还卡在工具里没走到取消检查点，`turnRecord` 也就还没关；按钮不该
+    /// 因此又变回停止邀请用户点第二次。新一轮 turnID 一变、或换会话，这条自然失效。
+    var stoppedRunTurn: (sessionId: String, turnID: Int)?
+    /// 当前归档 UI 操作的 generation；agent 换绑立即失效，不取消已进入存储的写入。
+    var archiveOperationToken: UUID?
     var observedKeyboardHeight: CGFloat = 0
     var hasLaidOutInputBar = false
     var isDraggingExpandedInputBar = false
@@ -211,9 +233,14 @@ open class AppAgentViewController: UIViewController {
         setupVoiceInputOverlay()
         setupKeyboardObservers()
 
-        reloadFromSession(forceScrollToBottom: true)
+        reloadFromSession(forceScrollToBottom: true, reason: .browsing)
         bindUIState()
         registerDecisionPresenter()
+    }
+
+    override open func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        prepareChatForPresentation()
     }
 
     deinit {
@@ -230,6 +257,7 @@ open class AppAgentViewController: UIViewController {
     /// 把「等用户拍板」的呈现权拿到 AppAgent 自己手上：卡片在对话面板内弹，
     /// 宿主 app 不需要实现任何异步回调。
     private func registerDecisionPresenter() {
+        guard registersDecisionPresenter else { return }
         let presenter = AppAgentDecisionPresenter(
             present: { [weak self] request, sessionId, requestId, complete in
                 guard let self else { return false }
@@ -280,8 +308,8 @@ open class AppAgentViewController: UIViewController {
         super.viewDidLayoutSubviews()
         layoutInputBar(reason: .layout)
         layoutChatPanel()
-        sessionSidebarView.frame = view.bounds
-        voiceInputOverlayView.frame = view.bounds
+        sessionSidebarView.bo_setFrame(view.bounds)
+        voiceInputOverlayView.bo_setFrame(view.bounds)
         view.bringSubviewToFront(voiceInputOverlayView)
     }
 }

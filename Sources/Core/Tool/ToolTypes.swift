@@ -57,7 +57,7 @@ public enum Tool {
     /// tool layer itself. `readOnly` makes every call above `.safe` fail outright
     /// rather than prompting — crossing the boundary should be a hard failure, not a
     /// dialog the user clicks through.
-    public enum MutationPolicy: String, Sendable {
+    public enum MutationPolicy: String, Sendable, Codable {
         /// Inspection only. Anything that writes, deletes, or reflects into the
         /// runtime is refused before it executes.
         case readOnly

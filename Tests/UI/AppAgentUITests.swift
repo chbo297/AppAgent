@@ -65,6 +65,45 @@ final class AppAgentUITests: XCTestCase {
         XCTAssertTrue(inputBar.gestureRecognizerShouldBegin(longPress))
     }
 
+    /// 右侧动作槽三态：有草稿发送、loop 运行中停止、其余加号。
+    /// 有草稿时语音按钮一起让位；运行中输入框为空则语音照常可用。
+    func testInputBarTrailingActionFollowsDraftAndRunState() {
+        let inputBar = AppAgentInputBar(frame: CGRect(
+            x: 0,
+            y: 0,
+            width: AppAgentInputBar.minimumExpandedWidth,
+            height: AppAgentInputBar.barHeight
+        ))
+        inputBar.layoutIfNeeded()
+
+        XCTAssertEqual(inputBar.trailingAction, .plus)
+        XCTAssertFalse(inputBar.plusButton.isHidden)
+        XCTAssertTrue(inputBar.trailingActionButton.isHidden)
+        XCTAssertFalse(inputBar.inputSourceButton.isHidden)
+
+        inputBar.setRunActive(true)
+        XCTAssertEqual(inputBar.trailingAction, .stop)
+        XCTAssertTrue(inputBar.plusButton.isHidden)
+        XCTAssertFalse(inputBar.trailingActionButton.isHidden)
+        XCTAssertFalse(inputBar.inputSourceButton.isHidden)
+
+        inputBar.text = "几点了"
+        XCTAssertEqual(inputBar.trailingAction, .send)
+        XCTAssertTrue(inputBar.plusButton.isHidden)
+        XCTAssertTrue(inputBar.inputSourceButton.isHidden)
+        // 发送 / 停止占的就是原来加号那一格。
+        XCTAssertEqual(inputBar.trailingActionButton.frame, inputBar.plusButton.frame)
+
+        inputBar.clearText()
+        XCTAssertEqual(inputBar.trailingAction, .stop)
+        XCTAssertFalse(inputBar.inputSourceButton.isHidden)
+
+        inputBar.setRunActive(false)
+        XCTAssertEqual(inputBar.trailingAction, .plus)
+        XCTAssertFalse(inputBar.plusButton.isHidden)
+        XCTAssertTrue(inputBar.trailingActionButton.isHidden)
+    }
+
     /// 等卡片期间 run 被取消（用户按停止 / 切走）：等待必须被唤醒并撤下卡片，
     /// 否则那张卡片会一直挂着等一个已经死掉的回合，executor 的 Task 也回不来。
     func testDecisionWaitUnblocksAndDismissesOnCancellation() async {

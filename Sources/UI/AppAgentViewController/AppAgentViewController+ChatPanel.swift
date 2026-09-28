@@ -28,10 +28,33 @@ extension AppAgentViewController {
         chatPanelView.onNewSessionRequested = { [weak self] in
             self?.startNewSession()
         }
+        chatPanelCoordinator.onWillRevealMessages = { [weak self] in
+            self?.prepareChatForPresentation()
+        }
         // 过程区展开态由 ViewController 持有：列表每轮结束都会整体重建，
         // 只有把「用户点开了哪一轮」记在这边才不会被重建擦掉。
         chatPanelView.listView.onActivityToggled = { [weak self] message in
             self?.handleActivityToggled(message)
+        }
+    }
+
+    /// 重新进入同一个页面也属于重新浏览；先读取权威终局，再释放留白。
+    /// 普通布局、键盘变化和运行通知不走这里，也不清除已展示的 reasoning / 展开选择。
+    func prepareChatForPresentation() {
+        guard isViewLoaded else { return }
+        // 发送消息会先插入乐观占位再自动展开；此时 Core 可能尚未建立本轮记录。
+        // 不能用上一轮快照覆盖刚插入的提问与占位。
+        if let latest = chatMessages.last,
+           latest.role == .assistant, latest.status == .streaming, latest.turnID == nil {
+            guard let start = latest.activity?.startedAt,
+                  let session = currentSession,
+                  let record = session.turnRecord(turnID: session.currentTurnID),
+                  record.startedAt >= start else { return }
+        }
+        if currentSession != nil {
+            reloadFromSession(reason: .browsing)
+        } else {
+            chatPanelView.listView.beginNewPresentation()
         }
     }
 
@@ -47,11 +70,6 @@ extension AppAgentViewController {
     /// 将当前 viewport、安全区和 inputBar 展开宽度交给 coordinator 更新固定面板几何。
     func layoutChatPanel() {
         let inputBarExpandedFrame = AppAgentInputBarFramePolicy.preferredExpandedFrame(inputBarLayoutContext)
-        chatPanelCoordinator.updateLayout(
-            bounds: view.bounds,
-            safeAreaInsets: view.safeAreaInsets,
-            inputBarExpandedFrame: inputBarExpandedFrame
-        )
         applyChatPanelContainerLayout(
             inputBarFrame: inputBar.frame,
             inputBarExpandedFrame: inputBarExpandedFrame,
@@ -66,12 +84,25 @@ extension AppAgentViewController {
         animation: AppAgentInputBarFrameAnimation
     ) {
         let keyboardLift = chatPanelKeyboardLift(for: inputBarExpandedFrame)
+
+        // 面板几何与键盘、inputBar 宽度都无关：键盘只把整个容器上移（下面的 `shiftedBounds`），
+        // inputBar 的可变展开宽只驱动容器横向平移，面板尺寸只按 view 算。
+        chatPanelCoordinator.updateLayout(
+            bounds: view.bounds,
+            safeAreaInsets: view.safeAreaInsets
+        )
+
         let shiftedBounds = view.bounds.offsetBy(dx: 0, dy: -keyboardLift)
         let layout = AppAgentChatPanelContainerLayout(
             bounds: shiftedBounds,
             inputBarFrame: inputBarFrame,
             inputBarExpandedFrame: inputBarExpandedFrame
         )
+        // 横向完全收起后重新展开；用实际显隐边界，不能把每帧 resize 当成重新进入。
+        if chatPanelContainer.alpha <= 0.01, chatPanelContainer.isVisuallyHidden,
+           layout.panelAlpha > 0.01 {
+            prepareChatForPresentation()
+        }
         chatPanelContainer.apply(layout, animation: animation)
 
         // 决策卡片要停在 inputBar 上方：面板 viewport 会一直延伸到 inputBar 底下那一段。
@@ -86,19 +117,19 @@ extension AppAgentViewController {
     }
 
     /// 业务主动切换档位，实际动画和中途打断由 BODragScroll 管理。
-    func setChatPanelDetent(_ detent: AppAgentChatPanelDetent, animated: Bool) {
-        chatPanelCoordinator.move(to: detent, animated: animated)
+    func setChatPanelDetent(_ detent: AppAgentChatPanelDetent, animated: Bool, source: String = #function) {
+        chatPanelCoordinator.move(to: detent, animated: animated, source: "VC.\(source)")
     }
 
     /// 将消息列表滚到最新一条；真实 session、mock、键盘和 inputBar 共用这一条路径。
-    func scrollToBottom(animated: Bool) {
-        chatPanelView.listView.scrollToBottom(animated: animated)
+    func scrollToBottom(animated: Bool, source: String = #function) {
+        chatPanelView.listView.scrollToBottom(animated: animated, source: "VC.\(source)")
     }
 
     /// mock 与真实 session 共用：新消息出现时若面板收在 peek，直接发起一次 half 移动。
     func revealChatPanelForNewMessagesIfNeeded() {
         guard chatPanelCoordinator.isAtPeekDetent else { return }
-        setChatPanelDetent(.half, animated: true)
+        chatPanelCoordinator.move(to: .half, animated: true, preservingReplyHeight: true)
     }
 
     // MARK: - 消息通路
@@ -114,8 +145,14 @@ extension AppAgentViewController {
         }
     }
 
-    private func sendFixedDebugReply(to text: String) {
+    /// 发送后收尾：清空草稿并收起键盘（两条发送通路共用，别各写一份）。
+    func finishInputBarAfterSend() {
         inputBar.clearText()
+        inputBar.textField.resignFirstResponder()
+    }
+
+    private func sendFixedDebugReply(to text: String) {
+        finishInputBarAfterSend()
 
         let userMessage = ChatMessage(role: .user, text: text)
         chatMessages.append(userMessage)

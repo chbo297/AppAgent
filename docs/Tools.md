@@ -2,6 +2,65 @@
 
 AppAgent tools conform to `ToolProtocol`. Tools are registered in `ToolCentral` and copied into each `AISession` when the session is created.
 
+## Host inspection boundary
+
+`app_runtime_inspect`, `screenshot`, `app_hotfix`, `app_user_defaults` and
+`app_sandbox_file` default to `scope: "host"`. Omit the parameter for normal work.
+`detail: "full"` expands detail, not scope.
+
+- `host`: inspect and operate on the host, excluding AppAgent-owned UI/runtime
+  targets and internal settings/storage.
+- `appagent`: inspect the SDK itself, only when explicitly requested and approved.
+- `all`: both ownership domains, also requiring explicit approval.
+
+An SDK-scope request uses `AISession.requestDecision(.appAgentInspection(...))`.
+No responder means denial. Approvals and denials are coalesced within the current
+turn and discarded when it ends or is cancelled; they are never persisted.
+Read approval does not authorize writes or replace sensitive/dangerous operation
+approval. `toolMutationPolicy = .readOnly` still rejects mutations.
+Hosts can set `session.allowsAppAgentInspection = false` to disable SDK access.
+No new model call, injected rule list, or confirmation is needed for host scope.
+
+The overlay binds `session.inspectionSceneIdentifier` automatically. Headless or
+custom UI integrations can bind a `UIWindowScene.session.persistentIdentifier`
+themselves. Window paths are scoped to that scene; they do not follow the SDK
+input window when it becomes key. Use the returned `W<n>:` handles rather than
+assuming `n` is an index into a filtered window array. Subview indices retain their
+actual UIKit positions, so paths must be refreshed after hierarchy changes.
+For embedded/custom SDK UI, use `HostInspectionUIKit.markAppAgentOwned(_:)`
+on its root; ordinary UIKit descendants inherit that ownership. Shared helper
+libraries such as BOUIKit are not excluded wholesale.
+
+Screenshots capture one target, not a composite of every window. Limited scopes
+reject mixed-ownership subtrees and backdrop effects whose pixels cannot be
+isolated; choose a safe subtree instead. Hotfix slots retain their original scope
+and scene constraints when re-enabled, but never retain approval from an old turn.
+
+Default storage filtering protects SDK preferences, raw sessions, memory/skills
+storage, logs, message-capture caches and diagnostic exports. The normal
+`Documents/AppAgent/files` workspace and screenshot artifacts remain available.
+Dedicated `memory`, `todo`, `skills_*` and `session_*` tools retain their intended
+functionality. Mixed `Library/Preferences` files require `all`; use
+`app_user_defaults` for host-only key access.
+The pathname checks cover the standard SDK locations and their resolved aliases.
+Custom storage locations and deliberately broad host-configured workspaces remain
+the host's responsibility. These checks do not track copied data/hard links or
+prevent another thread replacing a file between validation and I/O.
+
+`RuntimeInspectProvider` and `HotfixProvider` receive an immutable
+`HostInspectionContext` on every call. Custom providers must enforce it before
+enumeration, target resolution, mutation and patch re-enabling. Do not store a
+mutable global scope on a shared provider. `AppStateProvider`,
+`AppActionProvider` and `AppNavigationProvider` are host-only contracts; the SDK
+cannot safely infer ownership from opaque host strings.
+
+This is an inspection boundary, **not an in-process security sandbox**. Arbitrary
+host getters, selectors or custom providers may have global effects; avoid
+exposing them to untrusted callers. The whole-process memory footprint reported
+by `app_device_info` still includes AppAgent and other SDKs—there is no fabricated
+“SDK-subtracted” value. Public native provider APIs are trusted integration APIs,
+not substitutes for the tool authorization path.
+
 ## ToolProtocol
 
 ```swift

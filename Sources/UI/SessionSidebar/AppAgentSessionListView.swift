@@ -13,8 +13,11 @@ final class AppAgentSessionListView: UIView {
     var onDeleteItem: ((AppAgentSessionSidebarItem) -> Void)?
     var onSettingsTapped: (() -> Void)?
     var onDebugTapped: (() -> Void)?
+    var onTrashTapped: (() -> Void)?
 
     private(set) var items: [AppAgentSessionSidebarItem] = []
+    private(set) var archivingSessionID: String?
+    private(set) var archiveError: String?
 
     private static let titleAreaHeight: CGFloat = 52
     private static let rowHeight: CGFloat = 60
@@ -23,6 +26,8 @@ final class AppAgentSessionListView: UIView {
     private let titleLabel = UILabel()
     private let settingsButton = UIButton(type: .system)
     private let debugButton = UIButton(type: .system)
+    private let trashButton = UIButton(type: .system)
+    private let archiveStatusLabel = UILabel()
     private let separatorView = UIView()
     private let tableView = UITableView()
 
@@ -74,12 +79,24 @@ final class AppAgentSessionListView: UIView {
             height: separatorHeight
         )
 
+        let footerWidth = max(0, bounds.width - 32)
+        let statusHeight = archiveStatusLabel.isHidden ? 0 : archiveStatusLabel.sizeThatFits(
+            CGSize(width: footerWidth, height: .greatestFiniteMagnitude)
+        ).height + 8
+        trashButton.frame = CGRect(
+            x: 16, y: max(titleLabel.frame.maxY, bounds.height - safeBottom - 52),
+            width: footerWidth, height: 44
+        )
+        archiveStatusLabel.frame = CGRect(
+            x: 16, y: trashButton.frame.minY - statusHeight,
+            width: footerWidth, height: max(0, statusHeight - 8)
+        )
         let tableY = titleLabel.frame.maxY
         tableView.frame = CGRect(
             x: 0,
             y: tableY,
             width: bounds.width,
-            height: max(0, bounds.height - tableY - safeBottom)
+            height: max(0, trashButton.frame.minY - statusHeight - tableY)
         )
     }
 
@@ -97,6 +114,33 @@ final class AppAgentSessionListView: UIView {
         guard self.items != items else { return }
         self.items = items
         tableView.reloadData()
+    }
+
+    /// 同步上锁后再启动异步存储，避免双击提交。失败时保留原列表和当前会话。
+    func beginArchiving(_ sessionID: String) -> Bool {
+        guard archivingSessionID == nil else { return false }
+        archivingSessionID = sessionID
+        archiveError = nil
+        updateArchiveStatus()
+        return true
+    }
+
+    func finishArchiving(error: String? = nil) {
+        archivingSessionID = nil
+        archiveError = error
+        updateArchiveStatus()
+    }
+
+    private func updateArchiveStatus() {
+        let busy = archivingSessionID != nil
+        archiveStatusLabel.text = busy ? "正在移入废纸篓…" : archiveError
+        archiveStatusLabel.textColor = archiveError == nil ? .secondaryLabel : .systemRed
+        archiveStatusLabel.isHidden = archiveStatusLabel.text == nil
+        tableView.isUserInteractionEnabled = !busy
+        settingsButton.isEnabled = !busy
+        debugButton.isEnabled = !busy
+        trashButton.isEnabled = !busy
+        setNeedsLayout()
     }
 
     private func setup() {
@@ -118,6 +162,22 @@ final class AppAgentSessionListView: UIView {
         debugButton.accessibilityLabel = "调试"
         debugButton.addTarget(self, action: #selector(didTapDebug), for: .touchUpInside)
         addSubview(debugButton)
+
+        trashButton.setTitle("废纸篓", for: .normal)
+        trashButton.setImage(UIImage(systemName: "trash"), for: .normal)
+        trashButton.accessibilityIdentifier = "session_trash_entry"
+        trashButton.accessibilityHint = "查看、恢复或永久删除已归档会话"
+        trashButton.addAction(UIAction { [weak self] _ in
+            guard let self, self.archivingSessionID == nil else { return }
+            self.onTrashTapped?()
+        }, for: .touchUpInside)
+        addSubview(trashButton)
+        archiveStatusLabel.font = .preferredFont(forTextStyle: .footnote)
+        archiveStatusLabel.adjustsFontForContentSizeCategory = true
+        archiveStatusLabel.numberOfLines = 0
+        archiveStatusLabel.accessibilityIdentifier = "session_archive_status"
+        archiveStatusLabel.isHidden = true
+        addSubview(archiveStatusLabel)
 
         separatorView.isUserInteractionEnabled = false
         addSubview(separatorView)
@@ -148,7 +208,7 @@ final class AppAgentSessionListView: UIView {
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began else { return }
+        guard archivingSessionID == nil, gesture.state == .began else { return }
         let point = gesture.location(in: tableView)
         guard let indexPath = tableView.indexPathForRow(at: point),
               indexPath.row < items.count else { return }
@@ -165,6 +225,7 @@ final class AppAgentSessionListView: UIView {
         settingsButton.backgroundColor = AppAgentAppearance.voicePressedBackground
         debugButton.tintColor = AppAgentAppearance.icon
         debugButton.backgroundColor = AppAgentAppearance.voicePressedBackground
+        trashButton.tintColor = AppAgentAppearance.icon
         separatorView.backgroundColor = AppAgentAppearance.inputBarBorder
         tableView.reloadData()
     }
@@ -186,17 +247,24 @@ extension AppAgentSessionListView: UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: false)
+        guard archivingSessionID == nil, items.indices.contains(indexPath.row) else { return }
         onSelectItem?(items[indexPath.row])
     }
 
     func tableView(_ tableView: UITableView,
                    trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard indexPath.row < items.count else { return nil }
+        guard archivingSessionID == nil, items.indices.contains(indexPath.row) else { return nil }
         let item = items[indexPath.row]
-        // Only real sessions (with a sessionID) can be deleted; demo placeholders can't.
+        // 演示占位不可归档；真正的永久删除只在废纸篓内由用户二次确认。
         guard item.sessionID != nil else { return nil }
-        let delete = UIContextualAction(style: .destructive, title: "删除") { [weak self] _, _, completion in
-            self?.onDeleteItem?(item)
+        let delete = UIContextualAction(style: .destructive, title: "移入废纸篓") { [weak self] _, _, completion in
+            guard let self, self.archivingSessionID == nil,
+                  self.items.contains(where: { $0.sessionID == item.sessionID }),
+                  let onDeleteItem = self.onDeleteItem else {
+                completion(false)
+                return
+            }
+            onDeleteItem(item)
             completion(true)
         }
         delete.image = UIImage(systemName: "trash")
@@ -207,7 +275,7 @@ extension AppAgentSessionListView: UITableViewDataSource, UITableViewDelegate {
 }
 
 /// Session 列表单行视图，集中管理选中态、图标和两行文字样式。
-private final class AppAgentSessionListCell: UITableViewCell {
+private final class AppAgentSessionListCell: UITableViewCell, AppAgentRuntimeOwned {
     static let reuseIdentifier = "AppAgentSessionListCell"
 
     private let selectionBackgroundView = UIView()

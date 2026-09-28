@@ -11,13 +11,13 @@ import Foundation
 public struct FileReadTool: ToolProtocol {
     public let name = "file_read"
     public let description = """
-        Read a text file from the agent's workspace (the app's Documents directory). \
+        Read a text file from the configured agent workspace (default: Documents/AppAgent/files). \
         Returns content with line numbers. Use offset and limit for large files. \
-        For anything outside Documents — Library, tmp, Caches — use app_sandbox_file instead.
+        For host storage outside that workspace use app_sandbox_file, subject to its scope policy.
         """
     public let parameters = Tool.Schema(
         properties: [
-            "path": .string(description: "Relative path within the sandbox."),
+            "path": .string(description: "Relative path within the configured workspace."),
             "offset": .integer(
                 description: "Line number to start reading from (1-indexed, default: 1).",
                 minimum: 1,

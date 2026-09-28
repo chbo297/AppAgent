@@ -24,6 +24,9 @@ public final class SessionUIState: @unchecked Sendable {
     /// `onChange` 在「等用户决定」状态变化时带的 key。
     public static let pendingDecisionKey = "pendingDecision"
 
+    /// `onChange` 在「本轮走到哪一步 / 哪一步失败了」变化时带的 key。
+    public static let runStageKey = "runStage"
+
     private let lock = ReadersWriterLock()
 
     // MARK: - Built-in State (backing)
@@ -32,6 +35,10 @@ public final class SessionUIState: @unchecked Sendable {
     private var _streamingText: String = ""
     private var _reasoningText: String = ""
     private var _lastError: Error?
+    /// 本轮走到了哪一步（`nil` = 没有正在跑的轮次）。
+    private var _runStage: AIAgentRunStage?
+    /// 失败发生在哪一步。和 `lastError` 配对：有错就一定有失败阶段。
+    private var _failedStage: AIAgentRunStage?
     /// 还在等用户拍板的请求**栈**。
     ///
     /// 不是单槽：safe 级工具并发跑，两个 `clarify` / 两次授权可以同时在等。单槽的话
@@ -59,6 +66,14 @@ public final class SessionUIState: @unchecked Sendable {
 
     /// The last error encountered, if any.
     public var lastError: Error? { lock.read { _lastError } }
+
+    // MARK: - Run Stage（本轮走到哪一步）
+
+    /// 本轮所处的执行阶段。UI 据此点亮阶段指示条。
+    public var runStage: AIAgentRunStage? { lock.read { _runStage } }
+
+    /// 失败发生在哪一步（没失败时为 nil）。UI 据此把那一格标红。
+    public var failedStage: AIAgentRunStage? { lock.read { _failedStage } }
 
     // MARK: - Pending Decision (awaiting user)
 
@@ -124,6 +139,29 @@ public final class SessionUIState: @unchecked Sendable {
         if error != nil {
             dispatchCallback(callback, key: "lastError")
         }
+    }
+
+    // MARK: - Run Stage Updates（internal，由 LLMExecutor 打点）
+
+    /// 推进到某一阶段。开新一轮（`.preparing`）时顺手清掉上一轮的失败阶段。
+    func setRunStage(_ stage: AIAgentRunStage?) {
+        let callback = lock.writeSync { () -> ((String) -> Void)? in
+            guard _runStage != stage else { return nil }
+            _runStage = stage
+            if stage == .preparing { _failedStage = nil }
+            return _onChange
+        }
+        dispatchCallback(callback, key: Self.runStageKey)
+    }
+
+    /// 标记「失败发生在这一步」。阶段本身保持在失败点，不往前走。
+    func setFailedStage(_ stage: AIAgentRunStage?) {
+        let callback = lock.writeSync { () -> ((String) -> Void)? in
+            guard _failedStage != stage else { return nil }
+            _failedStage = stage
+            return _onChange
+        }
+        dispatchCallback(callback, key: Self.runStageKey)
     }
 
     // MARK: - Pending Decision Updates (public — tools set these while awaiting the user)

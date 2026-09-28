@@ -15,6 +15,9 @@ enum AppAgentVoiceRecognitionVisualState {
 
     /// 已经进入录音/识别阶段，可能持续产生识别文本。
     case recording
+
+    /// 用户已松手，仍在采集尾音 / 等最终识别结果收敛；面板展示 loading、暂不关闭。
+    case finalizing
 }
 
 /// 手指当前所在区域对应的“抬起后执行行为”，只表达用户松手时会发生什么。

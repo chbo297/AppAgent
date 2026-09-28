@@ -10,8 +10,26 @@ import Foundation
 /// Execution is delegated to the mounted `LLMExecutor`. iOS 15+ / macOS 12+.
 /// Thread-safe via property wrappers.
 public final class AISession: @unchecked Sendable {
+    public struct ModelSelection: Sendable {
+        public let provider: (any ModelProvider)?
+        public let modelId: String?
+        public let generation: UInt64
+
+        init(
+            provider: (any ModelProvider)?,
+            modelId: String?,
+            generation: UInt64
+        ) {
+            self.provider = provider
+            self.modelId = modelId
+            self.generation = generation
+        }
+    }
+
     public let id: String
     public let createdAt: Date
+    let lifecycle = SessionLifecycleState()
+    public let metadata: [String: String]?
 
     // MARK: - Thread-Safe Properties (backed by property wrappers)
 
@@ -28,14 +46,33 @@ public final class AISession: @unchecked Sendable {
     /// Also carries a weak back-reference to the source AIAgent via `agentMask.agent`.
     public let agentMask: AIAgentMask?
 
+    /// Effective execution policy for this session.
+    ///
+    /// Managed sessions receive a frozen policy from `agentMask`. Detached
+    /// sessions created explicitly for tests or utility code use the SDK
+    /// defaults.
+    public var executionPolicy: AIAgentExecutionPolicy {
+        agentMask?.executionPolicy ?? .default
+    }
+
     /// The model provider for this session. Resolved at creation time; can be re-pointed at
     /// runtime via `switchModel(...)`（切换只影响随后发起的 run）。
-    @Locked
-    public private(set) var provider: (any ModelProvider)?
+    public var provider: (any ModelProvider)? {
+        modelSelection.provider
+    }
 
     /// The model ID for this session (e.g., "Claude Opus 4.6").
+    public var modelId: String? {
+        modelSelection.modelId
+    }
+
+    /// Atomically read the provider/model pair used by one run.
+    public func modelSelectionSnapshot() -> ModelSelection {
+        modelSelection
+    }
+
     @Locked
-    public private(set) var modelId: String?
+    private var modelSelection: ModelSelection
 
     @Locked
     public private(set) var installedTools: [String: any ToolProtocol]
@@ -62,6 +99,13 @@ public final class AISession: @unchecked Sendable {
     @Locked
     public private(set) var currentTurnID: Int = 0
 
+    /// 每一轮的阶段与终局（按 turnID 索引），**随快照落盘**。见 `AIAgentTurnRecord`。
+    ///
+    /// UI 的 loading / 阶段指示条 / 终态（有回复 · 空 · 失败 · 已停止 · 上次中断）全读这里，
+    /// 不再依赖进程内的 `uiState`——切会话、重建列表、重启 App 看到的都是同一份事实。
+    @TrackedLocked
+    public private(set) var turnRecords: [Int: AIAgentTurnRecord] = [:]
+
     /// Delegation depth (0 = top-level session, 1 = sub-session, ...).
     public let delegationDepth: Int
 
@@ -69,8 +113,28 @@ public final class AISession: @unchecked Sendable {
     /// 测试里可以换成一个假的 responder。
     @Locked
     public var decisionResponders: DecisionResponderCentral = .default
+
+    /// Delegated requests retain their parent boundary and use the root's responders.
+    /// Set before starting the child; an in-flight decision rejects reparenting.
+    @Locked
+    public var decisionParent: AISession? = nil
+
+    /// Host-selected scene, frozen by the turn authorization (not model-controlled).
+    @Locked
+    public var inspectionSceneIdentifier: String? = nil
+
+    /// A hard host opt-out, checked on both sides of every SDK authorization await.
+    @Locked
+    public var allowsAppAgentInspection: Bool = true
+
     /// The LLM execution engine mounted on this session.
     public private(set) var executor: LLMExecutor!
+
+    /// Session-owned mirror of the host application's structured runtime state.
+    ///
+    /// The host provider may be shared by multiple sessions, but this mirror and
+    /// its model-seen cursor belong exclusively to this session.
+    public let hostStateMirror: HostStateMirror
 
     // MARK: - Computed Properties
 
@@ -81,7 +145,7 @@ public final class AISession: @unchecked Sendable {
 
     /// Whether any persistable property has been modified since last `clearDirty()`.
     public var isDirty: Bool {
-        _title.isDirty || _updatedAt.isDirty || _messages.isDirty
+        _title.isDirty || _updatedAt.isDirty || _messages.isDirty || _turnRecords.isDirty
     }
 
     /// Clear dirty flags after successful persistence.
@@ -89,6 +153,7 @@ public final class AISession: @unchecked Sendable {
         _title.clearDirty()
         _updatedAt.clearDirty()
         _messages.clearDirty()
+        _turnRecords.clearDirty()
     }
 
     public init(id: String,
@@ -100,25 +165,56 @@ public final class AISession: @unchecked Sendable {
          modelId: String? = nil,
          createdAt: Date = Date(),
          updatedAt: Date? = nil,
-         delegationDepth: Int = 0) {
+         turnRecords: [AIAgentTurnRecord] = [],
+         delegationDepth: Int = 0,
+         metadata: [String: String]? = nil) {
         self.id = id
         self.createdAt = createdAt
+        self.metadata = metadata
         self._updatedAt = TrackedLocked(wrappedValue: updatedAt ?? createdAt, isEqual: ==)
         self._title = TrackedLocked(wrappedValue: title, isEqual: ==)
         self._messages = TrackedLocked(wrappedValue: messages)
         self.agentMask = agentMask
-        self._provider = Locked(wrappedValue: provider)
-        self._modelId = Locked(wrappedValue: modelId)
+        self._modelSelection = Locked(
+            wrappedValue: ModelSelection(
+                provider: provider,
+                modelId: modelId,
+                generation: 0
+            )
+        )
         self._installedTools = Locked(wrappedValue: installedTools)
         // 从已有消息接着数，否则恢复出来的会话再来一条提问会复用第一轮的号，
         // agent 的来回就会被划到旧的一轮里去。
-        self._currentTurnID = Locked(wrappedValue: messages.compactMap(\.turnID).max() ?? 0)
+        self._currentTurnID = Locked(wrappedValue: max(messages.compactMap(\.turnID).max() ?? 0,
+                                                       turnRecords.map(\.turnID).max() ?? 0))
+        self._turnRecords = TrackedLocked(
+            wrappedValue: Dictionary(turnRecords.map { ($0.turnID, $0) }, uniquingKeysWith: { _, last in last })
+        )
         self._toolPolicy = Locked(wrappedValue: nil)
         self._decisionResponders = Locked(wrappedValue: .default)
+        self.hostStateMirror = HostStateMirror()
         self.uiState = SessionUIState()
         self.delegationDepth = delegationDepth
         // LLMExecutor is initialized below after all stored properties are set
         self.executor = LLMExecutor(session: self)
+    }
+
+    // MARK: - Host Context
+
+    /// Install a host state provider and load its first complete snapshot.
+    ///
+    /// Updates are consumed continuously. A revision gap or epoch change causes
+    /// an automatic snapshot refresh before consumption continues.
+    @discardableResult
+    public func installHostStateProvider(
+        _ provider: any HostStateProvider
+    ) async throws -> Bool {
+        try await hostStateMirror.installProvider(provider)
+    }
+
+    /// Stop consuming host updates while retaining the last mirrored snapshot.
+    public func removeHostStateProvider() async {
+        await hostStateMirror.removeProviderGeneration()
     }
 
     // MARK: - Tool Management
@@ -163,11 +259,13 @@ public final class AISession: @unchecked Sendable {
             agent.sessionDidRejectRun(self, error: AIAgentError.concurrencyLimitReached(limit: limit))
             return AsyncStream { $0.finish() }
         }
-        return executor.run(text)
+        return lifecycle.start { executor.run(text) }
     }
 
     /// Add a user message to the conversation history. Starts a new turn.
-    public func addUserMessage(_ text: String) {
+    /// Returns the allocated turn ID so a run never has to read a later run's current ID.
+    @discardableResult
+    public func addUserMessage(_ text: String) -> Int {
         let isFirstUserMessage = !messages.contains { $0.role == .user }
         // 取号必须是一次临界区：`+= 1` 是读-改-写两次加锁，旧 run 还没排干时两条提问
         // 可能拿到同一个号，展示层就会把两轮并成一轮。
@@ -190,6 +288,7 @@ public final class AISession: @unchecked Sendable {
                 Task { try? await manager.saveSession(snapshot) }
             }
         }
+        return turnID
     }
 
     /// Rename the session. Marks the session dirty so it will be persisted;
@@ -232,7 +331,78 @@ public final class AISession: @unchecked Sendable {
     public func clearHistory() {
         messages = []
         currentTurnID = 0
+        turnRecords = [:]
         updatedAt = Date()
+    }
+
+    // MARK: - Turn Records（阶段与终局，唯一真相）
+
+    /// 取某一轮的记录。
+    public func turnRecord(turnID: Int) -> AIAgentTurnRecord? {
+        turnRecords[turnID]
+    }
+
+    /// 开一轮：`LLMExecutor` 在 `.preparing` 时调用。同号重开（重试）会覆盖旧记录。
+    func openTurnRecord(turnID: Int, modelRef: String?) {
+        $turnRecords.mutate {
+            $0[turnID] = AIAgentTurnRecord(
+                turnID: turnID, stage: .preparing, modelRef: modelRef, roundCount: 0
+            )
+        }
+    }
+
+    /// 执行循环开始时记轮数；只增不减，迟到的更新不能改写终局。
+    func advanceTurnRound(turnID: Int, roundCount: Int) {
+        $turnRecords.mutate {
+            guard var record = $0[turnID], !record.isFinished else { return }
+            record.roundCount = max(record.roundCount ?? 0, roundCount)
+            $0[turnID] = record
+        }
+    }
+
+    /// 推进阶段。记录已经有终局了就不再动它（终局是不可逆的）。
+    func advanceTurnStage(turnID: Int, stage: AIAgentRunStage, modelRef: String? = nil) {
+        $turnRecords.mutate {
+            guard var record = $0[turnID], record.outcome == nil else { return }
+            record.stage = stage
+            if let modelRef = modelRef { record.modelRef = modelRef }
+            $0[turnID] = record
+        }
+    }
+
+    /// 关一轮：写入终局。**一轮只能通过这里结束**，重复调用只有第一次生效。
+    func closeTurnRecord(turnID: Int, outcome: AIAgentTurnRecord.Outcome, stage: AIAgentRunStage? = nil) {
+        $turnRecords.mutate {
+            guard var record = $0[turnID] else { return }
+            guard record.outcome == nil else { return }
+            record.outcome = outcome
+            record.endedAt = Date()
+            if let stage = stage { record.stage = stage }
+            $0[turnID] = record
+        }
+    }
+
+    /// 恢复会话时调用：把没有终局的轮次标成 `.interrupted`。
+    ///
+    /// 进程死过一次，这些轮次不可能自己回来（SSE 断了、工具 Task 没了），而且**绝不自动重放**
+    /// ——工具有副作用。UI 把它渲染成「上次中断」，要不要重问交给用户。
+    /// - Returns: 被标记的轮次号。
+    @discardableResult
+    public func markUnfinishedTurnsAsInterrupted() -> [Int] {
+        var marked: [Int] = []
+        $turnRecords.mutate {
+            for (turnID, record) in $0 where record.outcome == nil {
+                var updated = record
+                updated.outcome = .interrupted
+                updated.endedAt = record.endedAt ?? Date()
+                $0[turnID] = updated
+                marked.append(turnID)
+            }
+        }
+        if !marked.isEmpty {
+            Logger.info("AISession", "markUnfinishedTurnsAsInterrupted: id=\(id), turns=\(marked.sorted())")
+        }
+        return marked
     }
 
     /// 切换本会话使用的模型（`"providerName/modelId"` 引用，由 providerCentral 解析）。
@@ -245,8 +415,46 @@ public final class AISession: @unchecked Sendable {
             Logger.warning("AISession", "switchModel: 无法解析模型引用 \(reference)")
             return false
         }
-        provider = resolved.provider
-        modelId = resolved.modelId
+        return switchModel(
+            provider: resolved.provider,
+            modelId: resolved.modelId,
+            reference: reference
+        )
+    }
+
+    /// 使用已经解析过的 provider/model 更新会话，避免运行期故障切换时再次读取旧注册表。
+    @discardableResult
+    func switchModel(
+        provider: any ModelProvider,
+        modelId: String,
+        reference: String,
+        expectedGeneration: UInt64? = nil
+    ) -> Bool {
+        guard provider.modelSpec(for: modelId) != nil else {
+            Logger.warning("AISession", "switchModel: provider 中不存在模型 \(modelId)")
+            return false
+        }
+
+        let didSwitch = $modelSelection.mutate { selection -> Bool in
+            if let expectedGeneration,
+               selection.generation != expectedGeneration {
+                return false
+            }
+            selection = ModelSelection(
+                provider: provider,
+                modelId: modelId,
+                generation: selection.generation &+ 1
+            )
+            return true
+        }
+        guard didSwitch else {
+            Logger.info(
+                "AISession",
+                "switchModel ignored stale generation: sessionId=\(id), reference=\(reference)"
+            )
+            return false
+        }
+
         updatedAt = Date()
         uiState.set(SessionUIState.activeModelKey, value: reference)
         Logger.info("AISession", "switchModel: sessionId=\(id) → \(reference)")
@@ -254,9 +462,9 @@ public final class AISession: @unchecked Sendable {
             .info,
             message: "会话切换模型 → \(reference)",
             sessionId: id,
-            provider: resolved.provider.name,
-            apiProtocol: resolved.provider.apiProtocol.rawValue,
-            modelId: resolved.modelId
+            provider: provider.name,
+            apiProtocol: provider.apiProtocol.rawValue,
+            modelId: modelId
         )
         return true
     }
@@ -301,48 +509,106 @@ public final class AISession: @unchecked Sendable {
 
     /// 请求一个需要用户拍板的决定。工具/executor 只调这一个入口，不关心谁来回答。
     ///
-    /// 顺序：宿主策略（非交互，可直接定夺）→ 已注册的 responder（AppAgent 面板）
-    /// → 兜底拒绝。期间 `uiState.pendingDecision` 置起，会话处于「等用户」的阻塞态；
-    /// 阻塞发生在 executor 的 Task 里，不占主线程，用户可以切到别的 session。
+    /// 子到根的宿主策略（deny 优先）→ 根会话的 responder → 兜底拒绝。
+    /// Pending 只注册在根会话；取消同步清理，不等待不合作的宿主 responder 返回。
     public func requestDecision(_ request: DecisionRequest) async -> DecisionOutcome {
-        // 0. 这一轮已经被取消（用户按了停止 / 切走了 run）就别再弹卡片问人了：
-        //    问出来也没人该为一个死掉的 run 拍板。
-        if Task.isCancelled {
-            Logger.info("AISession", "decisionSkippedRunCancelled: \(request)")
-            return Self.fallbackOutcome(for: request)
+        let fallback = Self.fallbackOutcome(for: request)
+        guard !Task.isCancelled, let chain = decisionPolicyChain(), let root = chain.last,
+              decisionBoundariesAllow(request, chain: chain) else { return fallback }
+        let pending = DecisionPendingRegistration(state: root.uiState, request: request)
+        let waiter = DecisionWaiter(onSettle: { pending.clear() })
+        return await withTaskCancellationHandler {
+            waiter.start { [self] in
+                let policy = await decisionHostPolicy(for: request, chain: chain)
+                guard !Task.isCancelled, matchesDecisionPolicyChain(chain),
+                      decisionBoundariesAllow(request, chain: chain) else { return fallback }
+                if let policy { return policy }
+
+                let responders = root.decisionResponders.responders
+                guard !responders.isEmpty, pending.install() else { return fallback }
+                for responder in responders {
+                    guard !Task.isCancelled, matchesDecisionPolicyChain(chain),
+                          decisionBoundariesAllow(request, chain: chain) else { return fallback }
+                    if let outcome = await responder.respond(to: request, session: root) {
+                        guard !Task.isCancelled, matchesDecisionPolicyChain(chain),
+                              decisionBoundariesAllow(request, chain: chain) else { return fallback }
+                        // Approval can never override a restriction imposed while UI was open.
+                        let latest = await decisionHostPolicy(for: request, chain: chain)
+                        guard !Task.isCancelled, matchesDecisionPolicyChain(chain),
+                              decisionBoundariesAllow(request, chain: chain) else { return fallback }
+                        if latest == .deny { return .deny }
+                        if case .clarification = request { return latest ?? outcome }
+                        if let latest, latest != .allowOnce && latest != .allowForSession { return .deny }
+                        // An allowOnce host policy cannot be expanded by a session-wide UI answer.
+                        if latest == .allowOnce, outcome == .allowForSession { return .allowOnce }
+                        return outcome
+                    }
+                }
+                return fallback
+            }
+            let outcome = await waiter.value()
+            guard !Task.isCancelled, !waiter.isCancelled, matchesDecisionPolicyChain(chain),
+                  decisionBoundariesAllow(request, chain: chain) else { return fallback }
+            return outcome
+        } onCancel: {
+            waiter.cancel(returning: fallback)
         }
+    }
 
-        // 1. 宿主策略先看一眼：企业场景可以「一律禁止，别问用户」。
-        if let agent = agentMask?.agent, let delegate = agent.delegate,
-           let policy = await delegate.aiAgent(agent, session: self, policyFor: request) {
-            Logger.info("AISession", "decisionByHostPolicy: \(request) → \(policy)")
-            return policy
+    /// Strong snapshot across awaits; cycles are invalid, not a reason to skip an ancestor.
+    func decisionPolicyChain() -> [AISession]? {
+        var chain: [AISession] = []
+        var seen = Set<ObjectIdentifier>()
+        var current: AISession? = self
+        while let session = current {
+            guard seen.insert(ObjectIdentifier(session)).inserted else { return nil }
+            chain.append(session)
+            current = session.decisionParent
         }
+        return chain
+    }
 
-        // 2. 交给能呈现的人（正常就是 AppAgent 自己的对话面板）。
-        let responders = decisionResponders.responders
-        guard !responders.isEmpty else {
-            Logger.info("AISession", "decisionDeniedNoResponder: \(request)")
-            return Self.fallbackOutcome(for: request)
-        }
+    func matchesDecisionPolicyChain(_ expected: [AISession]) -> Bool {
+        guard let current = decisionPolicyChain(), current.count == expected.count else { return false }
+        return zip(current, expected).allSatisfy { $0.0 === $0.1 }
+    }
 
-        uiState.setPendingDecision(request)
-        defer { uiState.clearPendingDecision(request) }
-
-        for responder in responders {
-            if let outcome = await responder.respond(to: request, session: self) {
-                Logger.info("AISession", "decisionByResponder: \(request) → \(outcome)")
-                return outcome
+    /// Non-interactive only. Call under a DecisionWaiter cancellation gate. A child's
+    /// allow is provisional until every ancestor has had an opportunity to deny it.
+    func decisionHostPolicy(for request: DecisionRequest, chain: [AISession]) async -> DecisionOutcome? {
+        var selected: DecisionOutcome?
+        for session in chain {
+            guard !Task.isCancelled, matchesDecisionPolicyChain(chain),
+                  decisionBoundariesAllow(request, chain: chain) else { return .deny }
+            guard let agent = session.agentMask?.agent, let delegate = agent.delegate else { continue }
+            guard let outcome = await delegate.aiAgent(agent, session: session, policyFor: request) else {
+                continue
+            }
+            if outcome == .deny { return .deny }
+            if case .clarification = request {
+                if selected == nil { selected = outcome }
+            } else {
+                guard outcome == .allowOnce || outcome == .allowForSession else { return .deny }
+                if selected == nil || outcome == .allowOnce { selected = outcome }
             }
         }
-        Logger.info("AISession", "decisionDeniedNoResponderCouldPresent: \(request)")
-        return Self.fallbackOutcome(for: request)
+        guard !Task.isCancelled, matchesDecisionPolicyChain(chain),
+              decisionBoundariesAllow(request, chain: chain) else { return .deny }
+        return selected
+    }
+
+    private func decisionBoundariesAllow(_ request: DecisionRequest, chain: [AISession]) -> Bool {
+        guard case let .appAgentInspection(scope, isMutation) = request else { return true }
+        do {
+            try HostInspectionAccess.checkBoundaries(scope: scope, isMutation: isMutation, chain: chain)
+            return true
+        } catch { return false }
     }
 
     /// 没人能回答时的结果：授权类一律拒绝，澄清类当作没回答。
     private static func fallbackOutcome(for request: DecisionRequest) -> DecisionOutcome {
         switch request {
-        case .privateNetworkAccess, .toolAuthorization: return .deny
+        case .privateNetworkAccess, .toolAuthorization, .appAgentInspection: return .deny
         case .clarification: return .answer(nil)
         }
     }
@@ -356,7 +622,11 @@ public final class AISession: @unchecked Sendable {
             title: title,
             createdAt: createdAt,
             updatedAt: updatedAt,
-            messages: messages
+            messages: messages,
+            metadata: metadata,
+            turnRecords: turnRecords.values.sorted { $0.turnID < $1.turnID },
+            executionPolicy: executionPolicy,
+            ownerAgentID: agentMask?.agent?.id
         )
     }
 }

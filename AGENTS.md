@@ -13,9 +13,9 @@ iOS/macOS AIAgent SDK，为应用提供嵌入式 AI AIAgent 能力。Core 零第
 
 ```bash
 swift build
-swift test        # 原生 macOS Core：161 tests
+swift test        # 原生 macOS Core：172 tests
 xcodebuild -project Examples/iOS/AppAgentDemo.xcodeproj -scheme AppAgentDemo -configuration Debug -destination 'generic/platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO build
-xcodebuild -scheme AppAgent -configuration Debug -destination 'platform=macOS,variant=Mac Catalyst,name=My Mac' test  # Core + UIKit：278 tests
+xcodebuild -scheme AppAgent -configuration Debug -destination 'platform=macOS,variant=Mac Catalyst,name=My Mac' test  # Core + UIKit：293 tests
 Scripts/simulator-selfcheck.sh   # iOS 模拟器上把全部工具跑一遍（见下）
 ```
 
@@ -32,8 +32,8 @@ SKIP_BUILD=1 Scripts/simulator-selfcheck.sh    # 复用上次构建
 ```
 
 - 脚本每一步都套了 `gtimeout`（需 `brew install coreutils`）：卡住会直接失败并打印最近日志，不会挂住终端。app 内部每个检查项另有 8s 预算，超时记为失败后继续跑完剩余项。
-- 产物：`Documents/selfcheck-report.txt`（逐项 ✓/✗ + `total=/ok=/fail=` 汇总，脚本拷到 `/tmp/selfcheck-report.txt`）、`Documents/selfcheck-ui-hierarchy.txt`（未截断的全窗口 `ui_hierarchy` + `view_tree`，看布局/样式用）。脚本以 `fail=0` 决定退出码。
-- 自检在 overlay 挂载**之后**才跑，所以层级里能看到宿主 window + `AppAgentWindow` + `AppAgentRegionDebugWindow` 三层；`-run-selfcheck` 同时抑制「尚未配置 API Key」弹窗，避免污染 dump。
+- 产物：`Documents/AppAgent/diagnostics/selfcheck-report.txt`（含授权 SDK 预览，逐项 ✓/✗ + `total=/ok=/fail=` 汇总，脚本拷到 `/tmp/selfcheck-report.txt`）、`Documents/selfcheck-ui-hierarchy.txt`（未截断的宿主 `ui_hierarchy` + `view_tree`）。授权 SDK/all 的层级另存 `Documents/AppAgent/diagnostics/selfcheck-sdk-hierarchy.txt`，不混入宿主产物。脚本以 `fail=0` 决定退出码。
+- 自检在 overlay 挂载**之后**才跑；默认 host 摘要和 full 都必须排除 SDK 窗口，显式授权 `appagent/all` 才包含 SDK。`-run-selfcheck` 同时抑制「尚未配置 API Key」弹窗，避免污染 dump。
 - 首页「能力自检」按钮在 app 内弹出同一份报告。
 - 加新工具时**一并在 `CapabilitySelfCheck` 加一条检查**，用三种期望之一：`.ok`（必须成功）、`.errorContains(...)`（必须以某个错误拒绝）、`.completes`（只要求不挂死，用于依赖真实模型或宿主 UI 的项）。
 - **自检必须跑完不留痕**：变更类内省（`view_set` / `view_invoke` / JS `uiSet`）只打在 `installScratchView()` 挂上去的一次性隐藏视图上，绝不改真实 UIKit 视图；改了全局观感的（深浅色、当前 tab）要复位；剪贴板只清掉自己写的内容。报告里有「临时视图已移除 / 深浅色已复位 / tab 已复位 / 剪贴板已清理」几条守着这个约定。
@@ -118,12 +118,13 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 
 - **输出有预算**：`AIAgentProfile.toolOutputMaxBytes`（默认 8KB）在 `LLMExecutor` 统一裁剪，按 UTF-8 字节切、回退到行边界、附「收窄查询」指引。单个工具可用 `ToolProtocol.outputMaxBytes` 抬高上限。起因：空壳 demo 的全量 `ui_hierarchy` 就 19KB，`class_list` 无过滤会返回进程里全部 78747 个 ObjC 类。
 - **`ui_hierarchy` 默认只给摘要**：VC 页面栈为骨架 + 语义锚点视图 + 大子树折叠成 `⊞ N views` 并附可二次调用的 path，实测 2.8KB vs 19KB。要全量得显式 `detail:"full"`。细节走 `view_tree(path:)` 钻取。
-- **路径可跨 window**：`0/2/1` 相对 keyWindow，`W1:0/2/1` 指定第 1 个 window。overlay 窗口里的视图只能用后者寻址。
+- **宿主优先范围**：`app_runtime_inspect` / `screenshot` / `app_hotfix` / `app_user_defaults` / `app_sandbox_file` 默认 `scope:"host"`；`detail:"full"` 不扩大范围。`appagent/all` 必须通过 `.appAgentInspection` 单独确认，仅当前轮有效，读取与修改授权分开，不替代原有 op 授权，不绕过 readOnly。普通 host 检查不新增确认或模型调用。
+- **路径可跨 window**：`0/2/1` 相对当前 scene 内符合范围的默认窗口；`W1:0/2/1` 中 `W1` 是稳定弱引用句柄，不是过滤后的数组下标。句柄、KVC、selector、JS 桥都在解析目标时校验范围。嵌入式 SDK 的普通 UIKit 子视图继承归属；宿主可用 `HostInspectionUIKit.markAppAgentOwned` 标记额外 SDK 根。不要整体排除共享 BOUIKit/BODragScroll。
 - **授权是 op 级的**：`ToolProtocol.safetyLevel(for:)` 按参数判定，`app_sandbox_file` 的 `list` 是 safe 而 `delete` 是 sensitive，`app_hotfix` 的 `apply` 是 dangerous。缺 op 时**不降级为 safe**（否则模型省掉参数就绕过闸门）。
 - **只读边界**：`AIAgentProfile.toolMutationPolicy = .readOnly` 时所有 `> .safe` 的调用**直接失败**而不是弹窗问人——这是 Codex `sandbox_mode` 的 iOS 对应物（iOS 沙箱运行时收不紧，只能工具层自律）。
 - **并发按级别分流**：`safe` 并发执行，`moderate` 及以上串行。两个并发的写没有互斥，快那点不值当。
 - **变更可回滚**：`view_set` 返回改前原值，把它写回同一个 key 即撤销。
-- **文件工具边界**：`file_read/write/search` 只管 Documents（agent 自己的工作区），`app_sandbox_file` 管整个 app home（Library/tmp/Caches）。两边描述里互相点名，避免模型随机挑。
+- **文件工具边界**：`file_read/write/search` 只管配置的工作区（默认 `Documents/AppAgent/files`），`app_sandbox_file` 管 app home 内当前范围。host 排除 SDK defaults、会话/记忆/技能原始文件、日志、抓包缓存及诊断导出；专用 memory/todo/skills/session 工具照常工作。共享 Preferences 文件须 all，父级共享目录不可整体写删；逐目标校验逻辑路径和符号链接真实路径。
 
 ### 运行时内省 / 热修复 / 抓包（`app_runtime_inspect`、`app_hotfix`、`app_hook_capture`）
 
@@ -156,7 +157,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 - **卡片一张、请求按会话排队**：`DecisionResponder.respond` 拿得到发起请求的 session，`AppAgentDecisionPresenter` 把 sessionId + requestId 一并交给呈现闭包；VC 存进 `pendingDecisions[sessionId]`（**数组**，同会话并发的第二个请求排在后面而不是覆盖——覆盖会把它的 continuation 永久挂住）。不属于当前会话的请求**也要收下并返回 true**（返回 false 会让责任链兜底拒绝，等于替用户做了决定），`switchSession` 时先 `dismissDecision()` 再把新会话队首那张贴出来。
 - **等待是可取消的**：`respond` 外面套 `withTaskCancellationHandler`。用户按停止 / 切走 run 之后，等在卡片上的 Task 会被取消——这时必须立刻恢复 continuation（返回 `nil` = 交回责任链兜底，**不是**替用户点「允许」）并通过 `dismiss(requestId:)` 把卡片撤掉、换上队列里的下一张。少了这一层，卡片会一直挂着等一个已经死掉的回合，executor 的 Task 也永远回不来。`Tests/UI/AppAgentUITests.swift` 有用例锁住「取消后不挂死且撤卡片」。
 - **continuation 一个都不许漏**：三条出口都要堵住——① 取消可能落在「检查完没取消」与「贴出卡片」之间，`present` 返回 true 后要再查一次 `isSettled`，是就立刻 `dismiss`（否则留一张点了没用的僵尸卡）；② 呈现失败 `settle(nil)` 走责任链兜底；③ **VC `deinit` 要 `drainPendingDecisions()`**，把还排队的按兜底语义答复掉，不然那些 `CheckedContinuation` 带着未恢复状态析构（运行时报 "leaked its continuation"），发起它们的那一轮永远回不来。
-- **一个请求三种形态**：`DecisionRequest` = `.privateNetworkAccess` / `.toolAuthorization` / `.clarification`，`title` / `message` / `options` 由它自己给出，卡片不 switch 业务。`clarify` 工具也走这条路，不再需要宿主实现回调。
+- **请求形态**：`DecisionRequest` = `.privateNetworkAccess` / `.toolAuthorization` / `.appAgentInspection` / `.clarification`，`title` / `message` / `options` 由它自己给出，卡片不 switch 业务。`clarify` 工具也走这条路，不再需要宿主实现回调。
 - **Sendable 边界**：`DecisionResponder` 要求 Sendable，UIViewController 不是，所以用 `AppAgentDecisionPresenter`（`@unchecked Sendable` 薄壳 + 弱引用 + 内部跳 MainActor）把 async 语义接到 UIKit 点击上，`withCheckedContinuation` 只允许恢复一次。
 - **自检必须换掉 responder**：真机上卡片会一直等真人点按钮，无人值守时整轮自检会挂死。`CapabilitySelfCheck.run` 开头把 `session.decisionResponders` 换成自动应答的假 responder（`SelfCheckDecisionResponder`），这条约定别破。
 - **卡片布局两个坑**（都实测踩过）：① 别拿 `layout.messageListFrame` 定位——消息列表按完整 contentArea 布局、由 viewport 裁切，它的底边在可见区外面，卡片会被裁掉完全看不见；应贴 `viewportView.bounds` 底边。② viewport 会延伸到 inputBar 底下，所以还要减 `decisionCardBottomInset`（由 `applyChatPanelContainerLayout` 用 inputBar 几何写入），否则最下面的按钮被输入栏压住点不到。
@@ -168,21 +169,35 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 **wire 层 ≠ 展示层**，这是这个 UI 最容易踩错的地方：
 
 - **wire 层**（`AIAgentMessage`）：一次提问会展开成多轮 assistant ↔ tool 往返，而且工具结果在协议上必须是 `user` 角色（两家协议都这么要求）。这是给模型看的。
-- **展示层**（`ChatMessage`）：一次提问 = 一个用户气泡 + 一个 agent 气泡。agent 内部的多轮往返属于它自己的处理过程，收进那个气泡的**过程区**，结束后折叠成「已思考 x 秒 · N 步」一行，点开才看全过程。
+- **展示层**（`ChatMessage`）：一次提问 = 一个用户气泡 + 一个 agent 回复。agent 回复无背景、横向铺满，正文与过程区左右统一留 14pt；用户保持原气泡样式。内部多轮往返收进**过程区**，有思考、工具或失败信息的回复结束后保留「处理过程」入口，点击展开、再次点击收起，不展示耗时或轮数；没有这些明细的已完成纯文本回复只显示最终结果，不显示过程入口。
 
 归属关系由 Core 打好的 `AIAgentMessage.turnID` 决定，**不靠位置猜**：`AISession.addUserMessage` 递增 `currentTurnID`，executor 产出的 assistant / 工具结果消息都打上同一个号。上下文压缩改写过消息列表也不会错挂。
 
 - **只有 `isGenuineUserInput` 才配当用户气泡**：`role == .user` 且不含 `toolResult`。曾经直接把 wire role 当气泡归属，于是「Result: Error: Tool 'web_fetch' not found」这种工具错误以蓝色用户气泡的身份出现在对话里。
-- **组装入口只有一个**：`ChatMessageAssembler.assemble(_:streamingText:isRunning:errorText:expandedTurnIDs:)`。`AppAgentViewController.reloadFromSession` 调它，别在别处再写一套 role → 气泡的映射。
-- **错误也必须走组装器**：`uiState.lastError` 不在 wire 记录里，靠 `errorText:` 参数挂到最后一轮上。踩过：executor 先 `setStreaming(false)` 触发 `reloadFromSession`，而组装器会丢掉「既无正文又无过程」的空轮，于是「尚未配置 API Key / No provider configured」这类失败在界面上**完全没有反馈**。`handleUIStateChange` 的 `lastError` 分支只负责再 reload 一遍；已有半截正文时错误接在后面，不覆盖。
-- **过程区归属「最后一条 assistant 气泡」，不是最后一行**：本轮还没吐正文时列表末尾是刚插入的用户气泡，写上去过程区就挂到蓝色气泡上了。`applyActivity` 用 `lastIndex(where: { $0.role == .assistant })`，列表侧是按 id 定位的 `updateActivity(_:expanded:messageID:)`；`ChatMessageCell.configure` 也要判 `role == .assistant` 才显示过程区。**流式正文走同一套口径**（`handleUIStateChange("streamingText")` + `updateMessage(text:status:messageID:)`），两条路径别再一个按行一个按角色。
+- **组装入口只有一个**：`ChatMessageAssembler.assemble(_:turnRecords:streamingText:expandedTurnIDs:collapsedTurnIDs:)`。`AppAgentViewController.reloadFromSession` 调它，别在别处再写一套 role → 气泡的映射。
+- **失败 / 空回复也必须有气泡**：这类信息不在 wire 记录里，靠 `turnRecords` 带进来（见「一轮的执行阶段 + turnRecord 落盘」一节）。踩过：executor 先 `setStreaming(false)` 触发 `reloadFromSession`，而组装器会丢掉「既无正文又无过程」的空轮，于是「尚未配置 API Key / No provider configured」这类失败在界面上**完全没有反馈**。`handleUIStateChange` 的 `lastError` / `runStage` 分支只负责再 reload 一遍，本身不再携带状态。
+- **过程区归属「当前 turn 的 assistant 气泡」，不是最后一行**：本轮还没吐正文时列表末尾是刚插入的用户气泡，写上去过程区就挂到蓝色气泡上了。`applyActivity` 同时匹配 `.assistant` 与当前 `turnRecord.turnID`，终局已记录时拒绝迟到的实时事件；列表侧是按 id 定位的 `updateActivity(_:expanded:messageID:)`，`ChatMessageCell.configure` 也要判 `role == .assistant` 才显示过程区。**流式正文也更新 assistant 气泡**（`handleUIStateChange("streamingText")` + `updateMessage(text:status:messageID:)`），两条路径别再一个按行一个按角色。
 - **展开态记在 turnID 上**：`ChatMessage.id` 每次组装都是新 UUID，所以「用户点开了哪一轮」存在 VC 的 `expandedActivityTurnIDs`，再通过 `assemble(expandedTurnIDs:)` 生效；列表点击用 `listView.onActivityToggled` 回传。换会话时清空。
 - **每轮结束的重建不许把人拽回底部**：`listView.setMessages(_:forceScrollToBottom:)` 默认只在「本来就贴着底」时滚；只有换会话 / 首次装载 / 灌样例对话传 `true`。
 - **流消费 Task 必须认会话**：`sendMessage` 先 `currentStreamTask?.cancel()`，Task 内每个事件前 `guard !Task.isCancelled, currentSessionId == boundSessionId`，流断掉后的补收尾也过同一道闸——否则切走再切回来时旧 Task 会把上一个会话的时间线写到新列表上。
 - **工具失败只看 `ToolCallResult.isError`**，不嗅 `Error:` 前缀：那串文案是给模型看的，工具正常返回的正文（比如读出来的日志）也可能这么开头。
-- **过程区从记录推导**，不是运行时快照：所以切换会话、重启 App 之后历史里每一轮的过程都还在（旧的 `lastTurnActivity` 快照机制已删除）。时间线起止取自消息时间戳，不然恢复出来的历史会显示「已思考 0.0 秒」。
+- **过程区从记录推导**，不是运行时快照：所以切换会话、重启 App 之后历史里的工具往返与中间发言仍可查看（旧的 `lastTurnActivity` 快照机制已删除；仅实时 reasoning delta 尚未持久化）。时间线起止优先取 `turnRecord.startedAt/endedAt`，旧历史才回退消息时间戳。`roundCount` 仍记录执行循环次数（含重试/回退），不是工具调用数；旧记录未带此键时以 assistant 消息数回退，但 UI 不再展示耗时和轮数。
+- **当前界面已显示的 reasoning 不因终局重建而丢失**：`reloadFromSession` 按 turnID + 记录起点合并当前会话已展示的明细；wire 中间发言用消息/block 的稳定 ID 与实时 reasoning 区分，按共同条目保序去重，工具最终结果优先。阶段、终态、耗时与轮数仍以记录为准，不能用旧 live 时间线整体替换。下一轮与重复刷新继续保留这些明细；切换会话清空展示缓存，不新增 reasoning 跨重启持久化。
 - **旧快照兼容**：`turnID` 是后加的键，Optional 的合成 Decodable 用 `decodeIfPresent`，缺键即 nil；nil 时按「真的用户发言开新一轮」回退。
 - **整体替换消息列表也要带上编号**：`AISession.updateMessages` 把 `currentTurnID` 抬到新列表里的最大号（只往前走）。否则恢复快照 / 压缩回写 / 灌样例对话之后，下一条提问会复用旧号并被并进历史里的某一轮。
+
+### 过程区的 Codex 风格输出
+
+- 对照源码：`openai/codex` 的 `codex-rs/tui/src/exec_cell/compact.rs`、`history_cell/activity_preview.rs` 与 `chatwidget/activity_presentation.rs`（本次参考 revision `a69d757cd8ef8310001186865911b69e4b4175e5`）。采用 `• 动作` 主行 + `└` 缩进明细，折叠只显示预览，展开读取保留的全文。
+- `AppAgentActivityTranscript` 只负责展示格式；不要在 `ChatMessageAssembler` 中提前截断工具错误和输出。工具预算仍由 Core 管，UI 预览裁剪不能破坏展开后的信息。
+- `AppAgentActivityView` 保留运行中阶段图标；无失败的完成轮隐藏阶段条。有终局失败或工具失败时保留失败阶段与标题，点摘要或错误图标经同一条 `onToggle` → 列表高度重算链路展开过程；终局错误正文已经在最终结果区展示，过程区不得重复渲染。工具条目自身的失败结果仍属于真实过程明细，可以在展开后查看。
+- 运行中默认展开，结束默认收起；显式选择由 `expandedActivityTurnIDs` / `collapsedActivityTurnIDs` 保存，阶段重建和终止事件均尊重用户选择。切换会话时清空。
+- 当次运行的最新 assistant 回复按「半屏有效列表区域 + 用户消息尾部仍可见」决定初始留白，内容顶对齐、空白留在下方；外层几何未就绪时先用 fallback，首次真实几何到达后接管。内容增长沿既有阶梯策略单调增加，当前连续阅读期间不因几何变化、成功、失败或折叠缩高。重新进入聊天、切回会话、页面重建或显式刷新展示时，已结束的尾回复恢复实际内容高度，仍在运行的回复保留已分配高度。`reloadFromSession` 默认代表重新浏览；运行通知 / 终局事件调用时必须显式传 `preservingReplyHeight: true`。用户消息始终按实际高度。
+- 实际内容高度由 `ChatMessageHeightCache` 测量，当前回复已分配高度由列表独立持有；不能按每次重建都会变化的 UUID 保存。重建按 turnID + startedAt 衔接同轮，乐观占位转权威记录时保留高度，换会话显式重置；宽度变化只重测内容，不降低当前轮已分配高度。
+- 思考和工具明细共用一个带高度上限的内部 `UIScrollView`（具体上限见 `AppAgentActivityView`），超出内部滚动，全文不裁剪；短明细按实际高度。高度上限必须在模板 cell 首次 Auto Layout 测量时生效，不能依赖布局后再回写高度。展开后的过程行使用不可编辑但可选择复制的 `UITextView`，自身不滚动，复用已有文本视图而不逐字拆建整棵 stack。
+- 过程阅读位置由列表按 turnID + startedAt 保存，乐观占位转权威记录时转移；跨 cell 重建/复用保持，收起不覆盖展开位置，换会话或清历史清除。贴底时跟随明细追加，用户上翻后保留阅读位置。
+- 展开态变化经同一条行高刷新链路同步布局：原位配置现有 cell，同高度不更新表格，高度改变才用空 `performBatchUpdates` 重新取高，不用 `reloadRows` 替换 cell；正文渲染输入不变时不重新解析 Markdown 或写入 `attributedText`。cell、contentView 与过程区都用 `clipsToBounds` 裁切，避免自动收起时旧文本短暂画到相邻行。没有明细且没有失败信息的完成轮隐藏整个过程区，即使保留了展开偏好，也不显示「本轮未记录思考或工具明细」或占用过程高度。
+- Demo 的 `-show-sample-conversation` 可叠加 `-focus-sample-activity`（定位折叠摘要）或 `-expand-sample-activity`（经列表折叠链路展开）；样例工具失败必须显式设置 `isError: true`。这些参数只用于程序化截图，不替代真实触摸验收；灌样例会清空当前 Demo 会话，请使用隔离模拟器。
 
 ### agent 回复的 markdown 渲染
 
@@ -245,15 +260,124 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 - 两个仓库的改动、测试、提交和版本发布必须分别管理；不要把 BODragScroll 源码混入 AppAgent 提交。若 AppAgent 依赖尚未发布的 BODragScroll API，先提交并发布/打标 BODragScroll，再更新 AppAgent 的 SwiftPM/CocoaPods 版本声明并发布 AppAgent。
 - AppAgent 正式发布必须通过 SwiftPM/CocoaPods 引入 BODragScroll，不能依赖本机兄弟目录；禁止提交 `Packages/` 中的本地符号链接或其他机器相关路径。
 
-## BOUIKit（UIView hit-testing 便利层）
+## BOUIKit（UIView hit-testing + 几何便利层）
 
-- 依赖 [`chbo297/BOUIKit`](https://github.com/chbo297/BOUIKit)（SwiftPM `from: "0.1.1"`，源码仓在同级 `../BOUIKit`），提供 `bo_hitAreaOutsets`、`bo_skipsSelfInHitTest`、`bo_pointInsideJudge`、`bo_hitTestHook`。同一个包也被 BWTimeGallery 使用。
+- 依赖 [`chbo297/BOUIKit`](https://github.com/chbo297/BOUIKit)（SwiftPM `from: "0.2.0"`，源码仓在同级 `../BOUIKit`），提供 `bo_hitAreaOutsets`、`bo_skipsSelfInHitTest`、`bo_pointInsideJudge`、`bo_hitTestHook`。同一个包也被 BWTimeGallery 使用。
+- **改 BOUIKit 必须先发版再升 AppAgent**：两仓分别提交，BOUIKit 打 tag 推上去之后才改 AppAgent 的 `Package.swift` 与 demo 工程的 `minimumVersion`（跑 `swift package update BOUIKit` 刷 `Package.resolved`）；**提交里不许出现本地 path 依赖**。
+- **联调期间可以先用本地源码**：`Scripts/Dependencies/use-local-bouikit.sh` 把根 `Package.swift` 的 BOUIKit 依赖临时换成 `../BOUIKit` 的 path（原版本号记在 `// BOUIKIT-LOCAL released: x.y.z` 注释里），改完发版后 `Scripts/Dependencies/use-released-bouikit.sh` 还原。不要用 `swift package edit`：xcodebuild（Catalyst 测试、demo 工程）不认 SwiftPM 的 `Packages/` editable checkout，只有命令行 `swift build` 认。demo 工程有自己的 remote package 引用，本地联调 demo 需要在 Xcode 里另加一次本地包，同样不提交。
 - 它通过 `method_exchangeImplementations` 换掉 `UIView.point(inside:with:)` 与 `hitTest(_:with:)`，首次设置有效配置时惰性安装，作用域是整个进程；集成文档需向宿主 app 说明这一点。
 - 在 macOS 上编译为空模块，因此 AppAgent target 无条件依赖即可；`Sources/UI` 里使用时照常放在 `#if canImport(UIKit)` 内。
 - **约定：需要调整命中区就用 BOUIKit，不要再手写 `hitTest` / `point(inside:)`**，除非判定本身有复杂逻辑（路径命中、按状态重定向到别的子视图等）。
 - 已接入点：`AppAgentWindow` 与 `AppAgentRegionDebugWindow` 的穿透、`AppAgentChatPanelContainerView` 的「命中自己就穿透」用 `bo_skipsSelfInHitTest`；`AppAgentRegionDebugPanelView` 折叠态外扩用 `bo_hitAreaOutsets`。
 - 仍保留手写 override 的三处（都属于复杂判定）：`AppAgentInputBar.hitTest` 把 bar 空白处的触点重定向给输入区；`AppAgentVoiceBottomPanelView` / `AppAgentVoiceActionZoneView` 用贝塞尔路径判定命中。
 - 输入区命中：`AppAgentInputBar.extendedInputAreaHitRect` 是「点击弹键盘」和「上滑唤键盘」**共用**的同一块矩形（横向为输入区、纵向撑满 bar 白色背景）。改一处即两者同步，`Tests/UI/AppAgentRegionDebugTests.swift` 有用例锁住这一点。
+
+### 写之前先判等（`bo_setFrame` / `bo_isScrolledToBottom`）
+
+BOUIKit 0.2.0 起还提供几何层：`bo_setFrame` / `bo_setBounds` / `bo_setCenter`（不变就不写，返回是否真的写了）、`bo_isApproximatelyEqual`（容差默认 0.5pt）、`bo_maximumContentOffsetX/Y`、`bo_isScrolledToTop/Bottom`、`bo_isContentBottomVisible`、`bo_setContentOffset`。`Sources/UI/AppAgentGeometry.swift` 里的 `isApproximatelyEqual` 只是转发到 `bo_` 版本，别再写第二套容差。
+
+**「贴底」有两个口径，别混用**：消息列表用 `bo_isScrolledToBottom` 判断包含 `adjustedContentInset` 的真实底部，以 `bo_maximumContentOffsetY` 为滚动目标。普通单次更新使用按当前屏幕 scale 换算的 **1px** 容差；BODragScroll 连续改变展示高度的跟手路径使用 **0.001pt**，避免逐帧判定和写入产生阶梯抖动。在更新消息、高度或 inset **之前**记录是否贴底，更新后才对齐新目标；首次分配视口仍强制到底。`bo_isContentBottomVisible` 只用于诊断，不能作为跟底条件，否则会提前跳过 inputBar 和间距占用的 bottom inset。
+
+**最新回复占位空白的唯一例外**：初始留白基于半屏有效列表区域，并为用户消息尾部保留可见空间。列表滚到真实底部时，短回复的多余留白留在回复下方，用户消息尾部仍可见；跟随判定与写入共用原容差，用户上翻后不强拉，历史行和用户尾行仍按真实底部。
+
+判等真正值钱的是三类写入，这几处必须走 `bo_`：
+
+- **每帧驱动**：`AppAgentRegionDebugViewController.refreshOutlines` 的 `outline` 由 CADisplayLink 刷新，绝大多数帧几何没变。
+- **写入有副作用**：给 scrollView 写 frame 会顺带重算并夹取 `contentOffset`（`AppAgentChatPanelCoordinator.updateLayout` 的 `dragScrollView`）；已经贴底还调 `scrollToRow` 会打断在飞的减速动画（`AppAgentChatMessageListView.scrollToBottom`）。
+- **frame 承载动画**：重复写同一个 frame 会打断在飞的 `UIViewPropertyAnimator`。
+
+其余 frame 写入点**不必**逐个包：它们多数已在更粗粒度上短路（`AppAgentChatPanelView.applyLayout` 的 `guard layout != appliedLayout`、容器与 `AppAgentInputBar.setInputBarFrame` 的 `isApproximatelyEqual`、`applyTableViewFrame` 的自带判等），剩下的只在 `layoutSubviews` 里跑一次，包一层只是噪音。
+
+### 键盘顶起：只把容器整体上移，面板几何一概不动
+
+**键盘只做一件事：把整个 ChatPanel 容器上移。** `AppAgentChatPanelGeometry` 不接受键盘参数，面板自身高度、
+展示高度（`dragScrollView.displayHeight`）、档位在键盘抬起到收起的全过程里都不变；唯一变化的是
+`AppAgentChatPanelContainerView` 的 frame（`applyChatPanelContainerLayout` 把 `view.bounds` 按 `keyboardLift`
+偏移后交给 `AppAgentChatPanelContainerLayout`）。宿主接线只剩一句（`handleKeyboardHeightChange`）：在键盘自己的
+`UIView.animate(withDuration: duration)` 块里调 `layoutInputBar(reason: .keyboard)`，inputBar 与容器在同一条
+动画上下文里一起上移。
+
+**走过的弯路别再回头**：曾经把 `keyboardLift` 从 `maximumDisplayHeight` 里扣掉、再在键盘动画块内 clamp 一次
+展示高度（为了让面板顶部停在顶部安全区下沿）。代价是键盘每次抬起都要动展示高度，而展示高度由
+`dragScrollView.contentOffset` 承载，链路上任何一次 scrollView frame 写入都会把在飞的 `bounds.origin` 隐式动画
+夹掉，实测始终有一次闪动（改成判等写 frame 也没治住）。geometry 的 `keyboardLift` 参数与 coordinator 的
+`clampDisplayHeightToMaximumHeight()` 因此整体删除。
+
+**派生写入一律直接提交、继承调用方的动画上下文**。三条硬约定（都是实测踩出来的，别再回头加 trick）：
+
+- **不剥动画**。面板内部几何曾经走 `UIView.performWithoutAnimation`，于是裁切窗口瞬跳到终态、内容再慢慢滑上来，看起来就是「先落后键盘、再跳一下」。
+- **裁切与圆角用 `clipsToBounds` + `layer.cornerRadius` + `maskedCorners`，不用 `layer.mask`**。`layer.mask` 拿不到 UIKit 动画块的隐式动画（实测 `animationKeys()` 恒空，`CATransaction.setDisableActions(false)` 也救不了），而它又是唯一的裁切者；手工给 mask 补 `CABasicAnimation` 能治全屏那次跳动，但 `path` 那条会在半屏高度制造「内容重绘半截闪白」。面板背景同理改成 `layer.backgroundColor` + `cornerRadius`、**不设 `shadowPath`**（让 UIKit 从 layer 形状自己推，形状变化才跟着 frame 一起动）。上下圆角只有「四角同半径」和「只上两角」两种形态，正好用 `maskedCorners` 表达，`AppAgentChatPanelShapePath` 因此整个删掉了。
+- **列表不做「高度冻结 + 按锚点平移」的中间态**。`updateVisibleArea` 直接写 tableView 高度，然后在「原来贴底」时 `scrollToBottom(animated: false)`；顺序不能反——视口变矮会把贴底的 offset 极限推高，落点必须在高度写入之后才算得对。曾经为此加过裁切容器 + 冻结高度 + 位移 + 收尾复位的一整套，结果它和 viewport 的裁切各走一条时间线，反而更跳。
+
+`Tests/UI/AppAgentChatPanelGeometryTests.swift` 锁住三条：键盘抬起既不改面板高度也不改展示高度；容器随键盘整体上移；viewport 用 `clipsToBounds` + 圆角而不是 mask 裁切。
+
+## 输入栏右侧动作槽：加号 / 发送 / 停止
+
+对照另一个 agent app（ChatGPT iOS）的输入栏：右下角那一格是**一个槽三种形态**，不是三个按钮堆在一起。
+`AppAgentInputBar.trailingAction` 由两个输入派生，优先级固定：
+
+- **有草稿 → `.send`**：蓝色实心圆 + 白色 `arrow.up`，**语音按钮一起隐藏**，界面上只剩「把这段话发出去」；
+- **无草稿 + loop 运行中 → `.stop`**：同一个蓝圆 + 白色 `stop.fill`（配上圆底就是「外圆内方」），语音按钮照常可用；
+- **其余 → `.plus`**：原来的加号。
+
+- **形态只由派生决定**：点击统一走 `trailingActionTapped` 按当前形态分发，外面不要再判一遍草稿。
+  `hasDraftText` 会 trim 空白（纯空格不给发送按钮，否则是个点了没反应的死按钮）；语音长按的
+  `canBeginVoiceInput` 仍按「空白也算已输入」判，两者刻意不同。
+- **运行状态由宿主写入，inputBar 不自己猜**：`setRunActive(_:)`。`AppAgentViewController.isAgentRunActive`
+  的口径是「执行器手上还有活」——`session.isRunning`，加上「当前轮记录还没终局」兜住任务已摘、记录未关的那一小段；
+  并在 `reloadFromSession` / 每次 `uiState` 通知 / 发送后 / 流关闭后各同步一次。**流关闭（`for await` 结束）
+  发生在 executor `clearRunTask` 之后**，那是「已经不在跑了」最可靠的一刻，少了这次同步按钮会卡在停止态。
+- **按过停止就不再邀请第二次**：`stoppedRunTurn`（会话 id + turnID）记下用户已经停过这一轮。executor 可能还卡在
+  工具里没走到取消检查点、`turnRecord` 也就还没关，但按钮必须立刻切回加号；新一轮 turnID 一变自然失效。
+- **发送即打断**：运行中发新内容（打字发送或语音转文字）默认先取消上一轮。`LLMExecutor.run` 自己也会取消上一个
+  任务，但 UI 侧显式 `session.cancel()` 一次，上一轮才会明确记成 `.cancelled`（界面「（已停止）」），
+  而不是等兜底补一个 `runEndedWithoutResult`。同一会话重跑不占新并发额度（`RunGovernor.canAdmit` 的 `isAlreadyRunning`）。
+- 几何上它就是加号那一格：`applyTrailingActionGeometry` 让 frame 和淡出 alpha 都跟着 `plusButton` 走，
+  bar 收窄 / 收起时一起淡出。`Tests/UI/AppAgentUITests.swift` 锁住三态与「占同一格」。
+
+## 一轮的执行阶段 + turnRecord 落盘 + 「必须有终止事件」契约
+
+一轮的**全部状态只有一个真相来源：`AIAgentTurnRecord`**（`Core/Message/AIAgentTurnRecord.swift`），随会话快照落盘（`AISession.turnRecords` → `SessionSnapshot.turnRecords`），UI 只读它渲染：
+
+```
+turnID / startedAt / endedAt / stage / outcome / modelRef / roundCount
+outcome = .answered | .empty | .failed(stage:message:) | .cancelled | .interrupted     // nil = 还在跑
+```
+
+流水线位置由 `AIAgentRunStage` 表示，UI 渲染成过程区顶部的小指示条：
+
+`.preparing`（组装 prompt/工具清单）→ `.requesting`（请求已发，等首个内容）→ `.streaming`（收到首个 delta / 工具调用）→ `.tooling`（执行工具，可能在等用户拍板）→ `.finished`。
+
+- **写入方只有 executor**：`LLMExecutor` 在 `addUserMessage` 之后 `openTurnRecord`，每次阶段变化 `advanceTurnStage`，终局 `closeTurnRecord`（**首次写入为准**，重复调用是 no-op）。`persistTurnState` 1s 去抖、终局强制落盘。`SessionUIState.runStage` 仍在，但只作为「该刷新了」的通知源，**不再是数据源**。
+- **run 绑定自己分配的 turnID**：`addUserMessage` 返回锁内分配的编号，执行循环、消息归属与兜底收尾均显式传递它，不能在旧任务结束时重读已被新任务推进的 `currentTurnID`。`roundCount` 从 0 开始、进入循环后只增不减，终局后冻结；旧快照缺键为 nil。
+- **不许再开第二条状态通路**。UI 侧曾经另从 `uiState.isStreaming / lastError / runStage` 读一份，这套双源正是三个真机 bug 的共同成因：loading 与过程区显示到**上一条**回复上面、指示条走到「完成」而下面的「思考中…」一直转圈、失败了界面上完全没有反馈。现在 `ChatMessageAssembler.assemble(_:turnRecords:streamingText:expandedTurnIDs:collapsedTurnIDs:)` 只吃记录；`streamingText` 是唯一例外（它是还没落盘的**内容**，不是状态）。
+- **每个终局都要有可见的说法**：`ChatMessageAssembler.placeholder(for:hasActivity:)` 把 `.empty` 渲染成「（本轮没有返回任何内容）」、`.cancelled` 成「（已停止）」、`.interrupted` 成「（上次运行被中断…）」；`.failed` 把 `failureMessage` 以 `Error: …` 接在已有正文**后面**（半截答案本身也是线索，不覆盖）。最终流错误由 executor 保存当前尝试已收到的正文，不能把重试/模型回退期间的失败尝试正文或未执行的工具调用塞进下一次请求。
+- **重启不自动重放**：`AISessionManager` 恢复后调 `session.markUnfinishedTurnsAsInterrupted()`，把上次没跑完的轮次标成 `.interrupted`，由用户决定要不要重问。在飞的 SSE 不可续、工具也不幂等，自动接着跑比中断更危险。
+- **记录 → 时间线的映射只写一遍**：`ChatMessageAssembler.apply(_:to:)`。重建（`assemble`）和流式中（VC 的 `applyActivity`）都调它，两条路径因此不可能各说各话。它也负责「有终局但 stage 没到 `.finished`（失败/取消/中断）时照样 `finish()`」——不然折叠行会一直转圈。重建必须先应用失败记录再收尾，不能提前 `finish()` 把最远阶段点亮到完成；后续请求失败仍根据已有工具结果保留走过的工具阶段。
+- **没有记录的轮次按「已结束、无阶段信息」渲染**：旧快照、灌进来的样例对话都是这种形状，不能因此转圈。
+- **新加的快照键要能被旧数据缺席**：`SessionSnapshot.init(from:)` 对 `metadata` / `turnRecords` 用 `try?`。这两个键解不开就抛的话，`FileSessionStorage.loadAll` 会把**整段会话**丢掉。
+- **阶段不是单调的**：一轮里多次工具往返会在 `.streaming` ↔ `.tooling` 之间来回，所以 UI 侧 `AppAgentActivityTimeline` 另记一个 `furthestStage`（只增不减）来点亮「已走过」的格子，否则指示条会来回闪。
+- **失败停在出错那一步**：`outcome = .failed(stage:)` 不推进到 `.finished`，UI 只把对应阶段格标成红色警告，不再追加尾部警告。失败阶段格（`AppAgentRunStageStripView.onErrorTapped`）和过程摘要仍可展开过程；终局错误正文只在最终结果区显示，避免与过程区重复。「卡住时停在哪一步」是排查里最有用的一条信息，日志与诊断包也带上它。
+- **本地报错演示**：👻 响应区域调试面板的「报错演示」按顺序自动发送 8 轮，覆盖准备失败、首次请求失败、请求重试耗尽、工具循环失败、输出中断、工具后请求失败、工具协议异常，以及工具失败但回答完成。独立页面使用隔离的 agent/注册表/内存存储，复用真实 executor 与聊天 UI，不调用真实模型、不注册全局授权 responder、不改原会话或草稿；支持停止、重播和关闭。演示脚本只模拟 provider/tool，不能直接伪造 turnRecord。
+- **每轮恰好一个终止事件**（`.completed` 或 `.error`），这是硬契约：漏发就是真机上「回复一直是 …」（UI 靠终止事件收尾），重复发会让一轮被收两次。所以 `LLMExecutor` 的所有终止出口都先过 `noteTerminal(runID)` 去重，`run` 的 `defer` 里 `finalizeIfNoTerminalEvent` 兜最后一道底——补 `AIAgentError.runEndedWithoutResult`、清 streaming、**关掉 turnRecord**、记一条 `AppAgentDebugLog` failure。**别在终止出口绕过 `noteTerminal`。**
+- 每个 assistant 回复都保留过程时间线数据，用于状态合并与历史重建；入口显隐统一由 `AppAgentActivityTimeline.shouldDisplayActivity` 决定。已结束、无 item 且无失败信息的纯结果回复隐藏过程区；运行中或有思考/工具/失败信息时保留。请求尚未发出便失败的轮次仍保留入口和失败阶段，不能只按 items 是否为空判断，也不能为了隐藏入口丢弃时间线数据。
+- **「转圈」只有一个真相来源：`finishedAt`**。`ChatMessageAssembler.timeline(for:)` **不许**给「没有思考文本也没有工具往返」的轮次提前 return —— 那样返回的时间线没收尾（`isRunning == true`），折叠行会永远显示转圈的「思考中…」，而指示条早已走到「完成」。问一句「几点了」就是这种形状，实测踩过。配套地，`setStage(.finished)` 自己也会 `finish()`，让两个字段不可能各说各话。
+- **组装器不许丢掉「正在跑的那一轮」**：空轮过滤条件必须放行「记录存在且没有 outcome」的轮次。丢了它，`applyActivity` 的「最后一条 assistant 气泡」就落到**上一轮**的回复上——loading / 过程区显示到上一条答案的上面（实测踩过，`handleUIStateChange(runStageKey)` 在 `.preparing` 就会触发一次重建，那时本轮的 assistant 消息还没进 wire 记录）。
+- **`stop=tool_use` + 0 个工具调用 = 协议级异常，不是空回复**（OpenAI 兼容端点的 `tool_calls` 格式没被解析上就长这样）。**带正文也算异常**：那点正文通常是「我来看看当前页面…」这种过场话（实测收到过光秃秃一条 `...`），当成答案收下就会写进历史，下一轮模型拿它当自己的上一句、认为问题已经答过。处置顺序是「先换模型、再报错」：`LLMExecutor` 记一条 debug-log failure，然后按 `modelPolicy` 换下一个没试过的模型/协议重跑这一轮（同一个端点重试还是同样的解析结果，重试没意义）；fallback 用尽才 `finishWithError`。放它过去的话，界面就是「loading 转一圈然后什么都没有」——真机踩过。
+- **没有产出的失败 / 被中断轮次不进 wire**：这类轮次只剩用户那句话（没有任何 assistant 消息）。它必须留在 `session.messages` 里给界面显示，但发给模型前由 `LLMExecutor.strippingOrphanTurns(_:keeping:)` 按 `turnID` 剔掉——正在跑的那一轮永远保留，旧快照里没编号的一律保留。实测不剔的后果：同一句提问在历史里堆了 4 条，wire 上出现连续多条 `user`（Anthropic 侧对交替严格），模型在思考里写「用户问了好几次」，还白烧 token。
+- 用例：`Tests/Core/AppAgentCoreTests.swift` 锁「成功轮写 `.answered` + `.finished` + modelRef」「失败轮写 `.failed(stage:)` 且不推进到 `.finished`」「连 provider 都没有的轮次也有终局」「turnRecords 快照往返 + 旧快照无此键」「恢复时未完成轮标 `.interrupted` 且不改写已有终局」「失败轮恰好一个终止事件且 `failedStage == .requesting`」「成功轮停在 `.finished`」；`Tests/UI/ChatMessageAssemblerTests.swift` 锁四种终局的可见文案与「正在跑的一轮不被丢掉」；`Tests/UI/AppAgentActivityTimelineTests.swift` 锁 `furthestStage` 只增不减、`markFailed` 后 `finish()` 不把 stage 冲成 `.finished`。
+
+## 真机排查：落盘日志 + 一键导出诊断包
+
+真机上 `print` 看不到，所以 `Logger` 的输出另有一条落盘通道：
+
+- `AppAgentRunLog.shared.install()` 打开 `Logger` 并把格式化后的每一行追加到 `Documents/AppAgent/logs/appagent-<时间>.log`，按 2MB 滚动、只留最近 3 个文件。**`AppAgentOverlay` 初始化时自动调用**，宿主零代码；install 幂等，且**不吞掉已有 handler**（宿主原来接了自己的日志系统照旧生效）。
+- 导出在调试面板（会话侧栏的「调试」入口）：面板顶部有显眼的「导出全部数据」按钮，导航栏分享菜单里也有同一项。走 `AppAgentDiagnostics.export`，打出一个 zip：`summary.txt`（环境 + 各项计数 + 包内清单）、`debug-log.txt/.json`（模型调用记录）、`run-logs/`、`sessions/`（会话快照，含每轮工具往返）、`memory/`。
+- zip 不引三方库：`NSFileCoordinator` 的 `.forUploading` 读意图会给出目录的临时 zip 副本，拷出来即可。**这一步阻塞**，所以 `export` 在后台队列跑、回调切主线程，UI 期间显示「正在打包…」。
+- 导出前必须 `runLog.flush()`：写入是异步排队的，不 flush 最后几行还在队列里——恰恰是卡住之前那几行。
+- **响应侧的原始 SSE 也落日志**（`AnthropicProvider` 里每条 `sse<<` 一行，截断 800 字）。以前只记请求体，于是「模型说 stop=tool_calls、我们却解析出 0 个调用」这类问题在诊断包里查不到根因，只能靠猜端点格式。
+- **OpenAI 兼容端点的三个坑**（都是排查的产物）：① 有的端点在流式分片里用 `message` 而不是 `delta`，`OpenAIChoice.delta` 必须是 Optional 并 `delta ?? message` 兜住——非 Optional 时这类分片整块解码失败被静默丢掉，工具调用就这么没了；② 老式 `function_call` 也要收，并到 0 号槽走同一套收尾。`finish_reason=tool_calls` 却 flush 出 0 个调用时会打 warning 并带上原始 chunk；③ **续传分片里 `id` / `name` 是空字符串而不是缺键**（GLM 系 OneAPI 端点实测如此：首片给全名，后续每片都带 `"id":"","name":""`）。`if let` 挡不住空串，覆盖上去就把首片的工具名擦掉，`flushToolCalls` 再按「名字为空」整条丢掉 —— 现象正是 ② 那句 warning + 界面 loading 转一圈没结果。所以 `OpenAIChatCompletionsMapper` 合并分片一律走 `nonEmpty(_:)`：**空值只补不覆盖**；`OpenAIResponsesMapper` 的 `call_id` / `id` 同理。`Tests/Core/AppAgentCoreTests.swift` 用真实分片序列锁住这条。
+- `Tests/Core/AppAgentDebugLogTests.swift` 锁住两点：`Logger` 的行确实进了文件；诊断包是真 zip（`PK` 魔数）且概要计数正确。
 
 ## 文件导航快速索引
 
@@ -352,7 +476,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `WebFetchTool.swift` | 抓任意 http(s) URL：HTML→文本 / raw / head，可 save_as 落盘；SSRF 拦截 + 不可信栅栏 |
 | `ScreenshotTool.swift` | 截当前 window 或指定 path 视图：默认以 `Tool.Output.image` 内联给模型，`save_as_file` 才落盘（取代原 vision_analyze） |
 | `SandboxPathResolver.swift` | 安全路径解析，防止目录遍历攻击 |
-| `SessionManageTool.swift` | 会话管理 9 op：list/read/rename/delete/create/switch/set_model/models/clear |
+| `SessionManageTool.swift` | 会话管理：list/read/create/switch/rename/models/set_model；archive/delete 可恢复归档、archived/restore/merge；clear 禁用，模型无永久删除（见 `docs/SessionHistory.md`） |
 | `AppSandboxFileTool.swift` | 沙箱文件 list/read/write/delete（group host-storage） |
 | `AppUserDefaultsTool.swift` | UserDefaults read/write/remove/list（group host-storage） |
 | `AppDeviceInfoTool.swift` | 设备与运行环境：机型/系统/存储/内存/语言时区/电量（group host-runtime） |
@@ -387,13 +511,14 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 | `SkillsManager.swift` | 技能发现 actor：从 Bundle/Documents 加载，YAML frontmatter 解析，创建/删除 |
 | `Skill.swift` | 技能数据结构：name、description、category、markdown content |
 
-### Core/Message/ — 消息与事件 (3 files)
+### Core/Message/ — 消息与事件 (4 files)
 
 | 文件 | 职责 |
 |------|------|
 | `AIAgentMessage.swift` | Provider 无关的消息类型，Content enum (text/toolUse/toolResult)，ToolCallResult 可带 ImageAttachment，Codable（`images` / `turnID` 键向后兼容旧快照）；`turnID` 是「这轮提问」的归属，`isGenuineUserInput` 区分「用户真的说了话」与工具结果 |
 | `AIAgentEvent.swift` | 流式事件枚举 + AIAgentFinish 结果类型 |
 | `AIAgentError.swift` | AIAgentError + ModelError 错误枚举 |
+| `AIAgentTurnRecord.swift` | 一轮的持久状态：stage + outcome(.answered/.empty/.failed/.cancelled/.interrupted) + modelRef，随快照落盘，UI 的唯一状态来源 |
 
 ### Core/Foundation/ — 共享基础设施 (9 files)
 
@@ -415,7 +540,7 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 |------|------|
 | `UI/AppAgentOverlay.swift` + `AppAgentWindow.swift` | 宿主集成入口：穿透 overlay window（`windowLevel = .normal + 1`）+ 门面 |
 | `UI/AppAgentViewController/` (8 files) | 主控制器与其分片：ChatPanel、输入栏布局/委托、键盘、session 绑定与侧栏、语音输入 |
-| `UI/AppAgentInputBar.swift` + `AppAgentInputBarFramePolicy.swift` + `AppAgentMenuButton/TextField` | 底部胶囊输入栏：布局压缩阶段、pan 手势、扩大后的输入命中区 |
+| `UI/AppAgentInputBar.swift` + `AppAgentInputBarFramePolicy.swift` + `AppAgentMenuButton/TextField` | 底部胶囊输入栏：布局压缩阶段、pan 手势、扩大后的输入命中区、右侧动作槽（加号/发送/停止） |
 | `UI/ChatPanel/` (11 files) | BODragScroll 面板：coordinator、几何/detent、消息列表、导航栏、过程区（timeline + view）、决策卡片（`AppAgentDecisionCardView` + `AppAgentDecisionPresenter`） |
 | `UI/ChatMessage.swift` + `ChatMessageCell.swift` | 展示层消息模型与气泡 cell（正文为可选中 UITextView，附过程区） |
 | `UI/ChatMessageAssembler.swift` | 把 wire 记录组装成用户视角的对话列表（按 turnID 归属，工具往返收进过程区） |

@@ -150,6 +150,22 @@ public final class TrackedLocked<Value: Sendable>: @unchecked Sendable {
     public func clearDirty() {
         _lock.withLock { _isDirty = false }
     }
+
+    /// 原子读改写，并标脏。
+    ///
+    /// 字典 / 数组这类容器**必须**走这里：`get` 出来改完再 `set` 回去，三步之间不是临界区，
+    /// 两处并发更新会互相覆盖（`AISession.turnRecords` 就是被多个阶段打点并发写的）。
+    /// 注意：带 `isEqual` 的实例走 `mutate` 也一律标脏（改没改不好判，宁可多存一次）。
+    public func mutate<Result>(_ body: (inout Value) -> Result) -> Result {
+        _lock.withLock {
+            let result = body(&_value)
+            _isDirty = true
+            return result
+        }
+    }
+
+    /// 让 `$property.mutate { … }` 可用，和 `Locked` 的用法保持一致。
+    public var projectedValue: TrackedLocked<Value> { self }
 }
 
 // MARK: - ReadersWriterLock

@@ -49,6 +49,25 @@ final class ChatMessageAssemblerTests: XCTestCase {
         AIAgentMessage.ToolCall(id: id, name: name, arguments: ["op": .string("x")])
     }
 
+    /// 一轮的持久状态。「还在跑」= 没有 outcome。
+    private func records(_ list: [AIAgentTurnRecord]) -> [Int: AIAgentTurnRecord] {
+        Dictionary(list.map { ($0.turnID, $0) }, uniquingKeysWith: { _, last in last })
+    }
+
+    private func record(
+        turn: Int,
+        stage: AIAgentRunStage,
+        outcome: AIAgentTurnRecord.Outcome? = nil
+    ) -> AIAgentTurnRecord {
+        AIAgentTurnRecord(
+            turnID: turn,
+            startedAt: Date(timeIntervalSince1970: 0),
+            endedAt: outcome == nil ? nil : Date(timeIntervalSince1970: 2),
+            stage: stage,
+            outcome: outcome
+        )
+    }
+
     /// 工具结果在 wire 上是 user 角色，但绝不能渲染成用户气泡。
     func testToolResultsNeverBecomeUserBubbles() {
         let messages: [AIAgentMessage] = [
@@ -165,20 +184,35 @@ final class ChatMessageAssemblerTests: XCTestCase {
         XCTAssertEqual(bubbles[1].activity?.stepCount, 1)
     }
 
-    /// 进行中的一轮：过程区展开、状态是 streaming；结束后自动折叠。
+    /// 进行中的一轮：还没输出最终结果时过程区展开；一旦最终结果开始输出就自动收起，
+    /// 让结果显示在收起的过程入口下方；结束后仍保持折叠。
     func testRunningTurnExpandsAndFinishedTurnCollapses() {
         let messages: [AIAgentMessage] = [
             user("在跑的一问", turn: 1),
             assistant(text: nil, calls: [call("c1", "file_read")], turn: 1)
         ]
 
-        let running = ChatMessageAssembler.assemble(messages, streamingText: "正在写", isRunning: true)
-        XCTAssertEqual(running.last?.status, .streaming)
-        XCTAssertEqual(running.last?.isActivityExpanded, true)
-        XCTAssertEqual(running.last?.text, "正在写")
+        // 还没有最终结果（streamingText 为空）：思考过程默认展开。
+        let thinking = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([record(turn: 1, stage: .streaming)])
+        )
+        XCTAssertEqual(thinking.last?.status, .streaming)
+        XCTAssertEqual(thinking.last?.isActivityExpanded, true)
+
+        // 最终结果开始输出（streamingText 非空）：过程区自动收起，正文即结果文案。
+        let answering = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([record(turn: 1, stage: .streaming)]),
+            streamingText: "正在写"
+        )
+        XCTAssertEqual(answering.last?.status, .streaming)
+        XCTAssertEqual(answering.last?.isActivityExpanded, false)
+        XCTAssertEqual(answering.last?.text, "正在写")
 
         let finished = ChatMessageAssembler.assemble(
-            messages + [assistant(text: "写完了", turn: 1)]
+            messages + [assistant(text: "写完了", turn: 1)],
+            turnRecords: records([record(turn: 1, stage: .finished, outcome: .answered)])
         )
         XCTAssertEqual(finished.last?.status, .complete)
         XCTAssertEqual(finished.last?.isActivityExpanded, false)
@@ -192,7 +226,10 @@ final class ChatMessageAssemblerTests: XCTestCase {
             assistant(text: nil, calls: [call("c1", "file_read")], turn: 1)
         ]
 
-        let bubbles = ChatMessageAssembler.assemble(messages, isRunning: true)
+        let bubbles = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([record(turn: 1, stage: .streaming)])
+        )
 
         XCTAssertEqual(bubbles.count, 2)
         XCTAssertEqual(bubbles.last?.role, .assistant)
@@ -214,31 +251,89 @@ final class ChatMessageAssemblerTests: XCTestCase {
     }
 
     /// 「没配 API Key / 没有 provider」这种一步都没跑起来的失败：那一轮既没有正文
-    /// 也没有过程，以前会被整轮丢掉，界面上什么都不显示。错误必须能撑起一个气泡。
-    func testErrorTextSurfacesEvenWhenTurnProducedNothing() {
+    /// 也没有过程，以前会被整轮丢掉，界面上什么都不显示。失败记录必须能撑起一个气泡。
+    func testFailedOutcomeSurfacesEvenWhenTurnProducedNothing() {
         let messages: [AIAgentMessage] = [user("一问", turn: 1)]
 
         let bubbles = ChatMessageAssembler.assemble(
             messages,
-            errorText: "Error: No provider configured"
+            turnRecords: records([
+                record(turn: 1, stage: .preparing,
+                       outcome: .failed(stage: .preparing, message: "No provider configured"))
+            ])
         )
 
         XCTAssertEqual(bubbles.map(\.role), [.user, .assistant])
         XCTAssertEqual(bubbles.last?.text, "Error: No provider configured")
         XCTAssertEqual(bubbles.last?.status, .error)
+        // 卡在哪一步也要能看见（指示条那一格标红）。
+        XCTAssertEqual(bubbles.last?.activity?.failedStage, .preparing)
+        XCTAssertEqual(bubbles.last?.activity?.isRunning, false)
     }
 
     /// 已经吐了半截答案又失败：正文不能被错误覆盖掉。
-    func testErrorTextIsAppendedAfterPartialAnswer() {
+    func testFailureMessageIsAppendedAfterPartialAnswer() {
         let messages: [AIAgentMessage] = [
             user("一问", turn: 1),
             assistant(text: "写到一半", turn: 1)
         ]
 
-        let bubbles = ChatMessageAssembler.assemble(messages, errorText: "Error: 断线了")
+        let bubbles = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([
+                record(turn: 1, stage: .streaming,
+                       outcome: .failed(stage: .streaming, message: "断线了"))
+            ])
+        )
 
         XCTAssertEqual(bubbles.last?.text, "写到一半\n\nError: 断线了")
         XCTAssertEqual(bubbles.last?.status, .error)
+    }
+
+    func testLoopLimitFailureRemainsInFinalText() {
+        let failure = "AIAgent loop exceeded maximum(70) iterations"
+        let bubbles = ChatMessageAssembler.assemble(
+            [user("一问", turn: 1)],
+            turnRecords: records([
+                record(
+                    turn: 1,
+                    stage: .tooling,
+                    outcome: .failed(stage: .tooling, message: failure)
+                )
+            ])
+        )
+
+        XCTAssertEqual(bubbles.last?.text, "Error: \(failure)")
+        XCTAssertEqual(bubbles.last?.status, .error)
+        XCTAssertEqual(bubbles.last?.activity?.errorText, failure)
+        XCTAssertTrue(bubbles.last?.activity?.shouldDisplayActivity == true)
+    }
+
+    /// 模型回了空内容 / 用户按了停止 / 上次运行被中断：三种终局都要在界面上有说法，
+    /// 不能是一个空气泡。
+    func testTerminalOutcomesRenderVisiblePlaceholders() {
+        let messages: [AIAgentMessage] = [user("一问", turn: 1)]
+
+        let empty = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([record(turn: 1, stage: .finished, outcome: .empty)])
+        )
+        XCTAssertEqual(empty.last?.text, "（本轮没有返回任何内容）")
+        XCTAssertEqual(empty.last?.status, .complete)
+
+        let cancelled = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([record(turn: 1, stage: .streaming, outcome: .cancelled)])
+        )
+        XCTAssertEqual(cancelled.last?.text, "（已停止）")
+        XCTAssertEqual(cancelled.last?.activity?.isRunning, false)
+
+        let interrupted = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([record(turn: 1, stage: .tooling, outcome: .interrupted)])
+        )
+        XCTAssertTrue(interrupted.last?.text.contains("中断") ?? false)
+        XCTAssertEqual(interrupted.last?.activity?.isRunning, false)
     }
 
     /// 用户点开过的那一轮，重建列表后过程区仍然展开；没点过的照旧折叠。
@@ -257,6 +352,300 @@ final class ChatMessageAssemblerTests: XCTestCase {
 
         let expanded = ChatMessageAssembler.assemble(messages, expandedTurnIDs: [1])
         XCTAssertEqual(expanded.last?.isActivityExpanded, true)
+    }
+
+    /// 刚提问、还没有任何产出的那一轮**不能**被丢掉。
+    ///
+    /// 丢了的话 `applyActivity` 的「最后一条 assistant 气泡」会落到上一轮的回复上，
+    /// loading / 过程区就显示到上一条答案的上面（真机实测踩过）。
+    func testRunningTurnWithoutOutputStillProducesAssistantBubble() {
+        let messages: [AIAgentMessage] = [
+            user("几点了", turn: 1),
+            assistant(text: "现在 15:40。", turn: 1),
+            user("那今天星期几", turn: 2)   // 第 2 轮刚发出，模型还没有任何产出
+        ]
+
+        let bubbles = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([
+                record(turn: 1, stage: .finished, outcome: .answered),
+                record(turn: 2, stage: .requesting)
+            ])
+        )
+
+        XCTAssertEqual(bubbles.map(\.role), [.user, .assistant, .user, .assistant])
+        XCTAssertEqual(bubbles.last?.turnID, 2)
+        XCTAssertEqual(bubbles.last?.status, .streaming)
+        // 上一轮的答案必须还在自己的位置上，没被当成本轮的气泡。
+        XCTAssertEqual(bubbles[1].text, "现在 15:40。")
+    }
+
+    /// 一问一答（没有工具、没有思考文本）的轮次必须是「已收尾」的。
+    ///
+    /// 踩过：这种轮次曾在 `timeline(for:)` 里提前 return 一条没 `finish()` 的时间线，
+    /// 于是指示条已经走到「完成」，下面那行还挂着转圈的「思考中…」——问一句「几点了」
+    /// 就能复现。
+    func testPlainQATurnTimelineIsFinished() {
+        let messages: [AIAgentMessage] = [
+            user("几点了", turn: 1),
+            assistant(text: "现在 15:40。", turn: 1)
+        ]
+
+        let bubbles = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([record(turn: 1, stage: .finished, outcome: .answered)])
+        )
+
+        guard let activity = bubbles.last?.activity else {
+            return XCTFail("最后一轮应保留时间线数据")
+        }
+        XCTAssertFalse(activity.isRunning)
+        XCTAssertFalse(activity.headerTitle().contains("思考中"))
+        XCTAssertEqual(activity.stage, .finished)
+        XCTAssertFalse(activity.shouldDisplayActivity)
+    }
+
+    func testCompletedPlainAnswerRetainsTimelineDataButHidesActivityEntry() {
+        let messages: [AIAgentMessage] = [
+            AIAgentMessage(
+                role: .user,
+                content: [.text("一问")],
+                turnID: 1
+            ),
+            AIAgentMessage(
+                role: .assistant,
+                content: [.text("答案")],
+                turnID: 1
+            )
+        ]
+        let record = AIAgentTurnRecord(
+            turnID: 1,
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 103),
+            stage: .finished,
+            outcome: .answered,
+            roundCount: 2
+        )
+
+        let bubbles = ChatMessageAssembler.assemble(
+            messages,
+            turnRecords: records([record])
+        )
+
+        XCTAssertEqual(bubbles.last?.role, .assistant)
+        XCTAssertEqual(bubbles.last?.text, "答案")
+        XCTAssertEqual(bubbles.last?.status, .complete)
+        XCTAssertNotNil(bubbles.last?.activity)
+        XCTAssertEqual(
+            bubbles.last?.activity?.headerTitle(),
+            "处理过程"
+        )
+        XCTAssertFalse(bubbles.last?.activity?.shouldDisplayActivity == true)
+        XCTAssertEqual(bubbles.last?.activity?.roundCount, 2)
+        XCTAssertEqual(bubbles.last?.activity?.elapsed(), 3)
+        XCTAssertEqual(bubbles.last?.isActivityExpanded, false)
+    }
+
+    func testLegacyPlainAnswerRetainsTimelineDataWithoutActivityEntry() {
+        let messages: [AIAgentMessage] = [
+            AIAgentMessage(
+                role: .user,
+                content: [.text("一问")],
+                turnID: 1
+            ),
+            AIAgentMessage(
+                role: .assistant,
+                content: [.text("答案")],
+                turnID: 1
+            )
+        ]
+
+        let bubbles = ChatMessageAssembler.assemble(messages)
+
+        XCTAssertEqual(bubbles.last?.activity?.roundCount, 1)
+        XCTAssertEqual(bubbles.last?.activity?.headerTitle(), "处理过程")
+        XCTAssertFalse(bubbles.last?.activity?.shouldDisplayActivity == true)
+    }
+
+    func testEveryTerminalOutcomeRetainsTimelineDataAndOnlyDetailedOrFailedEntriesDisplay() throws {
+        let outcomes: [AIAgentTurnRecord.Outcome] = [
+            .answered, .empty, .failed(stage: .requesting, message: "连接失败"),
+            .cancelled, .interrupted
+        ]
+        for outcome in outcomes {
+            let record = AIAgentTurnRecord(
+                turnID: 1,
+                startedAt: Date(timeIntervalSince1970: 100),
+                endedAt: Date(timeIntervalSince1970: 104),
+                stage: .requesting,
+                outcome: outcome,
+                roundCount: 3
+            )
+            let messages = [user("一问", turn: 1)]
+            let collapsed = try XCTUnwrap(ChatMessageAssembler.assemble(
+                messages, turnRecords: records([record])
+            ).last)
+            XCTAssertEqual(collapsed.role, .assistant, "\(outcome)")
+            XCTAssertEqual(collapsed.activity?.isRunning, false, "\(outcome)")
+            let headerTitle = collapsed.activity?.headerTitle() ?? ""
+            if case .failed = outcome {
+                XCTAssertTrue(headerTitle.hasPrefix("执行失败"), "\(outcome): \(headerTitle)")
+            } else {
+                XCTAssertEqual(headerTitle, "处理过程", "\(outcome)")
+            }
+            let shouldDisplay = collapsed.activity?.shouldDisplayActivity == true
+            let expectedShouldDisplay: Bool
+            if case .failed = outcome {
+                expectedShouldDisplay = true
+            } else {
+                expectedShouldDisplay = false
+            }
+            XCTAssertEqual(
+                shouldDisplay,
+                expectedShouldDisplay,
+                "只有失败终局带失败入口；没有明细的纯终局只保留时间线数据：\(outcome)"
+            )
+            XCTAssertEqual(collapsed.activity?.roundCount, 3)
+            XCTAssertEqual(collapsed.activity?.elapsed(), 4)
+            XCTAssertFalse(collapsed.activity?.headerTitle().contains("耗时") == true)
+            XCTAssertFalse(collapsed.activity?.headerTitle().contains("轮") == true)
+            XCTAssertFalse(collapsed.isActivityExpanded)
+
+            let expanded = ChatMessageAssembler.assemble(
+                messages, turnRecords: records([record]), expandedTurnIDs: [1]
+            ).last
+            XCTAssertEqual(expanded?.isActivityExpanded, true, "\(outcome)")
+            let collapsedAgain = ChatMessageAssembler.assemble(
+                messages, turnRecords: records([record]), collapsedTurnIDs: [1]
+            ).last
+            XCTAssertEqual(collapsedAgain?.isActivityExpanded, false, "\(outcome)")
+            XCTAssertEqual(collapsedAgain?.activity?.headerTitle(), collapsed.activity?.headerTitle())
+        }
+    }
+
+    func testMultipleToolCallsInOneAssistantMessageDoNotBecomeMultipleRounds() {
+        let messages: [AIAgentMessage] = [
+            user("一问", turn: 1),
+            assistant(
+                text: nil,
+                calls: [call("c1", "file_read"), call("c2", "file_search"), call("c3", "web_fetch")],
+                turn: 1
+            ),
+            toolResults([("c1", "ok"), ("c2", "ok"), ("c3", "ok")], turn: 1),
+            assistant(text: "答案", turn: 1)
+        ]
+
+        let bubbles = ChatMessageAssembler.assemble(messages)
+
+        XCTAssertEqual(bubbles.last?.activity?.stepCount, 3)
+        XCTAssertEqual(bubbles.last?.activity?.roundCount, 2,
+                       "三个工具调用不应被计成三轮；这里是工具请求轮 + 最终回答轮")
+    }
+
+    func testAlwaysShowThinkingOffSuppressesOnlyAnsweredTurns() throws {
+        let base = Date(timeIntervalSince1970: 100)
+        func makeRecord(_ outcome: AIAgentTurnRecord.Outcome) -> AIAgentTurnRecord {
+            AIAgentTurnRecord(
+                turnID: 1, startedAt: base, endedAt: base.addingTimeInterval(2),
+                stage: .requesting, outcome: outcome, roundCount: 1
+            )
+        }
+        let messages = [user("一问", turn: 1), assistant(text: "答案", turn: 1)]
+
+        // 关闭「总是显示思考过程」：只有 .answered 的成功轮被抑制过程入口。
+        let answered = try XCTUnwrap(ChatMessageAssembler.assemble(
+            messages, turnRecords: records([makeRecord(.answered)]),
+            alwaysShowThinkingProcess: false
+        ).last)
+        XCTAssertTrue(answered.suppressResolvedActivity)
+
+        // 报错 / 异常回合不受开关影响，仍保留过程入口。
+        for outcome in [AIAgentTurnRecord.Outcome.empty, .cancelled, .interrupted,
+                        .failed(stage: .requesting, message: "boom")] {
+            let bubble = try XCTUnwrap(ChatMessageAssembler.assemble(
+                messages, turnRecords: records([makeRecord(outcome)]),
+                alwaysShowThinkingProcess: false
+            ).last)
+            XCTAssertFalse(bubble.suppressResolvedActivity, "\(outcome)")
+        }
+
+        // 打开开关（默认）时成功轮也不抑制。
+        let shown = try XCTUnwrap(ChatMessageAssembler.assemble(
+            messages, turnRecords: records([makeRecord(.answered)]),
+            alwaysShowThinkingProcess: true
+        ).last)
+        XCTAssertFalse(shown.suppressResolvedActivity)
+    }
+
+    func testExplicitCollapseSurvivesRunningStageReassembly() {
+        let messages = [user("一问", turn: 1)]
+        for stage in [AIAgentRunStage.preparing, .requesting, .streaming, .tooling] {
+            let bubbles = ChatMessageAssembler.assemble(
+                messages, turnRecords: records([record(turn: 1, stage: stage)]),
+                collapsedTurnIDs: [1]
+            )
+            XCTAssertEqual(bubbles.last?.isActivityExpanded, false, stage.rawValue)
+            XCTAssertEqual(bubbles.last?.status, .streaming)
+        }
+    }
+
+    func testTranscriptPreservesChronologyAndLongFailureAfterReassembly() throws {
+        let error = String(repeating: "详细原因🙂\n", count: 150) + "真正的错误在这里"
+        let messages = [
+            user("检查", turn: 1),
+            assistant(text: "先读文件", calls: [call("c1", "file_read")], turn: 1),
+            toolResults([("c1", "读取成功")], turn: 1),
+            assistant(text: "再写文件", calls: [call("c2", "file_write")], turn: 1),
+            toolResults([("c2", error, true)], turn: 1),
+            assistant(text: "写入失败", turn: 1)
+        ]
+        let timeline = try XCTUnwrap(ChatMessageAssembler.assemble(messages).last?.activity)
+        XCTAssertEqual(timeline.items.map(\.kind), [.thinking, .tool, .thinking, .tool])
+        XCTAssertEqual(timeline.items[0].detail, "先读文件")
+        XCTAssertEqual(timeline.items[2].detail, "再写文件")
+        XCTAssertTrue(timeline.items[3].detail.hasSuffix(error), "历史展开也必须保留失败全文")
+        XCTAssertEqual(timeline.displayedFailedStage, .tooling)
+    }
+
+    func testEarlyFailuresDoNotMarkLaterStagesAsReached() throws {
+        for stage in [AIAgentRunStage.preparing, .requesting, .streaming] {
+            let failed = record(turn: 1, stage: stage, outcome: .failed(stage: stage, message: "失败"))
+            let timeline = try XCTUnwrap(ChatMessageAssembler.assemble(
+                [user("问题", turn: 1)], turnRecords: records([failed])
+            ).last?.activity)
+            XCTAssertEqual(timeline.stage, stage)
+            XCTAssertEqual(timeline.failedStage, stage)
+            XCTAssertEqual(timeline.furthestStage, stage)
+            XCTAssertFalse(timeline.isRunning)
+        }
+    }
+
+    func testFollowupRequestFailureRetainsCompletedToolStageAfterReassembly() throws {
+        let messages = [
+            user("检查", turn: 1),
+            assistant(text: nil, calls: [call("c1", "file_read")], turn: 1),
+            toolResults([("c1", "读取成功")], turn: 1)
+        ]
+        let failed = record(
+            turn: 1, stage: .requesting, outcome: .failed(stage: .requesting, message: "HTTP 503")
+        )
+        let timeline = try XCTUnwrap(ChatMessageAssembler.assemble(
+            messages, turnRecords: records([failed])
+        ).last?.activity)
+        XCTAssertEqual(timeline.stage, .requesting)
+        XCTAssertEqual(timeline.failedStage, .requesting)
+        XCTAssertEqual(timeline.furthestStage, .tooling)
+        XCTAssertFalse(timeline.isRunning)
+        XCTAssertEqual(timeline.items.first?.state, .done)
+    }
+
+    func testActivityOutputRetainsNewlinesAndJSONIsReadable() {
+        let text = String(repeating: "输出行\n", count: 100) + "末尾"
+        XCTAssertEqual(ChatMessageAssembler.activityDetail(output: .text(text)), text)
+        XCTAssertEqual(
+            ChatMessageAssembler.activityDetail(arguments: ["op": .string("read"), "path": .string("a.swift")]),
+            "op=\"read\", path=\"a.swift\""
+        )
     }
 }
 

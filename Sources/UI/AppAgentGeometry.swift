@@ -4,6 +4,7 @@
 //
 
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 
 /// UI 模块共享的几何小工具：统一 clamp 与近似相等判断，避免各视图各自实现。
@@ -27,8 +28,7 @@ enum AppAgentGeometry {
 extension CGPoint {
     /// 两点近似相等（容差 0.5pt），用于避免亚像素抖动触发无意义的布局。
     func isApproximatelyEqual(to other: CGPoint) -> Bool {
-        abs(x - other.x) <= 0.5
-            && abs(y - other.y) <= 0.5
+        bo_isApproximatelyEqual(to: other)
     }
 
     /// 两点欧氏距离。
@@ -39,17 +39,13 @@ extension CGPoint {
 
 extension CGSize {
     func isApproximatelyEqual(to other: CGSize) -> Bool {
-        abs(width - other.width) <= 0.5
-            && abs(height - other.height) <= 0.5
+        bo_isApproximatelyEqual(to: other)
     }
 }
 
 extension CGRect {
     func isApproximatelyEqual(to other: CGRect) -> Bool {
-        abs(minX - other.minX) <= 0.5
-            && abs(minY - other.minY) <= 0.5
-            && abs(width - other.width) <= 0.5
-            && abs(height - other.height) <= 0.5
+        bo_isApproximatelyEqual(to: other)
     }
 
     var center: CGPoint {
@@ -59,10 +55,7 @@ extension CGRect {
 
 extension UIEdgeInsets {
     func isApproximatelyEqual(to other: UIEdgeInsets) -> Bool {
-        abs(top - other.top) <= 0.5
-            && abs(left - other.left) <= 0.5
-            && abs(bottom - other.bottom) <= 0.5
-            && abs(right - other.right) <= 0.5
+        bo_isApproximatelyEqual(to: other)
     }
 }
 

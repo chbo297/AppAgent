@@ -67,6 +67,8 @@ public actor SkillsManager {
 
     /// Create a new user skill.
     public func createSkill(name: String, content: String, category: String? = nil) throws {
+        try validateComponent(name)
+        if let category { try validateComponent(category) }
         let skillDir: URL
         if let category {
             skillDir = userSkillsURL.appendingPathComponent(category).appendingPathComponent(name)
@@ -74,14 +76,17 @@ public actor SkillsManager {
             skillDir = userSkillsURL.appendingPathComponent(name)
         }
 
-        try FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
         let skillFile = skillDir.appendingPathComponent("SKILL.md")
-        try content.write(to: skillFile, atomically: true, encoding: .utf8)
+        _ = try validatedMutationTarget(skillFile)
+        try FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
+        let destination = try validatedMutationTarget(skillFile)
+        try content.write(to: destination, atomically: true, encoding: .utf8)
         cachedSkills = nil
     }
 
     /// Delete a user skill.
     public func deleteSkill(name: String) throws {
+        try validateComponent(name)
         // Only allow deleting from user skills directory
         let fm = FileManager.default
         let possiblePaths = try? fm.contentsOfDirectory(at: userSkillsURL, includingPropertiesForKeys: nil)
@@ -102,12 +107,40 @@ public actor SkillsManager {
                 NSError(domain: "SkillsManager", code: 404,
                         userInfo: [NSLocalizedDescriptionKey: "Skill '\(name)' not found in user skills"]))
         }
-
+        _ = try validatedMutationTarget(skillDir)
+        // A category or a redirected directory is not a deletable skill.
+        guard fm.fileExists(atPath: skillDir.appendingPathComponent("SKILL.md").path) else {
+            throw mutationError("Target is not a user skill.")
+        }
         try fm.removeItem(at: skillDir)
         cachedSkills = nil
     }
 
     // MARK: - Private
+
+    private func validateComponent(_ value: String) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              value != ".", value != "..", !value.contains("/"),
+              !value.contains("\\"), !value.contains("\0") else {
+            throw mutationError("Skill names and categories must be single path components.")
+        }
+    }
+
+    private func validatedMutationTarget(_ logical: URL) throws -> URL {
+        let resolver = SandboxPathResolver(sandboxRoot: userSkillsURL)
+        guard let resolved = resolver.validatedURL(logical),
+              !SandboxPathResolver.samePath(resolved, userSkillsURL) else {
+            throw mutationError("Skill path escapes the user skills directory.")
+        }
+        if let denial = SessionRepositoryProtection.mutationDenial(logical: logical, resolved: resolved) {
+            throw mutationError(denial)
+        }
+        return resolved
+    }
+
+    private func mutationError(_ message: String) -> NSError {
+        NSError(domain: "SkillsManager", code: 403, userInfo: [NSLocalizedDescriptionKey: message])
+    }
 
     private func loadAllSkills() -> [String: Skill] {
         if let cached = cachedSkills { return cached }

@@ -77,7 +77,7 @@ public final class AppAgentDecisionPresenter: DecisionResponder, @unchecked Send
 }
 
 /// 一次等待的 continuation 状态机：只允许恢复一次，且允许「取消先于安装」。
-private final class PendingContinuation: @unchecked Sendable {
+private final class PendingContinuation: AppAgentRuntimeOwned, @unchecked Sendable {
     private let lock = ReadersWriterLock()
     private var continuation: CheckedContinuation<DecisionOutcome?, Never>?
     private var isDone = false

@@ -11,14 +11,49 @@ enum AnthropicMapper {
     // MARK: - Messages: Agnostic → Anthropic
 
     static func toAnthropicMessages(_ messages: [AIAgentMessage]) -> [AnthropicMessage] {
-        messages.map { msg in
-            let role = msg.role == .user ? "user" : "assistant"
-            let blocks = msg.content.map(toAnthropicBlock)
-
-            if blocks.count == 1, case .text(let tb) = blocks[0] {
-                return AnthropicMessage(role: role, content: .text(tb.text))
+        var result: [AnthropicMessage] = []
+        for message in messages {
+            let role = message.role == .user ? "user" : "assistant"
+            let messageBlocks = message.content.map(toAnthropicBlock)
+            guard !messageBlocks.isEmpty else {
+                continue
             }
-            return AnthropicMessage(role: role, content: .blocks(blocks))
+
+            if let lastIndex = result.indices.last,
+               result[lastIndex].role == role {
+                let previousBlocks = Self.blocks(from: result[lastIndex].content)
+                result[lastIndex] = AnthropicMessage(
+                    role: role,
+                    content: .blocks(previousBlocks + messageBlocks)
+                )
+            } else if messageBlocks.count == 1,
+                      case .text(let textBlock) = messageBlocks[0] {
+                result.append(
+                    AnthropicMessage(
+                        role: role,
+                        content: .text(textBlock.text)
+                    )
+                )
+            } else {
+                result.append(
+                    AnthropicMessage(
+                        role: role,
+                        content: .blocks(messageBlocks)
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    private static func blocks(
+        from content: AnthropicMessageContent
+    ) -> [AnthropicContentBlock] {
+        switch content {
+        case .text(let text):
+            return [.text(AnthropicTextBlock(text: text))]
+        case .blocks(let blocks):
+            return blocks
         }
     }
 
@@ -36,6 +71,8 @@ enum AnthropicMapper {
                     AnthropicImageBlock(base64: $0.base64, mediaType: $0.mediaType)
                 }
             ))
+        case .hostContext(let payload):
+            return .text(AnthropicTextBlock(text: payload.modelText))
         }
     }
 

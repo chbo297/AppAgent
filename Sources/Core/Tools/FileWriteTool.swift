@@ -11,13 +11,13 @@ import Foundation
 public struct FileWriteTool: ToolProtocol {
     public let name = "file_write"
     public let description = """
-        Write content to a file in the agent's workspace (the app's Documents directory). \
+        Write content to a file in the configured agent workspace (default: Documents/AppAgent/files). \
         Completely replaces existing content. Creates parent directories automatically. \
-        For anything outside Documents — Library, tmp, Caches — use app_sandbox_file instead.
+        For host storage outside that workspace use app_sandbox_file, subject to its scope policy.
         """
     public let parameters = Tool.Schema(
         properties: [
-            "path": .string(description: "Relative path within the sandbox."),
+            "path": .string(description: "Relative path within the configured workspace."),
             "content": .string(description: "Complete content to write to the file.")
         ],
         required: ["path", "content"]
@@ -39,15 +39,25 @@ public struct FileWriteTool: ToolProtocol {
             return .error("Missing required parameter: content")
         }
 
-        guard let resolvedURL = pathResolver.resolve(path) else {
+        guard let paths = pathResolver.paths(for: path) else {
             return .error("Invalid path: '\(path)' — path traversal is not allowed.")
         }
+        if let denial = SessionRepositoryProtection.mutationDenial(logical: paths.logical, resolved: paths.resolved) {
+            return .error(denial)
+        }
+        let resolvedURL = paths.resolved
 
         do {
             // Create parent directories
             let parentDir = resolvedURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-
+            guard let current = pathResolver.paths(for: path),
+                  SandboxPathResolver.samePath(current.resolved, resolvedURL) else {
+                return .error("Write destination changed.")
+            }
+            if let denial = SessionRepositoryProtection.mutationDenial(logical: current.logical, resolved: current.resolved) {
+                return .error(denial)
+            }
             try content.write(to: resolvedURL, atomically: true, encoding: .utf8)
 
             let lineCount = content.components(separatedBy: .newlines).count

@@ -81,7 +81,7 @@ final class SessionManageTests: XCTestCase {
         XCTAssertEqual(target.title, "New Name")
     }
 
-    func testDeleteRemovesSession() async throws {
+    func testDeleteArchivesSessionRecoverably() async throws {
         let agent = await makeAgent()
         let s1 = await agent.createSession(title: "Home")
         let target = await agent.createSession(title: "Trash Me")
@@ -95,6 +95,11 @@ final class SessionManageTests: XCTestCase {
         XCTAssertEqual(result["deleted_session_id"]?.stringValue, target.id)
         XCTAssertNil(agent.session(id: target.id))
         XCTAssertEqual(agent.allSessions.count, 1)
+        let archives = try await agent.sessionManager.archivedSessions()
+        XCTAssertEqual(archives.map(\.id), [target.id])
+        let restored = try await run(["op": .string("restore"), "session_id": .string(target.id)], on: s1)
+        XCTAssertEqual(restored["success"]?.boolValue, true)
+        XCTAssertEqual(agent.allSessions.count, 2)
     }
 
     func testCannotDeleteCurrentSession() async throws {
@@ -194,7 +199,7 @@ final class SessionManageTests: XCTestCase {
         XCTAssertEqual(Set(refs), Set(["pa/A", "pa/B"]))
     }
 
-    func testClearWipesHistoryButKeepsSession() async throws {
+    func testClearRefusesToWipeHistory() async throws {
         let agent = await makeAgent()
         let s1 = await agent.createSession(title: "First")
         let target = await agent.createSession(title: "Target")
@@ -202,9 +207,174 @@ final class SessionManageTests: XCTestCase {
         target.addUserMessage("two")
 
         let result = try await run(["op": .string("clear"), "session_id": .string(target.id)], on: s1)
+        XCTAssertTrue(result["error"]?.stringValue?.contains("archive + create") == true)
+        XCTAssertEqual(agent.session(id: target.id)?.messages.count, 2)
+    }
+
+    func testReadPagesEntireHistoryAndClampsLegacyCap() async throws {
+        let agent = await makeAgent()
+        let current = await agent.createSession(title: "Reader")
+        let target = await agent.createSession(title: "Long")
+        target.updateMessages((0..<120).map { .user("message \($0)", turnID: $0 + 1) })
+        var texts: [String] = []
+        for offset in stride(from: 0, to: 120, by: 17) {
+            let page = try await run(["op": .string("read"), "session_id": .string(target.id),
+                                      "offset": .number(Double(offset)), "limit": .number(17)], on: current)
+            texts += (page["messages"]?.arrayValue ?? []).compactMap { $0["text"]?.stringValue }
+        }
+        XCTAssertEqual(texts, (0..<120).map { "message \($0)" })
+        let small = try await run(["op": .string("read"), "session_id": .string(target.id),
+                                   "max_messages": .number(-10)], on: current)
+        XCTAssertEqual(small["returned"]?.numberValue, 1)
+        XCTAssertEqual(small["offset"]?.numberValue, 119)
+        let large = try await run(["op": .string("read"), "session_id": .string(target.id),
+                                   "max_messages": .number(100_000)], on: current)
+        XCTAssertEqual(large["limit"]?.numberValue, 500)
+        for number in [Double.nan, .infinity, -.infinity, Double.greatestFiniteMagnitude, Double(Int.max), 1.5] {
+            for key in ["offset", "limit", "max_messages", "message_byte_offset"] {
+                let rejected = try await run(["op": .string("read"), "session_id": .string(target.id),
+                                             key: .number(number)], on: current)
+                XCTAssertNotNil(rejected["error"], "\(key): \(number)")
+            }
+            let search = try await SessionSearchTool().execute(arguments: ["limit": .number(number)], session: current)
+            guard case .error = search else { return XCTFail("Invalid search limit accepted: \(number)") }
+        }
+    }
+
+    func testPermanentDeletionCannotBeRequestedThroughToolParameters() async throws {
+        let agent = await makeAgent()
+        let current = await agent.createSession(title: "Current")
+        let target = await agent.createSession(title: "Keep")
+        for op in ["purge", "permanent_delete", "clear"] {
+            let result = try await run(["op": .string(op), "session_id": .string(target.id)], on: current)
+            XCTAssertNotNil(result["error"])
+        }
+        for key in ["purge", "permanent_delete", "permanent", "force", "options"] {
+            let result = try await run(["op": .string("delete"), "session_id": .string(target.id),
+                                        key: .bool(true)], on: current)
+            XCTAssertNotNil(result["error"])
+        }
+        XCTAssertNotNil(agent.session(id: target.id))
+        let archives = try await agent.sessionManager.archivedSessions()
+        XCTAssertTrue(archives.isEmpty)
+    }
+
+    func testReadOnlyExecuteChecksCurrentAndParentWithoutInspectionGrant() async throws {
+        let agent = await makeAgent()
+        let target = await agent.createSession(title: "Keep")
+        let parent = await agent.createSession(title: "Parent")
+        var restricted = agent.profile
+        restricted.toolMutationPolicy = .readOnly
+        let parentMask = AIAgentMask(profile: restricted, toolPolicy: nil, toolCentral: agent.toolCentral, agent: agent)
+        let readOnlyParent = AISession(id: "readonly-parent", agentMask: parentMask)
+        let child = AISession(id: "child", agentMask: agent.buildMask(), delegationDepth: 1)
+        child.decisionParent = readOnlyParent
+        for caller in [readOnlyParent, child] {
+            for op in ["create", "archive", "delete", "restore", "rename", "switch", "set_model", "merge"] {
+                let result = try await run(["op": .string(op), "session_id": .string(target.id),
+                                            "title": .string("changed"), "model": .string("no/model"),
+                                            "source_session_ids": .array([.string(target.id), .string(parent.id)])],
+                                           on: caller)
+                XCTAssertTrue(result["error"]?.stringValue?.contains("readOnly") == true, op)
+            }
+            let read = try await run(["op": .string("read"), "session_id": .string(target.id)], on: caller)
+            XCTAssertEqual(read["session_id"]?.stringValue, target.id)
+            let list = try await run(["op": .string("list")], on: caller)
+            XCTAssertEqual(list["count"]?.numberValue, 2)
+        }
+        XCTAssertEqual(target.title, "Keep")
+    }
+
+    func testMergeToolValidationAndSuccess() async throws {
+        let agent = await makeAgent()
+        let caller = await agent.createSession(title: "Caller")
+        let a = await agent.createSession(title: "A")
+        let b = await agent.createSession(title: "B")
+        a.addUserMessage("a")
+        b.addUserMessage("b")
+        for value: JSONValue in [.string(a.id), .array([]), .array([.string(a.id)]),
+                                 .array([.string(a.id), .string(a.id)]),
+                                 .array([.string(a.id), .number(3)]),
+                                 .array([.string(a.id), .string(caller.id)]),
+                                 .array([.string(a.id), .string("foreign")])] {
+            let result = try await run(["op": .string("merge"), "source_session_ids": value], on: caller)
+            XCTAssertNotNil(result["error"])
+        }
+        let result = try await run(["op": .string("merge"),
+                                    "source_session_ids": .array([.string(a.id), .string(b.id)])], on: caller)
         XCTAssertEqual(result["success"]?.boolValue, true)
-        XCTAssertEqual(result["removed_messages"]?.numberValue, 2)
-        XCTAssertEqual(agent.session(id: target.id)?.messages.count, 0)
+        let merged = try XCTUnwrap(agent.session(id: try XCTUnwrap(result["session_id"]?.stringValue)))
+        XCTAssertEqual(merged.messages.map(\.text), ["a", "b"])
+        XCTAssertEqual(agent.allSessions.count, 4)
+    }
+
+    func testReadFragmentsPreserveOversizedBlocksAndImagesWithinExecutorBudget() async throws {
+        let agent = await makeAgent()
+        let caller = await agent.createSession(title: "Reader")
+        let source = await agent.createSession(title: "Large history")
+        let text = String(repeating: "完整文本\n\"\\", count: 12_000)
+        let image = AIAgentMessage.ImageAttachment(data: Data(repeating: 255, count: 100_000), mediaType: "image/png")
+        source.updateMessages([
+            .init(role: .user, content: [.toolResult(.init(toolCallId: "call", content: text, images: [image]))],
+                  turnID: 1),
+            .assistant("tail", turnID: 1)
+        ])
+        var arguments: [String: JSONValue] = ["op": .string("read"), "session_id": .string(source.id),
+                                             "offset": .number(0), "limit": .number(1)]
+        var joined = ""
+        var last: JSONValue = .null
+        for _ in 0..<200 {
+            let output = try await tool.execute(arguments: arguments, session: caller)
+            XCTAssertLessThanOrEqual(output.stringValue.utf8.count, tool.outputMaxBytes ?? 8192)
+            XCTAssertEqual(LLMExecutor.clampToolOutput(output.stringValue, maxBytes: tool.outputMaxBytes ?? 8192,
+                                                      toolName: tool.name), output.stringValue)
+            guard case .json(let page) = output,
+                  let part = page["message_json_fragment"]?.stringValue else {
+                return XCTFail("Expected an oversized-message fragment")
+            }
+            joined += part
+            last = page
+            guard let next = page["next_message_byte_offset"]?.numberValue else { break }
+            arguments["message_byte_offset"] = .number(next)
+        }
+        XCTAssertEqual(last["next_offset"]?.numberValue, 1)
+        XCTAssertEqual(last["next_message_byte_offset"], .null)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(AIAgentMessage.self, from: Data(joined.utf8))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        XCTAssertEqual(try encoder.encode(decoded.content), try encoder.encode(source.messages[0].content))
+        XCTAssertEqual(decoded.id, source.messages[0].id)
+
+        // Smaller messages reduce the page length rather than truncating JSON or skipping records.
+        source.updateMessages((0..<20).map { .user(String(repeating: "x", count: 4_000) + "\($0)") })
+        var offset = 0
+        var ids: [String] = []
+        while offset < 20 {
+            let output = try await tool.execute(
+                arguments: ["op": .string("read"), "session_id": .string(source.id),
+                            "offset": .number(Double(offset)), "limit": .number(20)], session: caller)
+            XCTAssertLessThanOrEqual(output.stringValue.utf8.count, tool.outputMaxBytes ?? 8192)
+            guard case .json(let page) = output, let messages = page["messages"]?.arrayValue,
+                  !messages.isEmpty else { return XCTFail("Pagination made no progress") }
+            ids += messages.compactMap { $0["id"]?.stringValue }
+            offset = Int(page["next_offset"]?.numberValue ?? 20)
+        }
+        XCTAssertEqual(ids, source.messages.map(\.id))
+    }
+
+    func testSearchToolResultIncludesMatchingPreview() async throws {
+        let agent = await makeAgent()
+        let caller = await agent.createSession(title: "Reader")
+        let source = await agent.createSession(title: "Tool history")
+        source.updateMessages([
+            .init(role: .user, content: [.toolResult(.init(toolCallId: "call", content: "needle in tool output"))])
+        ])
+        let output = try await SessionSearchTool().execute(arguments: ["query": .string("needle")], session: caller)
+        guard case .json(let result) = output else { return XCTFail("Expected search results") }
+        XCTAssertEqual(result["count"]?.numberValue, 1)
+        XCTAssertEqual(result["matches"]?.arrayValue?.first?["preview"]?.stringValue, "needle in tool output")
     }
 }
 
@@ -212,4 +382,3 @@ final class SessionManageTests: XCTestCase {
 private final class ActivationBox: @unchecked Sendable {
     var requested: String?
 }
-

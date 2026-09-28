@@ -18,6 +18,9 @@ public struct AIAgentMask: Sendable {
     public let toolPolicy: ToolCentral.ToolPolicy?
     public let toolCentral: ToolCentral
 
+    /// Execution policy frozen together with the profile.
+    public var executionPolicy: AIAgentExecutionPolicy { profile.executionPolicy }
+
     /// Thread-safe weak back-reference to the source AIAgent.
     /// Stored as `let` (reference-type); internal state mutated via WeakLocked's lock.
     private let _agent: WeakLocked<AIAgent>

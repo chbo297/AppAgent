@@ -19,6 +19,7 @@ public struct HotfixTool: ToolProtocol {
         """
     public let parameters = Tool.Schema(
         properties: [
+            "scope": HostInspectionScope.parameter,
             "op": .string(description: "Operation.",
                           enumValues: ["list", "apply", "toggle", "remove"]),
             "_why": .string(description: "One sentence on why this is needed. Shown to the user when they are asked to approve; supply it for 'apply'."),
@@ -52,9 +53,15 @@ public struct HotfixTool: ToolProtocol {
 
     public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
         let op = arguments["op"]?.stringValue ?? ""
+        let context: HostInspectionContext
+        do {
+            context = try await HostInspectionAccess.context(
+                arguments: arguments, session: session, tool: name, isMutation: op != "list"
+            )
+        } catch { return .error(error.localizedDescription) }
         switch op {
         case "list":
-            let items = await provider.list()
+            let items = await provider.list(context: context)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             if let data = try? encoder.encode(items), let s = String(data: data, encoding: .utf8) {
@@ -68,7 +75,7 @@ public struct HotfixTool: ToolProtocol {
             }
             let mode = arguments["applyMode"]?.stringValue ?? "restart"
             let summary = arguments["summary"]?.stringValue ?? ""
-            let result = await provider.apply(name: name, javascript: js, applyMode: mode, summary: summary)
+            let result = await provider.apply(name: name, javascript: js, applyMode: mode, summary: summary, context: context)
             let payload = JSONValue.object([
                 "success": .bool(result.success),
                 "applyMode": .string(result.applyMode),
@@ -84,14 +91,14 @@ public struct HotfixTool: ToolProtocol {
             }
             var enabled = true
             if case .bool(let b)? = arguments["enabled"] { enabled = b }
-            let ok = await provider.setEnabled(name: name, enabled: enabled)
+            let ok = await provider.setEnabled(name: name, enabled: enabled, context: context)
             guard ok else { return .error("no patch named '\(name)' (or re-enabling it failed).") }
             return .json(.object(["success": .bool(true), "enabled": .bool(enabled)]))
         case "remove":
             guard let name = arguments["name"]?.stringValue else {
                 return .error("'name' is required for remove")
             }
-            let ok = await provider.remove(name: name)
+            let ok = await provider.remove(name: name, context: context)
             guard ok else { return .error("no patch named '\(name)' to remove.") }
             return .json(.object(["success": .bool(true)]))
         default:

@@ -97,6 +97,11 @@ enum OpenAIResponsesMapper {
                 }
             case .toolUse:
                 break
+            case .hostContext(let payload):
+                content.append([
+                    "type": "input_text",
+                    "text": payload.modelText
+                ])
             }
         }
 
@@ -153,8 +158,11 @@ enum OpenAIResponsesMapper {
         case "response.output_item.added":
             if let item = event.item, item.type == "function_call" {
                 let index = event.outputIndex ?? activeToolCalls.count
+                // 空串按「没给」处理，别让 `"call_id": ""` 挤掉还能用的 `id`
+                // ——chat/completions 那边就是空串覆盖把整条工具调用弄丢的。
+                let callId = [item.callId, item.id].compactMap { $0 }.first { !$0.isEmpty }
                 activeToolCalls[index] = (
-                    id: item.callId ?? item.id ?? "call_\(index)",
+                    id: callId ?? "call_\(index)",
                     name: item.name ?? "",
                     arguments: item.arguments ?? ""
                 )

@@ -17,6 +17,9 @@ enum AppAgentAppearance {
     static let accent = dynamicColor(light: 0x0A7AFF, dark: 0x5AC8FA)
     static let inputBarShadow = dynamicColor(light: 0x0F172A, dark: 0x000000)
     static let voicePressedBackground = dynamicColor(light: 0xEAF1FA, dark: 0x343A43)
+    /// inputBar 右侧发送 / 停止按钮：实心圆底 + 白色图标，与用户气泡同一支蓝。
+    static let actionButtonBackground = dynamicColor(light: 0x0A7AFF, dark: 0x2F8CFF)
+    static let actionButtonIcon = UIColor.white
     static let menuFill = dynamicColor(light: 0xFFFFFF, dark: 0x20242A)
     static let menuStroke = dynamicColor(light: 0x111827, dark: 0xF1F5F9)
     static let userBubbleBackground = dynamicColor(light: 0x0A7AFF, dark: 0x2F8CFF)

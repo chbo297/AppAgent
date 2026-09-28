@@ -1,8 +1,11 @@
 # AppAgent 优化计划
 
-> 2026-06-13 基于完整代码走读产出（覆盖全部 Sources / Tests / docs / Package / Podspec，
-> 并已验证 swift build 与 swift test 通过，62 用例全绿）。
+> 2026-06-13 基于完整代码走读产出（覆盖全部 Sources / Tests / docs / Package / Podspec）。
 > 优先级：P0 = 必须尽快修，P1 = 近期修，P2 = 排期修。
+>
+> **2026-09-28 部分复核**：当时是 62 个用例，现在 `swift test` 316（Core）、
+> `xcodebuild ... Mac Catalyst test` 566（Core + UI）。已按代码逐条核实并更新的条目见下方
+> ✅ 标记与「二、6」。**其余条目本次未复核**，读之前请先按代码确认，别直接当现状。
 
 ---
 
@@ -45,15 +48,21 @@
    → 压缩触发后原始历史被永久覆盖。压缩应移到 prepareMessagesForProvider 同层（只影响发给 provider 的视图）。
 5. **并发模型演进**：核心类均为 @unchecked Sendable + 自制锁。先开 -strict-concurrency=complete 作 warning
    基线；长期把 LLMExecutor 改为 actor。
-6. **引擎层测试基建（回报率最高）**：现有 62 测试全是数据结构/注册中心/存储，LLMExecutor.runLoop 零覆盖。
-   建脚本化 MockModelProvider，覆盖：单轮、工具循环、并行工具、超时、取消、重试耗尽、loop detector、压缩、maxIterations。
+6. ~~**引擎层测试基建（回报率最高）**：现有 62 测试全是数据结构/注册中心/存储，LLMExecutor.runLoop 零覆盖。~~
+   **✅ 2026-09-28 复核：「零覆盖」已不成立。** 实测覆盖 `runLoop` 的用例至少有：
+   `ModelFallbackTests` 6 条（回退 / 无回退报错 / 跳过不可用候选 / switchModel 重指 /
+   重试耗尽 vs 轮次耗尽 / 回退在轮次预算内）、`LLMStreamFailureTests` 2 条（重试与回退只保留
+   最终尝试的正文）、`AppAgentCoreTests.testToolUseStopWithoutCallsSurfacesAsError`
+   （stop=tool_use 但 0 个调用的协议异常，假端点已备好）、以及终止事件 / turnRecord /
+   同会话 200 轮去重那一组。
+   仍**未**覆盖的是：并行工具、工具超时、loop detector、上下文压缩触发。想继续补就从这四项入手。
 
 ## 三、实现细节（按严重度）
 
 | # | 级别 | 问题 | 位置 |
 |---|------|------|------|
-| 1 | P0 | run() 创建的 Task 从未存入 _runTask：isRunning 恒 false、cancel() 无效、同 session 并发 run 会交错写历史 | LLMExecutor.run() |
-| 2 | P0 | 错误路径不调 setStreaming(false)/setError，UI 永久转圈；currentMessages 不写回，留悬空 user 消息。建议 runLoop 顶部 defer 统一收尾 | LLMExecutor.runLoop() |
+| 1 | ✅ 已修 | ~~run() 创建的 Task 从未存入 _runTask~~ —— 2026-09-28 核实：`LLMExecutor.swift` 已在 `lock.writeSync` 内 `_runTask = task`，`isRunning` / `cancel()` 正常 | LLMExecutor.run() |
+| 2 | ✅ 已修 | ~~错误路径不调 setStreaming(false)/setError~~ —— 2026-09-28 核实：全部终局收敛到 `TurnJournal.failed` / `answered` / `finalizeIfNeeded`，三者都写 `setStreaming(false)` + `setError` 并回写消息；`run` 的 defer 兜底 | TurnJournal.swift |
 | 3 | P1 | AsyncThrowingStream 未设 onTermination，消费方取消后 SSE 仍读完整响应，白烧 token；循环内未检查 Task.isCancelled | AnthropicProvider |
 | 4 | P1 | ToolLoopDetector warning 分支 yield 了 toolCallStarted 却无 completed/failed，UI 卡“进行中” | LLMExecutor |
 | 5 | P2 | createSession 与 resolveProvider() 重复解析逻辑；resolveDefault() 按枚举顺序挑 provider，多 provider 行为不可预期 | AIAgent / ModelProviderCentral |

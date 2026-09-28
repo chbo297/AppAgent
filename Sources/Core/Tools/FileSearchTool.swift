@@ -11,11 +11,11 @@ import Foundation
 public struct FileSearchTool: ToolProtocol {
     public let name = "file_search"
     public let description = """
-        Search file contents or find files by name inside the agent's workspace \
-        (the app's Documents directory). \
+        Search file contents or find files by name inside the configured agent workspace \
+        (default: Documents/AppAgent/files). \
         target='content': search inside file contents. \
         target='files': find files by name pattern (glob-style, e.g., '*.txt'). \
-        For anything outside Documents use app_sandbox_file.
+        For host storage outside that workspace use app_sandbox_file, subject to its scope policy.
         """
     public let parameters = Tool.Schema(
         properties: [
@@ -26,7 +26,7 @@ public struct FileSearchTool: ToolProtocol {
                 defaultValue: .string("content")
             ),
             "path": .string(
-                description: "Subdirectory to search in (default: sandbox root).",
+                description: "Subdirectory to search in (default: configured workspace root).",
                 defaultValue: .string(".")
             ),
             "limit": .integer(
@@ -83,9 +83,13 @@ public struct FileSearchTool: ToolProtocol {
 
         for case let fileURL as URL in enumerator {
             guard matches.count < limit else { break }
+            guard pathResolver.validatedURL(fileURL) != nil,
+                  let relativePath = pathResolver.relativePath(of: fileURL) else {
+                enumerator.skipDescendants()
+                continue
+            }
             let fileName = fileURL.lastPathComponent.lowercased()
             if matchGlob(fileName, pattern: loweredPattern) {
-                let relativePath = fileURL.path.replacingOccurrences(of: pathResolver.sandboxRoot.resolvingSymlinksInPath().path + "/", with: "")
                 matches.append(.string(relativePath))
             }
         }
@@ -107,16 +111,21 @@ public struct FileSearchTool: ToolProtocol {
 
         for case let fileURL as URL in enumerator {
             guard matches.count < limit else { break }
+            guard let resolved = pathResolver.validatedURL(fileURL),
+                  let relativePath = pathResolver.relativePath(of: fileURL) else {
+                enumerator.skipDescendants()
+                continue
+            }
 
             // Only search text files (skip binary)
-            guard let data = fm.contents(atPath: fileURL.path),
+            guard (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+                  let data = fm.contents(atPath: resolved.path),
                   let content = String(data: data, encoding: .utf8) else { continue }
 
             let lines = content.components(separatedBy: .newlines)
             for (lineNum, line) in lines.enumerated() {
                 guard matches.count < limit else { break }
                 if line.lowercased().contains(lowered) {
-                    let relativePath = fileURL.path.replacingOccurrences(of: pathResolver.sandboxRoot.resolvingSymlinksInPath().path + "/", with: "")
                     matches.append(.object([
                         "file": .string(relativePath),
                         "line": .number(Double(lineNum + 1)),
