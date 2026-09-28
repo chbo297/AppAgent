@@ -138,6 +138,7 @@ final class AppAgentChatMessageListView: UIView {
         }
         self.messages = messages
         heightCache.retain(Set(messages.map(ChatRowIdentity.init)))
+        reserveLatestReplyHeight()
         scrollTrace.observe("reloadData", on: tableView,
                             details: "rows=\(messages.count) forceFollow=\(forceScrollToBottom) follow=\(wasFollowingLatestMessage)") {
             reloadTableData()
@@ -165,6 +166,7 @@ final class AppAgentChatMessageListView: UIView {
         messages.append(contentsOf: newMessages)
         // append 是当次新回复（含同步完成的 mock）；加载历史走 setMessages。
         reservesLatestReplyHeight = messages.last?.role == .assistant
+        reserveLatestReplyHeight()
         scrollTrace.observe("reloadData", on: tableView,
                             details: "rows=\(messages.count) override=\(String(describing: followLatest)) follow=\(shouldFollowLatestMessage)") {
             reloadTableData()
@@ -253,6 +255,8 @@ final class AppAgentChatMessageListView: UIView {
     ) {
         guard messages.indices.contains(index) else { return }
         let indexPath = IndexPath(row: index, section: 0)
+        // 内容已经写进模型了，先把尾回复的已分配高度推到位，再读这一行现在该有多高。
+        reserveLatestReplyHeight()
         let newHeight = rowHeight(at: index)
         // 首次未布局，或已展示的面板暂时收至零高：不 batch，但必须让下次布局读取新内容/
         // 行高。同宽恢复视口不会触发宽度重测，不能只更新模型后直接丢掉这次刷新。
@@ -437,6 +441,9 @@ final class AppAgentChatMessageListView: UIView {
         // 旧宽度那一份留着（转回去还能命中），这里只需要让表格重新取高。
         measuredWidth = frame.width
         guard !messages.isEmpty, frame.width > 0 else { return }
+        // 变窄会让正文换行更多、内容变高：已分配高度同样只增不减，这一步以前是靠 getter 的副作用
+        // 顺带完成的，现在显式调用。
+        reserveLatestReplyHeight()
         scrollTrace.observe("reloadData", on: tableView, details: "widthChanged=true") {
             reloadTableData()
         }
@@ -563,18 +570,42 @@ final class AppAgentChatMessageListView: UIView {
         return 1 / max(scale, 1)
     }
 
-    /// 某一行当前生效的行高。
+    /// 某一行当前生效的行高。**纯读**：不推进尾回复的已分配高度。
+    ///
+    /// 「已分配高度只增不减」是一条**显式命令**（`reserveLatestReplyHeight()`），由内容 / 宽度的
+    /// 变更点各调一次；读高度的路径（`heightForRowAt`、刷新前后的取值）一概不写状态。
+    /// 曾经把增长写在这个 getter 里，于是「读一次高度」和「把高度抬上去」变成同一个动作：谁先读到
+    /// 谁就把增长消耗掉，`refreshRow` 的前后两次取值可能因此相等、按「高度没变」短路掉本该提交的
+    /// batch，增长自己把自己取消了。
     private func rowHeight(at row: Int) -> CGFloat {
         guard row >= 0, row < messages.count else { return ChatMessageHeightCache.fallbackHeight }
         let measured = heightCache.height(for: messages[row], width: tableView.bounds.width)
-        guard row == messages.count - 1, messages[row].role == .assistant,
-              reservesLatestReplyHeight else { return measured }
-        if measured > latestReplyAllocatedHeight {
-            latestReplyHasGrownBeyondInitialHeight = true
-            let steps = ceil((measured - latestReplyAllocatedHeight) / Self.latestReplyHeightStep)
-            latestReplyAllocatedHeight += steps * Self.latestReplyHeightStep
-        }
-        return latestReplyAllocatedHeight
+        guard isLatestReservedReply(at: row) else { return measured }
+        // 取 max 而不是直接返回已分配值：万一某条路径漏调一次 reserve，这一行也只会多留白，
+        // 不会比内容矮 —— 矮了会被 cell 的 `clipsToBounds` 把正文裁掉。
+        return max(measured, latestReplyAllocatedHeight)
+    }
+
+    /// 这一行是否就是「按已分配高度占位」的当次尾回复。
+    private func isLatestReservedReply(at row: Int) -> Bool {
+        guard reservesLatestReplyHeight,
+              row == messages.count - 1,
+              messages.indices.contains(row) else { return false }
+        return messages[row].role == .assistant
+    }
+
+    /// 让尾回复的已分配高度按台阶追上当前内容高度（只增不减）。
+    ///
+    /// 只在内容或宽度**刚变过**之后调用：`setMessages` / `append` / `refreshRow` / 宽度重测。
+    /// 调完再读行高，拿到的就是这一次该用的值。
+    private func reserveLatestReplyHeight() {
+        let row = messages.count - 1
+        guard isLatestReservedReply(at: row) else { return }
+        let measured = heightCache.height(for: messages[row], width: tableView.bounds.width)
+        guard measured > latestReplyAllocatedHeight else { return }
+        latestReplyHasGrownBeyondInitialHeight = true
+        let steps = ceil((measured - latestReplyAllocatedHeight) / Self.latestReplyHeightStep)
+        latestReplyAllocatedHeight += steps * Self.latestReplyHeightStep
     }
 
     /// 没有 session 的 UI 调试也可在重新展示时释放终局留白；运行中不重置。

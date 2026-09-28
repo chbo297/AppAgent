@@ -312,9 +312,73 @@ final class AppAgentRowRefreshTests: XCTestCase {
         XCTAssertGreaterThan(shownHeight, hiddenHeight)
     }
 
+    /// 尾回复「已分配高度」的增长是一条显式命令，读行高一律不写状态。
+    ///
+    /// 这两条是本次读写分离建立的不变量（不是对某个可复现失败的回放）：
+    /// ① 反复取高不改变结果 —— 防止再把增长塞回 getter：那样「读一次高度」就等于
+    ///   「消耗掉一次增长」，`refreshRow` 前后两次取值会相等并按「高度没变」短路掉 batch；
+    /// ② 增长后的高度仍落在 34pt 台阶上 —— 证明 `refreshRow` 里那次显式 reserve 真的生效，
+    ///   而不是靠 getter 的 `max(measured, allocated)` 直接返回了裸内容高度。
+    func testReservedTailHeightGrowsOnlyByExplicitReserve() throws {
+        var timeline = AppAgentActivityTimeline()
+        timeline.setStage(.streaming)
+        let reply = ChatMessage(role: .assistant, text: "开始", status: .streaming,
+                                activity: timeline, isActivityExpanded: true)
+        let list = makeList([reply])
+        let table = table(in: list)
+        let path = IndexPath(row: 0, section: 0)
+        let initialHeight = try XCTUnwrap(table.delegate?.tableView?(table, heightForRowAt: path))
+        XCTAssertEqual(initialHeight, 400)
+        for _ in 0..<20 {
+            XCTAssertEqual(table.delegate?.tableView?(table, heightForRowAt: path), initialHeight)
+        }
+
+        let text = String(repeating: "逐步增加的正文。\n\n", count: 40)
+        list.updateMessage(text: text, status: .streaming, messageID: reply.id)
+        table.layoutIfNeeded()
+        let grown = try XCTUnwrap(table.delegate?.tableView?(table, heightForRowAt: path))
+        XCTAssertGreaterThan(grown, initialHeight)
+        XCTAssertEqual((grown - initialHeight).truncatingRemainder(
+            dividingBy: AppAgentChatMessageListView.latestReplyHeightStep
+        ), 0, accuracy: 0.01, "增长必须按台阶走，不能直接用裸内容高度")
+        for _ in 0..<20 {
+            XCTAssertEqual(table.delegate?.tableView?(table, heightForRowAt: path), grown)
+        }
+        assertHeightsMatch(in: list)
+    }
+
+    /// 宽度变窄 → 正文换行更多 → 内容更高：已分配高度同样只增不减。
+    /// 这一步以前是靠 getter 的副作用顺带完成的，读写分离后由 `applyTableViewFrame` 显式调用。
+    func testNarrowingWidthStillRaisesReservedTailHeight() throws {
+        var timeline = AppAgentActivityTimeline()
+        timeline.setStage(.streaming)
+        let reply = ChatMessage(role: .assistant,
+                                text: String(repeating: "需要按宽度重新换行的一段正文。", count: 40),
+                                status: .streaming, activity: timeline, isActivityExpanded: true)
+        let list = makeList([reply])
+        let table = table(in: list)
+        let path = IndexPath(row: 0, section: 0)
+        let wideHeight = try XCTUnwrap(table.delegate?.tableView?(table, heightForRowAt: path))
+
+        list.frame = CGRect(x: 0, y: 0, width: 240, height: 600)
+        list.layoutIfNeeded()
+        table.layoutIfNeeded()
+        let narrowHeight = try XCTUnwrap(table.delegate?.tableView?(table, heightForRowAt: path))
+        XCTAssertGreaterThan(narrowHeight, wideHeight)
+        assertHeightsMatch(in: list)
+
+        // 转回宽视口不缩高：当前连续阅读期间已分配高度只增不减。
+        list.frame = CGRect(x: 0, y: 0, width: 390, height: 600)
+        list.layoutIfNeeded()
+        table.layoutIfNeeded()
+        XCTAssertEqual(table.delegate?.tableView?(table, heightForRowAt: path), narrowHeight)
+        assertHeightsMatch(in: list)
+    }
+
     private func completedReply() -> ChatMessage {
         completedReply(turnID: nil)
     }
+
 
     private func completedReply(turnID: Int?) -> ChatMessage {
         var timeline = AppAgentActivityTimeline()
