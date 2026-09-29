@@ -23,9 +23,9 @@ public final class AISessionManager: @unchecked Sendable {
     @WeakLocked
     public internal(set) var agent: AIAgent?
 
-    /// Concurrency admission policy for top-level runs. MVP: fixed hard limit of 4.
+    /// Concurrency admission policy for top-level runs. MVP: fixed hard limit of 9.
     /// Sub-sessions (delegation) do not count against this limit.
-    public let governor = RunGovernor(limit: 4)
+    public let governor = RunGovernor(limit: 9)
 
     /// Number of top-level sessions (`delegationDepth == 0`) currently running an agent loop.
     /// Derived live from each executor's `isRunning` — no separate counter.

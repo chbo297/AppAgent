@@ -23,6 +23,16 @@ final class SessionManageTests: XCTestCase {
 
     private let tool = SessionManageTool()
 
+    /// 并行准入：上限 9，第 10 个被拒；已经在跑的会话复用自己的名额，永远放行。
+    /// 上限本身是产品策略（可调），但「撞线要被拒、重跑不被拒」这两条是口径，别被顺手改掉。
+    func testConcurrencyAdmissionAtLimitNine() {
+        XCTAssertEqual(RunGovernor().limit, 9)
+        let governor = RunGovernor(limit: 9)
+        XCTAssertTrue(governor.canAdmit(runningCount: 8, isAlreadyRunning: false))
+        XCTAssertFalse(governor.canAdmit(runningCount: 9, isAlreadyRunning: false))
+        XCTAssertTrue(governor.canAdmit(runningCount: 9, isAlreadyRunning: true))
+    }
+
     private func run(_ args: [String: JSONValue], on session: AISession) async throws -> JSONValue {
         let out = try await tool.execute(arguments: args, session: session)
         switch out {

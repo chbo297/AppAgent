@@ -2,6 +2,10 @@
 import XCTest
 @testable import AppAgent
 
+/// 整类跑在主 actor：用例直接构造并测量 `AppAgentInputBar` 等 UIView（frame / isHidden / center /
+/// layoutIfNeeded / gestureRecognizerShouldBegin），Swift 6 下这些都是主 actor 隔离的。
+/// 剩下几条 async 决策用例也留在主 actor 上，`await` 跨隔离域照常合法。
+@MainActor
 final class AppAgentUITests: XCTestCase {
 
     func testChatMessageCreation() {
@@ -35,7 +39,7 @@ final class AppAgentUITests: XCTestCase {
         XCTAssertEqual(inputBar.inputAreaContainer.alpha, 0, accuracy: 0.001)
         XCTAssertTrue(inputBar.textField.isUserInteractionEnabled)
 
-        inputBar.frame = CGRect(x: 0, y: 0, width: AppAgentInputBar.collapsedMinWidth, height: 56)
+        inputBar.frame = CGRect(x: 0, y: 0, width: AppAgentInputBarMetrics.collapsedMinWidth, height: 56)
         inputBar.layoutIfNeeded()
         XCTAssertFalse(inputBar.textField.isUserInteractionEnabled)
     }
@@ -44,8 +48,8 @@ final class AppAgentUITests: XCTestCase {
         let inputBar = AppAgentInputBar(frame: CGRect(
             x: 0,
             y: 0,
-            width: AppAgentInputBar.minimumExpandedWidth,
-            height: AppAgentInputBar.barHeight
+            width: AppAgentInputBarMetrics.minimumExpandedWidth,
+            height: AppAgentInputBarMetrics.barHeight
         ))
         inputBar.layoutIfNeeded()
 
@@ -65,14 +69,32 @@ final class AppAgentUITests: XCTestCase {
         XCTAssertTrue(inputBar.gestureRecognizerShouldBegin(longPress))
     }
 
+    /// 撞并行上限必须有可见反馈：文案要说清「几个在运行」，而不是点了发送没反应。
+    func testConcurrencyLimitAlertNamesRunningCount() {
+        let alert = AppAgentViewController().makeConcurrencyLimitAlert(runningCount: 9)
+        XCTAssertEqual(alert.title, "暂时无法执行更多")
+        XCTAssertTrue(alert.message?.contains("9 个会话在运行") == true, alert.message ?? "nil message")
+        // 只有一个「好」：这是纯告知，没有可执行的分支。
+        XCTAssertEqual(alert.actions.count, 1)
+        XCTAssertEqual(alert.actions.first?.style, .cancel)
+    }
+
+    /// 右侧动作槽圆里挂着的图标层：只取**真的带图**的 image view，
+    /// 这样即使 UIKit 顺手给按钮建了个空的自带 imageView 也不会被算进来。
+    private func trailingActionGlyphs(of inputBar: AppAgentInputBar) -> [UIImageView] {
+        inputBar.trailingActionButton.subviews
+            .compactMap { $0 as? UIImageView }
+            .filter { $0.image != nil }
+    }
+
     /// 右侧动作槽三态：有草稿发送、loop 运行中停止、其余加号。
     /// 有草稿时语音按钮一起让位；运行中输入框为空则语音照常可用。
     func testInputBarTrailingActionFollowsDraftAndRunState() {
         let inputBar = AppAgentInputBar(frame: CGRect(
             x: 0,
             y: 0,
-            width: AppAgentInputBar.minimumExpandedWidth,
-            height: AppAgentInputBar.barHeight
+            width: AppAgentInputBarMetrics.minimumExpandedWidth,
+            height: AppAgentInputBarMetrics.barHeight
         ))
         inputBar.layoutIfNeeded()
 
@@ -86,6 +108,11 @@ final class AppAgentUITests: XCTestCase {
         XCTAssertTrue(inputBar.plusButton.isHidden)
         XCTAssertFalse(inputBar.trailingActionButton.isHidden)
         XCTAssertFalse(inputBar.inputSourceButton.isHidden)
+        let stopGlyph = trailingActionGlyphs(of: inputBar)
+        XCTAssertEqual(stopGlyph.count, 1, "停止形态圆里应当正好有一个图标")
+        // 存的是**图片**而不是 image view：换形态时复用的是同一个 view，
+        // 抓着 view 事后读 `image` 只会读到当前形态，比不出「图标真的换了」。
+        let stopIconImage = stopGlyph.first?.image
 
         inputBar.text = "几点了"
         XCTAssertEqual(inputBar.trailingAction, .send)
@@ -102,6 +129,14 @@ final class AppAgentUITests: XCTestCase {
         )
         // 圆比整格小，但点按范围仍外扩回整格：加号格子的角上也算命中。
         XCTAssertTrue(inputBar.trailingActionButton.point(inside: CGPoint(x: -3, y: -3), with: nil))
+        // 图标挂在按钮的子 image view 上，不用按钮自带的 image —— 按钮自带图标会被 UIKit 在按下时
+        // 调暗，而关掉这个行为的 `adjustsImageWhenHighlighted` 已废弃。锁住三件事：按钮本体不带
+        // image、圆里正好一个图标、图标铺满整圆（居中靠 contentMode）。换形态时图标要真的换掉。
+        let sendGlyph = trailingActionGlyphs(of: inputBar)
+        XCTAssertEqual(sendGlyph.count, 1, "发送形态圆里应当正好有一个图标")
+        XCTAssertNil(inputBar.trailingActionButton.image(for: .normal))
+        XCTAssertFalse(sendGlyph[0].image === stopIconImage, "发送与停止必须是两个不同的图标")
+        XCTAssertEqual(sendGlyph[0].frame, inputBar.trailingActionButton.bounds)
 
         inputBar.clearText()
         XCTAssertEqual(inputBar.trailingAction, .stop)

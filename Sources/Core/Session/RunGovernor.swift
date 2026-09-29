@@ -16,12 +16,17 @@ import Foundation
 /// Kept as a type (not an inline constant) so a future token / weighted / thread-safe
 /// version can drop in without touching the call sites in `AISessionManager` /
 /// `AISession.sendMessage`.
-public final class RunGovernor: @unchecked Sendable {
+///
+/// Immutable by construction: the only storage is `limit` (`let`) and `canAdmit` is a pure
+/// function of its arguments, so plain `Sendable` holds — no `@unchecked` escape hatch needed.
+/// A future stateful version must protect that state (lock or actor) instead of re-adding
+/// `@unchecked`.
+public final class RunGovernor: Sendable {
 
     /// Maximum number of concurrently running top-level sessions.
     public let limit: Int
 
-    public init(limit: Int = 4) {
+    public init(limit: Int = 9) {
         self.limit = limit
     }
 

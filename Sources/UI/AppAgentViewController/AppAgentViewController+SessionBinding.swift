@@ -452,6 +452,18 @@ extension AppAgentViewController {
         return shown
     }
 
+    /// 并行上限提示。做成**返回 alert 的工厂**而不是直接在内部 present：用例能直接断言文案，
+    /// 不必造窗口（与 `AppAgentSessionTrashViewController.makeDeletionConfirmation` 同一形态）。
+    func makeConcurrencyLimitAlert(runningCount: Int) -> UIAlertController {
+        let alert = UIAlertController(
+            title: "暂时无法执行更多",
+            message: "已经有 \(runningCount) 个会话在运行。停掉其中一个再回来发送即可，刚输入的内容仍留在输入栏里。",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "好", style: .cancel))
+        return alert
+    }
+
     func sendMessage(text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let session = currentSession else { return }
@@ -459,11 +471,20 @@ extension AppAgentViewController {
         guard sessionSidebarView.sessionListView.archivingSessionID != session.id else { return }
         bindInspectionScene(to: session)
 
-        // 并行上限预检：达到上限时在任何乐观 UI 之前硬阻断（既不追加气泡也不禁用输入）。
+        // 并行上限预检：达到上限时在任何乐观 UI 之前硬阻断（既不追加气泡也不禁用输入），
+        // 但**必须让用户看见** —— 只 return 的表现是「点了发送没反应」。草稿刻意留在输入栏里
+        // （`finishInputBarAfterSend()` 排在这道闸之后），关掉弹窗去停一个正在跑的会话再回来发。
         // AISession.sendMessage 会作为权威闸门再次复检（防御性双重校验）。
         if let agent = agent, !agent.sessionManager.canAdmitRun(for: session) {
             let limit = agent.sessionManager.governor.limit
-            Logger.info("AppAgentViewController", "sendMessage 被并行上限拦截: limit=\(limit)")
+            let running = agent.sessionManager.runningSessionCount
+            Logger.info(
+                "AppAgentViewController",
+                "sendMessage 被并行上限拦截: running=\(running), limit=\(limit)"
+            )
+            if presentedViewController == nil, !isBeingDismissed {
+                present(makeConcurrencyLimitAlert(runningCount: running), animated: true)
+            }
             return
         }
 
