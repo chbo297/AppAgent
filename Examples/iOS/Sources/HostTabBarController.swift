@@ -132,34 +132,51 @@ final class HostPlaceholderViewController: UIViewController {
         view.addSubview(titleLabel)
 
         guard showsHapticButton else { return }
-        hapticButton.setTitle("Haptic", for: .normal)
-        hapticButton.setImage(UIImage(systemName: "waveform.path"), for: .normal)
-        hapticButton.tintColor = DemoPalette.accent
-        hapticButton.setTitleColor(DemoPalette.accent, for: .normal)
-        hapticButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-        hapticButton.backgroundColor = DemoPalette.chrome
-        hapticButton.layer.cornerRadius = 10
-        hapticButton.layer.borderWidth = 1
-        hapticButton.layer.borderColor = DemoPalette.separator.cgColor
-        hapticButton.contentEdgeInsets = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
-        hapticButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: -4, bottom: 0, right: 4)
+        configureChromeButton(hapticButton,
+                              title: "Haptic",
+                              systemImage: "waveform.path")
         hapticButton.addTarget(self, action: #selector(playHapticFeedback), for: .touchDown)
         hapticButton.addTarget(self, action: #selector(playHapticFeedback), for: .touchUpInside)
         view.addSubview(hapticButton)
 
-        selfCheckButton.setTitle("能力自检", for: .normal)
-        selfCheckButton.setImage(UIImage(systemName: "checkmark.seal"), for: .normal)
-        selfCheckButton.tintColor = DemoPalette.accent
-        selfCheckButton.setTitleColor(DemoPalette.accent, for: .normal)
-        selfCheckButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-        selfCheckButton.backgroundColor = DemoPalette.chrome
-        selfCheckButton.layer.cornerRadius = 10
-        selfCheckButton.layer.borderWidth = 1
-        selfCheckButton.layer.borderColor = DemoPalette.separator.cgColor
-        selfCheckButton.contentEdgeInsets = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
-        selfCheckButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: -4, bottom: 0, right: 4)
+        configureChromeButton(selfCheckButton,
+                              title: "能力自检",
+                              systemImage: "checkmark.seal")
         selfCheckButton.addTarget(self, action: #selector(runCapabilitySelfCheck), for: .touchUpInside)
         view.addSubview(selfCheckButton)
+    }
+
+    /// 图标 + 标题的小胶囊按钮。`contentEdgeInsets` / `imageEdgeInsets` 在 iOS 15 起
+    /// 被 `UIButton.Configuration` 取代（设了 configuration 之后这两个属性会被忽略），
+    /// 所以内距、图标间距、字体、前景色一并走 configuration；背景色和圆角/描边仍留在
+    /// layer 上（configuration 的 background 显式置空，不参与绘制）。
+    private func configureChromeButton(_ button: UIButton, title: String, systemImage: String) {
+        var config = UIButton.Configuration.plain()
+        config.title = title
+        config.image = UIImage(systemName: systemImage)
+        // 旧写法：contentEdgeInsets(10, 16, 10, 16) —— 数值一一对应，left/right → leading/trailing。
+        config.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16)
+        // 旧写法：imageEdgeInsets(0, -4, 0, 4) 只是把图标往左推 4pt，制造图标与标题之间
+        // 的 4pt 间隙（宽度贡献 -4 + 4 = 0），configuration 里就是 imagePadding = 4。
+        config.imagePadding = 4
+        config.baseForegroundColor = DemoPalette.accent
+        // 旧写法没给 image 配 symbol configuration，SF Symbol 走 `UIImage(systemName:)`
+        // 的默认口径（.body 文本样式）。configuration 有可能按标题字体另算一套，这里
+        // 显式钉住默认口径，图标尺寸就和改前完全一致。
+        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .body)
+        // configuration 会接管标题属性，`titleLabel.font` 不再生效，字体在这里保住。
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+            var outgoing = incoming
+            outgoing.font = .systemFont(ofSize: 16, weight: .semibold)
+            return outgoing
+        }
+        config.background = .clear()
+        button.configuration = config
+        button.tintColor = DemoPalette.accent
+        button.backgroundColor = DemoPalette.chrome
+        button.layer.cornerRadius = 10
+        button.layer.borderWidth = 1
+        button.layer.borderColor = DemoPalette.separator.cgColor
     }
 
     override func viewDidLayoutSubviews() {

@@ -40,12 +40,12 @@ public enum AppAgentDiagnostics {
 
     /// 异步导出（在后台队列做文件拷贝与压缩，回调切回主线程）。
     ///
-    /// `completion` 标 `@Sendable`：它在后台队列被创建、跨到主队列才调用，这一点本来就成立，
-    /// Swift 6 只是要求类型把它写出来。
+    /// `completion` **一定在主线程回调**：实现最后一句就是往主队列投，所以类型上直接标
+    /// `@MainActor`，调用方拿到的闭包天然能碰视图，不用再自己切队列。
     public static func export(
         debugLog: AppAgentDebugLog = .shared,
         runLog: AppAgentRunLog = .shared,
-        completion: @escaping @Sendable (Result<Bundle, Error>) -> Void
+        completion: @escaping @MainActor (Result<Bundle, Error>) -> Void
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
             let result: Result<Bundle, Error>
@@ -54,7 +54,8 @@ public enum AppAgentDiagnostics {
             } catch {
                 result = .failure(error)
             }
-            DispatchQueue.main.async { completion(result) }
+            // 已经在往主队列投了，`assumeIsolated` 只是把这个事实告诉编译器，不改变行为。
+            DispatchQueue.main.async { MainActor.assumeIsolated { completion(result) } }
         }
     }
 

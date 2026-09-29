@@ -55,6 +55,14 @@ public enum AppAgentVoiceRecognitionStopResult: Sendable {
     case stopped(finalText: String, reason: AppAgentVoiceRecognitionEndReason)
 }
 
+/// 识别回调的**值快照**：`SFSpeechRecognitionResult` 是非 Sendable 的引用类型，
+/// 直接塞进投给 `audioQueue` 的闭包等于把一个 AV 对象跨线程传递。回调线程上用得到的只有
+/// 「当前最好文本 + 是否最终」，就地取完，队列里流转值类型。
+private struct AppAgentSpeechTranscriptSnapshot: Sendable {
+    let text: String
+    let isFinal: Bool
+}
+
 /// 语音识别服务抽象：协调层依赖此协议，便于替身测试与替换实现。
 /// 事件必须在主线程投递；识别热路径的实现细节（队列、权限、音频会话）由实现方自理。
 protocol AppAgentVoiceRecognitionProviding: AnyObject {
@@ -155,8 +163,10 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
     /// 最近一次音频缓冲估算出的归一化音量（0…1），供录音态波形起伏用。
     /// 写在音频线程、读在 audioQueue，统一用 configLock 保护。
     private var _currentAudioLevel: Double = 0
-    /// 音量事件节流用的帧累计（只在音频线程读写，无需加锁）。
-    private var framesSinceLevelEmit: AVAudioFramePosition = 0
+    // 音量事件的节流计数**不在这里**：它是「一次 tap 装配的私有状态」，
+    // 现在由 tap 闭包捕获的 `Locked` 盒子持有（见 `startAudioSession`）。
+    // 曾经它是这里的一个裸 `var`，注释写「只在音频线程读写」，事实是音频渲染线程与
+    // `audioQueue` 两个隔离域都在写它 —— 详见那边的注释。
 
     private enum InternalState {
         case idle
@@ -458,24 +468,50 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
         let format = inputNode.outputFormat(forBus: 0)
 
         recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
+            // 在识别器回调线程上就地取值再往下传：`SFSpeechRecognitionResult` 和 `Error` 都是
+            // 非 Sendable 的引用类型，塞进投给 `audioQueue` 的闭包就是把 AV 对象跨线程传递。
+            // `error` 只用于写日志 + 拼失败原因，下游不需要 `Error` 本身做任何类型判断，
+            // 所以这里直接定格成字符串，不把引用带过队列边界。
+            let transcript = result.map {
+                AppAgentSpeechTranscriptSnapshot(
+                    text: $0.bestTranscription.formattedString,
+                    isFinal: $0.isFinal
+                )
+            }
+            let errorDescription = error?.localizedDescription
             self?.audioQueue.async { [weak self] in
-                self?.handleRecognitionCallback(sessionID: sessionID, result: result, error: error)
+                self?.handleRecognitionCallback(
+                    sessionID: sessionID,
+                    transcript: transcript,
+                    errorDescription: errorDescription
+                )
             }
         }
 
         inputNode.removeTap(onBus: 0)
         // 音量事件节流：约每 0.08s（≈12Hz）向 UI 投递一次音量，够反映声音变化又省 CPU。
+        //
+        // 节流计数是**这一次 tap 装配的私有状态**，所以放在 tap 闭包捕获的盒子里，不做实例属性：
+        // tap 回调跑在 AVAudioEngine 的音频渲染线程，而会话装配 / 清理跑在 `audioQueue`，
+        // 以前那个实例属性被两个隔离域各写一次（装 tap 前置 0、`cleanupAudioResources` 置 0），
+        // 注释却声称「只在音频线程读写」—— 与事实相反。装盒之后跨域共享直接不存在：
+        // 每装一次 tap 造一个新盒子，计数天然从 0 开始，换会话重装不会带上一轮的余数；
+        // `Locked.mutate` 再把「累加 → 判阈 → 归零」收成一次原子读改写。
         let levelEmitIntervalFrames = AVAudioFramePosition(max(1, format.sampleRate * 0.08))
-        framesSinceLevelEmit = 0
+        let framesSinceLevelEmit = Locked<AVAudioFramePosition>(wrappedValue: 0)
         setAudioLevel(0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             request.append(buffer)
             guard let self = self else { return }
             // 估算音量并缓存（音频线程），按帧数节流后再切到 audioQueue 投递 .recording。
             self.setAudioLevel(self.normalizedAudioLevel(from: buffer))
-            self.framesSinceLevelEmit += AVAudioFramePosition(buffer.frameLength)
-            guard self.framesSinceLevelEmit >= levelEmitIntervalFrames else { return }
-            self.framesSinceLevelEmit = 0
+            let reachedEmitInterval = framesSinceLevelEmit.mutate { frames -> Bool in
+                frames += AVAudioFramePosition(buffer.frameLength)
+                guard frames >= levelEmitIntervalFrames else { return false }
+                frames = 0
+                return true
+            }
+            guard reachedEmitInterval else { return }
             self.audioQueue.async { [weak self] in
                 guard let self = self, self.state.sessionID == sessionID else { return }
                 guard case .recording = self.state else { return }
@@ -522,8 +558,8 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
 
     private func handleRecognitionCallback(
         sessionID: UUID,
-        result: SFSpeechRecognitionResult?,
-        error: Error?
+        transcript: AppAgentSpeechTranscriptSnapshot?,
+        errorDescription: String?
     ) {
         guard state.sessionID == sessionID else {
             log("recognition callback ignored for stale session=\(shortSessionID(sessionID)) current=\(shortSessionID(state.sessionID))")
@@ -532,32 +568,32 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
 
         switch state {
         case .recording:
-            if let result = result {
-                partialText = result.bestTranscription.formattedString
-                if result.isFinal {
+            if let transcript = transcript {
+                partialText = transcript.text
+                if transcript.isFinal {
                     finalText = partialText
                 }
                 emitRecording(sessionID: sessionID)
             }
-            if let error = error {
-                log("recognition callback error=\(error.localizedDescription) session=\(shortSessionID(sessionID))")
-                finishSessionIfCurrent(sessionID, reason: .failed(error.localizedDescription))
+            if let errorDescription = errorDescription {
+                log("recognition callback error=\(errorDescription) session=\(shortSessionID(sessionID))")
+                finishSessionIfCurrent(sessionID, reason: .failed(errorDescription))
             }
 
         case .finalizing:
             // 收尾期：继续吸收识别结果；拿到最终结果（或出错）即用当前最好文本结束，
             // 不能像录音期那样把 error 当失败——收尾阶段的目标是「尽量不丢已识别内容」。
-            if let result = result {
-                partialText = result.bestTranscription.formattedString
-                if result.isFinal {
+            if let transcript = transcript {
+                partialText = transcript.text
+                if transcript.isFinal {
                     finalText = partialText
                     log("final result received during finalize session=\(shortSessionID(sessionID))")
                     finishCurrentSession(reason: .userStopped)
                     return
                 }
             }
-            if let error = error {
-                log("recognition error during finalize=\(error.localizedDescription) session=\(shortSessionID(sessionID))")
+            if let errorDescription = errorDescription {
+                log("recognition error during finalize=\(errorDescription) session=\(shortSessionID(sessionID))")
                 finishCurrentSession(reason: .userStopped)
             }
 
@@ -641,8 +677,8 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
 
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         activeSessionUsesDebugAudioBypass = false
+        // 只清音量镜像。节流计数随 tap 闭包一起释放，不需要（也不该）在这里跨隔离域去写。
         setAudioLevel(0)
-        framesSinceLevelEmit = 0
     }
 
     private func emitLoading(_ reason: AppAgentVoiceRecognitionLoadingReason, sessionID: UUID) {

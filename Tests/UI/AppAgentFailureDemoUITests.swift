@@ -83,7 +83,7 @@ final class AppAgentFailureDemoUITests: XCTestCase {
 
     func testReleasingPageDuringRequestCancelsPlayback() async throws {
         var controller: AppAgentFailureDemoViewController? = AppAgentFailureDemoViewController()
-        weak var weakController = controller
+        weak let weakController = controller
         controller?.loadViewIfNeeded()
         controller?.startPlayback(stepDelay: 10_000_000_000, betweenTurns: 0)
         let playback = try XCTUnwrap(controller?.playbackTask)

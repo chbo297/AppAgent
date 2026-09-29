@@ -95,7 +95,7 @@ enum AppAgentInputBarFramePolicy {
         }
 
         guard let storedWidth = context.storedExpandedWidth,
-              storedWidth >= AppAgentInputBar.minimumExpandedWidth else {
+              storedWidth >= AppAgentInputBarMetrics.minimumExpandedWidth else {
             return defaultExpandedWidth(context)
         }
 
@@ -112,16 +112,16 @@ enum AppAgentInputBarFramePolicy {
         let x = available.midX - clampedWidth / 2
         return CGRect(
             x: x,
-            y: max(available.minY, available.maxY - AppAgentInputBar.barHeight),
+            y: max(available.minY, available.maxY - AppAgentInputBarMetrics.barHeight),
             width: clampedWidth,
-            height: AppAgentInputBar.barHeight
+            height: AppAgentInputBarMetrics.barHeight
         )
     }
 
     static func clampedExpandedWidth(_ width: CGFloat, context: Context) -> CGFloat {
         let availableWidth = availableFrame(in: context, avoidingKeyboard: true).width
         guard availableWidth > 0 else { return 0 }
-        let minWidth = min(AppAgentInputBar.minimumExpandedWidth, availableWidth)
+        let minWidth = min(AppAgentInputBarMetrics.minimumExpandedWidth, availableWidth)
         return AppAgentGeometry.clamp(width, minWidth, availableWidth)
     }
 
@@ -129,14 +129,14 @@ enum AppAgentInputBarFramePolicy {
         let available = availableFrame(in: context, avoidingKeyboard: true)
         let width = AppAgentGeometry.clamp(
             proposedFrame.width,
-            AppAgentInputBar.collapsedMinWidth,
-            max(AppAgentInputBar.collapsedMinWidth, available.width)
+            AppAgentInputBarMetrics.collapsedMinWidth,
+            max(AppAgentInputBarMetrics.collapsedMinWidth, available.width)
         )
         let minX = available.minX
         let maxX = max(available.minX, available.maxX - width)
         let x = AppAgentGeometry.clamp(proposedFrame.maxX - width, minX, maxX)
-        let y = max(available.minY, available.maxY - AppAgentInputBar.barHeight)
-        return CGRect(x: x, y: y, width: width, height: AppAgentInputBar.barHeight)
+        let y = max(available.minY, available.maxY - AppAgentInputBarMetrics.barHeight)
+        return CGRect(x: x, y: y, width: width, height: AppAgentInputBarMetrics.barHeight)
     }
 
     /// 拖拽 resize 期间约束展开 frame。
@@ -182,7 +182,7 @@ enum AppAgentInputBarFramePolicy {
             rightEdge: displayedFrame.maxX,
             context: context
         )
-        let displayedWidth = max(AppAgentInputBar.collapsedMinWidth, displayedFrame.width)
+        let displayedWidth = max(AppAgentInputBarMetrics.collapsedMinWidth, displayedFrame.width)
         let rawWidth = displayedWidth > metrics.maximumWidth
             ? metrics.maximumWidth + rawRubberBandDistance(displayedWidth - metrics.maximumWidth)
             : displayedWidth
@@ -190,7 +190,7 @@ enum AppAgentInputBarFramePolicy {
             x: metrics.rightEdge - rawWidth,
             y: metrics.y,
             width: rawWidth,
-            height: AppAgentInputBar.barHeight
+            height: AppAgentInputBarMetrics.barHeight
         )
     }
 
@@ -210,7 +210,7 @@ enum AppAgentInputBarFramePolicy {
             rightEdge: proposedFrame.maxX,
             context: context
         )
-        let proposedWidth = max(AppAgentInputBar.collapsedMinWidth, proposedFrame.width)
+        let proposedWidth = max(AppAgentInputBarMetrics.collapsedMinWidth, proposedFrame.width)
         let width: CGFloat
         if rubberBandsPastMaximumWidth, proposedWidth > metrics.maximumWidth {
             width = metrics.maximumWidth + rubberBandDistance(proposedWidth - metrics.maximumWidth)
@@ -221,7 +221,7 @@ enum AppAgentInputBarFramePolicy {
             x: metrics.rightEdge - width,
             y: metrics.y,
             width: width,
-            height: AppAgentInputBar.barHeight
+            height: AppAgentInputBarMetrics.barHeight
         )
     }
 
@@ -231,7 +231,7 @@ enum AppAgentInputBarFramePolicy {
         context: Context
     ) -> (rightEdge: CGFloat, maximumWidth: CGFloat, y: CGFloat) {
         let available = availableFrame(in: context, avoidingKeyboard: true)
-        let minimumWidth = AppAgentInputBar.collapsedMinWidth
+        let minimumWidth = AppAgentInputBarMetrics.collapsedMinWidth
         let rightEdge = AppAgentGeometry.clamp(
             proposedRightEdge,
             available.minX + minimumWidth,
@@ -240,7 +240,7 @@ enum AppAgentInputBarFramePolicy {
         let widthToLeftBoundary = max(minimumWidth, rightEdge - available.minX)
         let preferredWidth = max(minimumWidth, preferredExpandedWidth(context))
         let maximumWidth = min(widthToLeftBoundary, preferredWidth)
-        let y = max(available.minY, available.maxY - AppAgentInputBar.barHeight)
+        let y = max(available.minY, available.maxY - AppAgentInputBarMetrics.barHeight)
         return (rightEdge, maximumWidth, y)
     }
 
@@ -248,20 +248,20 @@ enum AppAgentInputBarFramePolicy {
     static func storableExpandedWidth(_ width: CGFloat, context: Context) -> CGFloat? {
         let availableWidth = availableFrame(in: context, avoidingKeyboard: true).width
         guard isWideLayout(context),
-              availableWidth >= AppAgentInputBar.minimumExpandedWidth,
-              width >= AppAgentInputBar.minimumExpandedWidth else {
+              availableWidth >= AppAgentInputBarMetrics.minimumExpandedWidth,
+              width >= AppAgentInputBarMetrics.minimumExpandedWidth else {
             return nil
         }
-        return AppAgentGeometry.clamp(width, AppAgentInputBar.minimumExpandedWidth, availableWidth)
+        return AppAgentGeometry.clamp(width, AppAgentInputBarMetrics.minimumExpandedWidth, availableWidth)
     }
 
     /// 松手结算：展开 resize 结束时是否应收起（快速甩动按方向，中速按投影落点，低速按当前宽度）。
     static func shouldCollapseExpanded(velocityX vx: CGFloat, frame: CGRect, context: Context) -> Bool {
-        let minWidth = AppAgentInputBar.collapsedMinWidth
+        let minWidth = AppAgentInputBarMetrics.collapsedMinWidth
         let maxWidth = preferredExpandedWidth(context)
         let speed = abs(vx)
 
-        guard frame.width >= AppAgentInputBar.minimumExpandedWidth else {
+        guard frame.width >= AppAgentInputBarMetrics.minimumExpandedWidth else {
             return true
         }
 
@@ -279,7 +279,7 @@ enum AppAgentInputBarFramePolicy {
                 maxWidth
             )
         }
-        if decisionWidth < AppAgentInputBar.minimumExpandedWidth {
+        if decisionWidth < AppAgentInputBarMetrics.minimumExpandedWidth {
             return true
         }
         return decisionWidth < (minWidth + maxWidth) * 0.5
@@ -289,12 +289,12 @@ enum AppAgentInputBarFramePolicy {
 
     static func defaultCollapsedFrame(_ context: Context) -> CGRect {
         let available = availableFrame(in: context, avoidingKeyboard: false)
-        let width = AppAgentInputBar.collapsedMinWidth
+        let width = AppAgentInputBarMetrics.collapsedMinWidth
         return CGRect(
             x: max(available.minX, available.maxX - width),
-            y: max(available.minY, available.maxY - AppAgentInputBar.barHeight),
+            y: max(available.minY, available.maxY - AppAgentInputBarMetrics.barHeight),
             width: width,
-            height: AppAgentInputBar.barHeight
+            height: AppAgentInputBarMetrics.barHeight
         )
     }
 
@@ -311,8 +311,8 @@ enum AppAgentInputBarFramePolicy {
     /// 从持久化位置恢复 frame：placement 的正/负号分别表示相对可用区左上/右下的偏移。
     static func collapsedFrame(fromStoredPlacement placement: CGPoint, context: Context) -> CGRect {
         let available = availableFrame(in: context, avoidingKeyboard: false)
-        let width = AppAgentInputBar.collapsedMinWidth
-        let height = AppAgentInputBar.barHeight
+        let width = AppAgentInputBarMetrics.collapsedMinWidth
+        let height = AppAgentInputBarMetrics.barHeight
         let x = placement.x.sign == .minus
             ? available.maxX - width + placement.x
             : available.minX + placement.x
@@ -324,8 +324,8 @@ enum AppAgentInputBarFramePolicy {
 
     static func constrainedCollapsedFrame(_ proposedFrame: CGRect, context: Context) -> CGRect {
         let available = availableFrame(in: context, avoidingKeyboard: false)
-        let width = AppAgentInputBar.collapsedMinWidth
-        let height = AppAgentInputBar.barHeight
+        let width = AppAgentInputBarMetrics.collapsedMinWidth
+        let height = AppAgentInputBarMetrics.barHeight
         let maxX = max(available.minX, available.maxX - width)
         let maxY = max(available.minY, available.maxY - height)
         return CGRect(
@@ -339,8 +339,8 @@ enum AppAgentInputBarFramePolicy {
     /// 收起态拖拽中的展示 frame：合法范围内 1:1 跟手，越界部分按非线性阻尼压缩。
     static func rubberBandedCollapsedMoveFrame(_ proposedFrame: CGRect, context: Context) -> CGRect {
         let available = availableFrame(in: context, avoidingKeyboard: false)
-        let width = AppAgentInputBar.collapsedMinWidth
-        let height = AppAgentInputBar.barHeight
+        let width = AppAgentInputBarMetrics.collapsedMinWidth
+        let height = AppAgentInputBarMetrics.barHeight
         let minX = available.minX
         let maxX = max(minX, available.maxX - width)
         let minY = available.minY
@@ -359,8 +359,8 @@ enum AppAgentInputBarFramePolicy {
     /// 避免把视觉 frame 再套一遍橡皮筋公式而产生跳变。
     static func rawCollapsedMoveFrame(from displayedFrame: CGRect, context: Context) -> CGRect {
         let available = availableFrame(in: context, avoidingKeyboard: false)
-        let width = AppAgentInputBar.collapsedMinWidth
-        let height = AppAgentInputBar.barHeight
+        let width = AppAgentInputBarMetrics.collapsedMinWidth
+        let height = AppAgentInputBarMetrics.barHeight
         let minX = available.minX
         let maxX = max(minX, available.maxX - width)
         let minY = available.minY
@@ -520,7 +520,7 @@ struct AppAgentUserDefaultsInputBarLayoutStore: AppAgentInputBarLayoutStoring {
         }
 
         let width = CGFloat(defaults.double(forKey: Self.expandedWidthKey))
-        guard width.isFinite, width >= AppAgentInputBar.minimumExpandedWidth else {
+        guard width.isFinite, width >= AppAgentInputBarMetrics.minimumExpandedWidth else {
             return nil
         }
         return width

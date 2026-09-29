@@ -58,6 +58,9 @@ struct AppAgentVoiceInputTimings {
 }
 
 /// 语音输入触觉反馈的抽象：协调器只表达“何时震动”，不关心震动如何实现。
+/// 触觉反馈是 UIKit 的主线程能力（`UIImpactFeedbackGenerator` 本身就是主 actor 隔离的），
+/// 标 `@MainActor` 之后编译器认这件事，而不是靠“反正只在主线程调”的约定。
+@MainActor
 protocol AppAgentVoiceInputFeedbackProviding {
     func prepare()
     func impact(reason: String)

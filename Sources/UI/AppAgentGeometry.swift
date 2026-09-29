@@ -25,6 +25,37 @@ enum AppAgentGeometry {
     }
 }
 
+/// 输入栏几何常量：纯数值、与线程无关。
+///
+/// 这些数既被 `@MainActor` 的视图用（`AppAgentInputBar` 是 UIView，Swift 6 下整类都在主 actor 上），
+/// 也被 `AppAgentInputBarFramePolicy` / `AppAgentChatPanelGeometry` 这种纯函数几何层用 —— 后者刻意
+/// 不带隔离，好让布局推导能在单测里直接调。常量原先挂在视图类的 static 上，于是每个 nonisolated
+/// 读点都被编译器点名一次（实测 40 处 warning）。数值本身没有主线程语义，归属就该在这里：
+/// 一份真相，两边都读得到。
+public enum AppAgentInputBarMetrics {
+    /// 胶囊条默认高度。
+    public static let barHeight: CGFloat = 56
+
+    public static let innerPadding: CGFloat = 8
+    public static let buttonSize: CGFloat = 40
+    public static let minimumInputAreaWidth: CGFloat = 80
+
+    /// 完全收起宽度：8 + 40 + 8。
+    public static let collapsedMinWidth: CGFloat = innerPadding * 2 + buttonSize
+
+    /// 最小展开宽度：8 + 40 + 8 + 80 + 8 + 40 + 8 + 40 + 8。
+    public static let minimumExpandedWidth: CGFloat = innerPadding * 5 + buttonSize * 3 + minimumInputAreaWidth
+
+    /// 展开态 inputBar 背景圆角；ChatPanel 收至最小高度时复用该值以保持视觉对齐。
+    public static let expandedCornerRadius: CGFloat = 16
+}
+
+/// 面板几何常量：同理，纯数值不该挂在 @MainActor 的视图类上。
+public enum AppAgentChatPanelMetrics {
+    /// 面板导航条高度。
+    public static let navigationBarHeight: CGFloat = 48
+}
+
 extension CGPoint {
     /// 两点近似相等（容差 0.5pt），用于避免亚像素抖动触发无意义的布局。
     func isApproximatelyEqual(to other: CGPoint) -> Bool {

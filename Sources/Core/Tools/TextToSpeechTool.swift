@@ -57,7 +57,7 @@ public struct TextToSpeechTool: ToolProtocol {
         let speechDelegate = SpeechCompletionDelegate()
         synthesizer.delegate = speechDelegate
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            speechDelegate.continuation = continuation
+            speechDelegate.attach(continuation)
             synthesizer.speak(utterance)
         }
 
@@ -76,18 +76,33 @@ public struct TextToSpeechTool: ToolProtocol {
 #if canImport(AVFoundation)
 /// Delegate that signals completion when speech finishes or is cancelled.
 private final class SpeechCompletionDelegate: NSObject, AVSpeechSynthesizerDelegate, AppAgentRuntimeOwned {
-    var continuation: CheckedContinuation<Void, Never>?
+    /// `AVSpeechSynthesizerDelegate` 自带 Sendable 语义，合成器可以从任意队列回调，
+    /// 所以 continuation 不能是裸 `var`：必须收进锁里，读-改-写在一个临界区内完成。
+    private let pendingContinuation = Locked<CheckedContinuation<Void, Never>?>(wrappedValue: nil)
+
+    /// 挂上本次朗读的 continuation（`speak` 之前调用，保证回调一定能取到）。
+    func attach(_ continuation: CheckedContinuation<Void, Never>) {
+        pendingContinuation.wrappedValue = continuation
+    }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                            didFinish utterance: AVSpeechUtterance) {
-        continuation?.resume()
-        continuation = nil
+        resumeOnce()
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                            didCancel utterance: AVSpeechUtterance) {
-        continuation?.resume()
-        continuation = nil
+        resumeOnce()
+    }
+
+    /// `didFinish` / `didCancel` 都可能到；原子取出保证只 resume 一次（double resume 直接 crash）。
+    /// 分成「读 → 判空 → 清空」三步就不是原子的，两条回调撞在一起会各拿到同一个 continuation。
+    private func resumeOnce() {
+        pendingContinuation.mutate { stored -> CheckedContinuation<Void, Never>? in
+            let taken = stored
+            stored = nil
+            return taken
+        }?.resume()
     }
 }
 #endif

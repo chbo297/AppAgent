@@ -122,7 +122,7 @@ final class AppAgentChatPanelView: UIView {
         let minimumDisplayHeight = self.minimumDisplayHeight
             ?? min(
                 bounds.height,
-                AppAgentChatPanelGeometry.dragHandleAreaHeight + AppAgentInputBar.barHeight
+                AppAgentChatPanelGeometry.dragHandleAreaHeight + AppAgentInputBarMetrics.barHeight
             )
         let compactTransitionStartDisplayHeight = self.compactTransitionStartDisplayHeight
             ?? minimumDisplayHeight

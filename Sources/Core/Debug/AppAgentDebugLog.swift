@@ -111,7 +111,7 @@ public final class AppAgentDebugLog: @unchecked Sendable {
     private var _events: [AppAgentDebugEvent] = []
     private var _capacity: Int
     private var _isEnabled: Bool = true
-    private var _onEvent: ((AppAgentDebugEvent) -> Void)?
+    private var _onEvent: (@Sendable (AppAgentDebugEvent) -> Void)?
 
     public init(capacity: Int = 500) {
         self._capacity = max(1, capacity)
@@ -137,13 +137,16 @@ public final class AppAgentDebugLog: @unchecked Sendable {
     }
 
     /// 新记录回调（可能在任意线程触发，UI 侧需自行切主线程）。
-    public var onEvent: ((AppAgentDebugEvent) -> Void)? {
+    ///
+    /// 类型上带 `@Sendable` 就是为了让这件事编译期可见：回调在 `record` 的调用线程上直接执行，
+    /// 而 `record` 来自模型循环 / 工具 / 主线程等各处。
+    public var onEvent: (@Sendable (AppAgentDebugEvent) -> Void)? {
         get { lock.read { _onEvent } }
         set { lock.writeSync { _onEvent = newValue } }
     }
 
     public func record(_ event: AppAgentDebugEvent) {
-        let observer: ((AppAgentDebugEvent) -> Void)? = lock.writeSync {
+        let observer: (@Sendable (AppAgentDebugEvent) -> Void)? = lock.writeSync {
             guard _isEnabled else { return nil }
             _events.append(event)
             if _events.count > _capacity {

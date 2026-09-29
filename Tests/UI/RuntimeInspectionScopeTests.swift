@@ -522,7 +522,7 @@ final class RuntimeInspectionScopeTests: XCTestCase {
     func testStableHandlesNeverRecycleOrRetainWindows() {
         let registry = HostInspectionHandleRegistry<NSObject>()
         var removed: NSObject? = NSObject()
-        weak var weakRemoved = removed
+        weak let weakRemoved = removed
         let old = registry.handle(for: removed!)
         let retained = NSObject()
         let stable = registry.handle(for: retained)
@@ -598,11 +598,36 @@ private final class AppAgentHostNamedView: UIView {}
 
 private final class ScopeHostBox<Value> {}
 
+/// `description` 的计数器单独用锁收着：`NSObject.description` 是 nonisolated 契约，
+/// override 只能跟着 nonisolated；而 `ScopeProbeView` 继承 UIView 后整类落在主 actor 上，
+/// 计数器若是普通存储属性就成了「nonisolated 里写主 actor 状态」。这个探针只数次数，
+/// 把它挪出隔离域、用锁保护，比给整个 override 强加隔离更贴近它真实的调用方。
+private final class ScopeProbeDescriptionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+}
+
 private final class ScopeProbeView: UIView {
     var reads = 0
-    var descriptions = 0
+    private nonisolated let descriptionCounter = ScopeProbeDescriptionCounter()
+    nonisolated var descriptions: Int { descriptionCounter.count }
     @objc var secret: String { reads += 1; return "SDK-PRIVATE" }
-    override var description: String { descriptions += 1; return "SDK-PRIVATE-DESCRIPTION" }
+    override nonisolated var description: String {
+        descriptionCounter.increment()
+        return "SDK-PRIVATE-DESCRIPTION"
+    }
 }
 
 private actor ScopeRecordingRuntimeProvider: RuntimeInspectProvider {

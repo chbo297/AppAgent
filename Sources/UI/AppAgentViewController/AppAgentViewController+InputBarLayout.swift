@@ -30,7 +30,7 @@ struct AppAgentExpandedInputBarResizeTracking {
             + displayedProposal.maxX
             - displayedAnchorFrame.maxX
         let width = max(
-            AppAgentInputBar.collapsedMinWidth,
+            AppAgentInputBarMetrics.collapsedMinWidth,
             rawAnchorFrame.width
                 + displayedProposal.width
                 - displayedAnchorFrame.width
@@ -39,7 +39,7 @@ struct AppAgentExpandedInputBarResizeTracking {
             x: rightEdge - width,
             y: displayedProposal.minY,
             width: width,
-            height: AppAgentInputBar.barHeight
+            height: AppAgentInputBarMetrics.barHeight
         )
         return latestRawFrame
     }
@@ -333,7 +333,7 @@ extension AppAgentViewController {
         )
         let speed = abs(velocity.x)
 
-        if currentFrame.width < AppAgentInputBar.minimumExpandedWidth {
+        if currentFrame.width < AppAgentInputBarMetrics.minimumExpandedWidth {
             collapseInputBar(animated: true)
             return
         }
@@ -391,7 +391,7 @@ extension AppAgentViewController {
         guard Self.allowsExpandedResizeWidthCustomization else { return }
 
         guard isWideInputBarLayout(),
-              width >= AppAgentInputBar.minimumExpandedWidth else {
+              width >= AppAgentInputBarMetrics.minimumExpandedWidth else {
             resetExpandedResizeWidthHoldTracking()
             return
         }
@@ -407,7 +407,7 @@ extension AppAgentViewController {
     func didHoldExpandedResizeWidth(width: CGFloat) -> Bool {
         guard Self.allowsExpandedResizeWidthCustomization,
               isWideInputBarLayout(),
-              width >= AppAgentInputBar.minimumExpandedWidth,
+              width >= AppAgentInputBarMetrics.minimumExpandedWidth,
               let stableWidth = expandedResizeStableWidth,
               let startTime = expandedResizeStableStartTime,
               abs(width - stableWidth) <= Self.expandedResizeWidthStabilityThreshold else {

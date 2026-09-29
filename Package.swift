@@ -16,7 +16,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/chbo297/BODragScroll.git",
-            from: "2.2.0"
+            from: "2.2.1"
         ),
         .package(
             url: "https://github.com/chbo297/BOUIKit.git",

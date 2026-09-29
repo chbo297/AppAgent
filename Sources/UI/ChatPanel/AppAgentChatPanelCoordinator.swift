@@ -188,7 +188,7 @@ final class AppAgentChatPanelCoordinator: NSObject {
             preferredDetent: displayDetent
         )
         let fixedTopAreaHeight = AppAgentChatPanelGeometry.dragHandleAreaHeight
-            + AppAgentChatPanelNavigationBar.height
+            + AppAgentChatPanelMetrics.navigationBarHeight
         // 列表视口跟随实时展示高度；但下限保持 half 档的可视高度，继续收向 peek 时只做视觉裁切，
         // 不再压缩列表视口（否则 peek 附近视口只剩几十 pt，滚动指标会被反复重算）。
         let viewportReferenceDisplayHeight = max(clampedDisplayHeight, geometry.halfHeight)
@@ -217,7 +217,7 @@ final class AppAgentChatPanelCoordinator: NSObject {
         for geometry: AppAgentChatPanelGeometry
     ) {
         let fixedTopAreaHeight = AppAgentChatPanelGeometry.dragHandleAreaHeight
-            + AppAgentChatPanelNavigationBar.height
+            + AppAgentChatPanelMetrics.navigationBarHeight
         panelView.listView.updateLatestReplyInitialHeight(
             halfScreenVisibleHeight: max(0, geometry.halfHeight - fixedTopAreaHeight),
             bottomInset: geometry.listBottomInset

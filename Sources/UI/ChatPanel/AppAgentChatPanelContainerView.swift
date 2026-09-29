@@ -84,7 +84,7 @@ struct AppAgentChatPanelContainerLayout: Equatable {
         inputBarWidth: CGFloat,
         expandedInputBarWidth: CGFloat
     ) -> CGFloat {
-        let collapsedWidth = AppAgentInputBar.collapsedMinWidth
+        let collapsedWidth = AppAgentInputBarMetrics.collapsedMinWidth
         let travel = expandedInputBarWidth - collapsedWidth
         guard travel > 0.5 else {
             return inputBarWidth <= collapsedWidth + 0.5 ? 1 : 0

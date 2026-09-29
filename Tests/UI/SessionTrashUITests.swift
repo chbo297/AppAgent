@@ -417,11 +417,15 @@ final class SessionTrashUITests: XCTestCase {
         XCTAssertFalse(table.isUserInteractionEnabled)
         XCTAssertEqual(controller.navigationItem.rightBarButtonItem?.isEnabled, false)
         // 不 present、不构建 UIWindow；分别模拟自适应 dismissal 和 iPad popover 外点取消。
-        if adaptive {
-            popoverDelegate.presentationControllerDidDismiss?(firstPopover)
-        } else {
-            popoverDelegate.popoverPresentationControllerDidDismissPopover?(firstPopover)
-        }
+        // iOS 13 起两者都由 UIKit 走 `UIAdaptivePresentationControllerDelegate` 的
+        // `presentationControllerDidDismiss(_:)`，差别只在交回来的 presentationController
+        // 是自适应后的容器还是 popover 本体 —— 生产侧两条回调都只做 consumeActionSheet(token)。
+        let dismissedController: UIPresentationController = adaptive
+            ? UIPresentationController(
+                presentedViewController: UIViewController(), presenting: nil
+            )
+            : firstPopover
+        popoverDelegate.presentationControllerDidDismiss?(dismissedController)
         XCTAssertFalse(controller.isClosed)
         XCTAssertNotNil(controller.onSessionsChanged)
         XCTAssertTrue(table.isUserInteractionEnabled)
@@ -433,20 +437,20 @@ final class SessionTrashUITests: XCTestCase {
         let secondDelegate = try XCTUnwrap(secondPopover.delegate)
         XCTAssertFalse(secondDelegate === popoverDelegate, "每张 sheet 必须绑定自己的 token")
         for _ in 0..<2 {
-            popoverDelegate.popoverPresentationControllerDidDismissPopover?(firstPopover)
+            popoverDelegate.presentationControllerDidDismiss?(firstPopover)
         }
         XCTAssertFalse(controller.isClosed)
         XCTAssertFalse(table.isUserInteractionEnabled)
         XCTAssertEqual(controller.navigationItem.rightBarButtonItem?.isEnabled, false)
         XCTAssertNil(controller.makeSessionActions(for: "a", sourceView: anchor, sourceRect: anchor.bounds))
         XCTAssertNil(controller.makeDeletionConfirmation(for: "a"))
-        secondDelegate.popoverPresentationControllerDidDismissPopover?(secondPopover)
+        secondDelegate.presentationControllerDidDismiss?(secondPopover)
 
         // sheet 的迟到通知不代表取消 / 接受人工二次确认，更不能自动 purge。
         _ = try XCTUnwrap(controller.makeDeletionConfirmation(for: "a"))
         let confirmationToken = try XCTUnwrap(controller.pendingDeletion?.token)
-        popoverDelegate.popoverPresentationControllerDidDismissPopover?(firstPopover)
-        secondDelegate.popoverPresentationControllerDidDismissPopover?(secondPopover)
+        popoverDelegate.presentationControllerDidDismiss?(firstPopover)
+        secondDelegate.presentationControllerDidDismiss?(secondPopover)
         XCTAssertEqual(controller.pendingDeletion?.token, confirmationToken)
         XCTAssertFalse(table.isUserInteractionEnabled)
         XCTAssertNil(controller.operationTask)

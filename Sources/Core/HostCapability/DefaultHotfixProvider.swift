@@ -13,7 +13,12 @@ import Foundation
 import JavaScriptCore
 import UIKit
 
-public final class DefaultHotfixProvider: HotfixProvider, @unchecked Sendable {
+/// `actor` 而不是「加锁的 class」：槽位表（`slots` / `order`）是真可变状态，而 `HotfixProvider`
+/// 的四个要求全是 `async`、调用方本来就带 `await`，所以隔离域天然装得下，不必再手写锁。
+/// 手写锁在这里还是个隐患：`apply` / `setEnabled` 里「改槽位」和「eval JS（要跳主线程 await）」
+/// 必须分成两段，锁只能保护前一段，剩下的顺序全靠人守；actor 把「谁能同时改槽位」这件事
+/// 交给编译器，`@unchecked Sendable` 也就不用要了。
+public actor DefaultHotfixProvider: HotfixProvider {
 
     private struct Slot {
         var javascript: String
@@ -28,7 +33,6 @@ public final class DefaultHotfixProvider: HotfixProvider, @unchecked Sendable {
         }
     }
 
-    private let lock = ReadersWriterLock()
     private var slots: [String: Slot] = [:]
     private var order: [String] = []
 
@@ -40,13 +44,13 @@ public final class DefaultHotfixProvider: HotfixProvider, @unchecked Sendable {
         guard let context = await Self.boundContext(context), !Task.isCancelled else {
             return HotfixApplyResult(success: false, applyMode: applyMode, message: "No unambiguous active scene for this patch.", needsRestart: false)
         }
-        let accepted = lock.writeSync { () -> Bool in
-            if let existing = slots[name], !existing.isAccessible(in: context) { return false }
-            if slots[name] == nil { order.append(name) }
-            slots[name] = Slot(javascript: javascript, enabled: true, summary: summary, applyMode: applyMode, context: context)
-            return true
+        // 槽位读写在 actor 的隔离域里，中间没有挂起点，所以「查得到 → 判范围 → 落库」是一段。
+        if let existing = slots[name], !existing.isAccessible(in: context) {
+            return HotfixApplyResult(success: false, applyMode: applyMode, message: "Patch unavailable in this scope.", needsRestart: false)
         }
-        guard accepted, !Task.isCancelled else {
+        if slots[name] == nil { order.append(name) }
+        slots[name] = Slot(javascript: javascript, enabled: true, summary: summary, applyMode: applyMode, context: context)
+        guard !Task.isCancelled else {
             return HotfixApplyResult(success: false, applyMode: applyMode, message: "Patch unavailable in this scope.", needsRestart: false)
         }
         let output = await Self.evaluate(javascript, inspection: context)
@@ -66,47 +70,32 @@ public final class DefaultHotfixProvider: HotfixProvider, @unchecked Sendable {
         guard let context = await Self.boundContext(context), !Task.isCancelled else { return false }
         // 「槽位不存在」和「关掉了」必须分开报。原来两种都走 `script == nil`
         // 那条路、再 `return slots[name] != nil || !enabled`，于是 toggle 一个
-        // 不存在的补丁名也会报成功（`!enabled` 恒真），模型据此以为改生效了；
-        // 而且那次 `slots[name]` 还是在锁外读的。
-        enum Outcome { case missing, disabled, reenable(Slot) }
-        let outcome: Outcome = lock.writeSync {
-            guard var slot = slots[name], slot.isAccessible(in: context) else { return .missing }
-            slot.enabled = enabled
-            slots[name] = slot
-            return enabled ? .reenable(slot) : .disabled
-        }
-        switch outcome {
-        case .missing:
-            return false
-        case .disabled:
-            return true
-        case .reenable(let slot):
-            // 重新开启 = 重新 eval 一遍，JS 报错就算没开成功。
-            guard !Task.isCancelled else { return false }
-            return !(await Self.evaluate(slot.javascript, inspection: slot.context)).hasPrefix("JS error")
-        }
+        // 不存在的补丁名也会报成功（`!enabled` 恒真），模型据此以为改生效了。
+        guard var slot = slots[name], slot.isAccessible(in: context) else { return false }
+        slot.enabled = enabled
+        slots[name] = slot
+        guard enabled else { return true }
+        // 重新开启 = 重新 eval 一遍，JS 报错就算没开成功。
+        guard !Task.isCancelled else { return false }
+        return !(await Self.evaluate(slot.javascript, inspection: slot.context)).hasPrefix("JS error")
     }
 
     public func list(context: HostInspectionContext = .init()) async -> [HotfixPatchInfo] {
         guard let context = await Self.boundContext(context), !Task.isCancelled else { return [] }
-        return lock.read {
-            order.compactMap { name in
-                guard let slot = slots[name], slot.isAccessible(in: context) else { return nil }
-                return HotfixPatchInfo(
-                    name: name, enabled: slot.enabled, summary: slot.summary, applyMode: slot.applyMode
-                )
-            }
+        return order.compactMap { name in
+            guard let slot = slots[name], slot.isAccessible(in: context) else { return nil }
+            return HotfixPatchInfo(
+                name: name, enabled: slot.enabled, summary: slot.summary, applyMode: slot.applyMode
+            )
         }
     }
 
     public func remove(name: String, context: HostInspectionContext = .init()) async -> Bool {
         guard let context = await Self.boundContext(context), !Task.isCancelled else { return false }
-        return lock.writeSync {
-            guard let slot = slots[name], slot.isAccessible(in: context) else { return false }
-            slots.removeValue(forKey: name)
-            order.removeAll { $0 == name }
-            return true
-        }
+        guard let slot = slots[name], slot.isAccessible(in: context) else { return false }
+        slots.removeValue(forKey: name)
+        order.removeAll { $0 == name }
+        return true
     }
 
     // MARK: - JS 执行 + 运行时桥

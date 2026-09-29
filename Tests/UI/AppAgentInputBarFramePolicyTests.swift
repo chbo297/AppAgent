@@ -144,8 +144,8 @@ final class AppAgentInputBarFramePolicyTests: XCTestCase {
         let nearFrame = CGRect(
             x: available.minX - 50,
             y: 300,
-            width: AppAgentInputBar.collapsedMinWidth,
-            height: AppAgentInputBar.barHeight
+            width: AppAgentInputBarMetrics.collapsedMinWidth,
+            height: AppAgentInputBarMetrics.barHeight
         )
         let farFrame = nearFrame.offsetBy(dx: -50, dy: 0)
 
@@ -172,8 +172,8 @@ final class AppAgentInputBarFramePolicyTests: XCTestCase {
         let proposedFrame = CGRect(
             x: available.maxX + 100,
             y: available.maxY + 100,
-            width: AppAgentInputBar.collapsedMinWidth,
-            height: AppAgentInputBar.barHeight
+            width: AppAgentInputBarMetrics.collapsedMinWidth,
+            height: AppAgentInputBarMetrics.barHeight
         )
         let rubberFrame = AppAgentInputBarFramePolicy.rubberBandedCollapsedMoveFrame(
             proposedFrame,
@@ -195,8 +195,8 @@ final class AppAgentInputBarFramePolicyTests: XCTestCase {
         let rawFrame = CGRect(
             x: available.minX - 120,
             y: available.maxY + 80,
-            width: AppAgentInputBar.collapsedMinWidth,
-            height: AppAgentInputBar.barHeight
+            width: AppAgentInputBarMetrics.collapsedMinWidth,
+            height: AppAgentInputBarMetrics.barHeight
         )
         let displayedFrame = AppAgentInputBarFramePolicy.rubberBandedCollapsedMoveFrame(
             rawFrame,
@@ -220,8 +220,8 @@ final class AppAgentInputBarFramePolicyTests: XCTestCase {
         let rawFrame = CGRect(
             x: available.minX - 100,
             y: 300,
-            width: AppAgentInputBar.collapsedMinWidth,
-            height: AppAgentInputBar.barHeight
+            width: AppAgentInputBarMetrics.collapsedMinWidth,
+            height: AppAgentInputBarMetrics.barHeight
         )
         let displayedFrame = AppAgentInputBarFramePolicy.rubberBandedCollapsedMoveFrame(
             rawFrame,

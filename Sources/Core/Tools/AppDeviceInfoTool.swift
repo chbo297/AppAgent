@@ -180,12 +180,16 @@ public struct AppDeviceInfoTool: ToolProtocol {
     // MARK: - Helpers
 
     /// Read a string sysctl value (e.g. "hw.machine").
+    ///
+    /// `sysctlbyname` 返回的是 NUL 结尾的 C 字符串，且 `size` 把结尾那个 NUL 也算进去，
+    /// 缓冲区尾部还可能残留填充字节。所以先截到第一个 NUL 再按 UTF-8 解码，
+    /// 否则解出来的字符串会带一串 `\0`（`String(cString:)` 已废弃，正是因为它替调用方做了这件事）。
     static func sysctlString(_ key: String) -> String? {
         var size = 0
         guard sysctlbyname(key, nil, &size, nil, 0) == 0, size > 0 else { return nil }
-        var buffer = [CChar](repeating: 0, count: size)
+        var buffer = [UInt8](repeating: 0, count: size)
         guard sysctlbyname(key, &buffer, &size, nil, 0) == 0 else { return nil }
-        let value = String(cString: buffer)
+        let value = String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
         return value.isEmpty ? nil : value
     }
 

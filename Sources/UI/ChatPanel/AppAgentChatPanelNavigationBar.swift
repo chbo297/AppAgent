@@ -8,8 +8,6 @@ import UIKit
 
 /// ChatPanel 内容区顶部的导航栏，提供 Session 列表入口和面板收起操作。
 final class AppAgentChatPanelNavigationBar: UIView {
-    static let height: CGFloat = 48
-
     var onSessionListRequested: (() -> Void)?
     var onCollapseRequested: (() -> Void)?
     var onNewSessionRequested: (() -> Void)?

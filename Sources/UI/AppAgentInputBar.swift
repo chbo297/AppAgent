@@ -221,20 +221,6 @@ public final class AppAgentInputBar: UIView {
 
     // MARK: - Layout Constants
 
-    /// 胶囊条默认高度。
-    public static let barHeight: CGFloat = 56
-
-    /// 完全收起宽度：8 + 40 + 8。
-    public static var collapsedMinWidth: CGFloat { innerPadding * 2 + buttonSize }
-
-    /// 最小展开宽度：8 + 40 + 8 + 80 + 8 + 40 + 8 + 40 + 8。
-    public static var minimumExpandedWidth: CGFloat {
-        innerPadding * 5 + buttonSize * 3 + minimumInputAreaWidth
-    }
-
-    private static let innerPadding: CGFloat = 8
-    private static let buttonSize: CGFloat = 40
-    private static let minimumInputAreaWidth: CGFloat = 80
     private static let symbolIconPointSize: CGFloat = 24
     private static let keyboardIconPointSize: CGFloat = 17
     /// 发送 / 停止的实心圆直径：比 `plus.circle` 画出来的圆（24pt）再大一圈——半径 +4pt，
@@ -242,7 +228,7 @@ public final class AppAgentInputBar: UIView {
     private static let trailingActionCircleSide: CGFloat = symbolIconPointSize + 8
     /// 圆比整格小，命中区就按这个值外扩回 40pt，点按手感和加号完全一致。
     private static var trailingActionHitOutset: CGFloat {
-        (buttonSize - trailingActionCircleSide) / 2
+        (AppAgentInputBarMetrics.buttonSize - trailingActionCircleSide) / 2
     }
     /// 上箭头 = 发送；实心方块 = 停止（配上蓝色圆底就是参考图里的「外圆内方」）。
     /// 点数按 32pt 圆的比例给：箭头约占一半，方块约三分之一。
@@ -252,14 +238,15 @@ public final class AppAgentInputBar: UIView {
     private static let stopIcon = systemSymbolImage(
         primary: "stop.fill", fallbacks: ["square.fill"], pointSize: 12, weight: .semibold
     )
-    /// 展开态 inputBar 背景圆角；ChatPanel 收至最小高度时复用该值以保持视觉对齐。
-    static let expandedCornerRadius: CGFloat = 16
     private static let inactiveTextInputPlaceholder = "发消息或按住说话..."
     private static let activeTextInputPlaceholder = "发消息..."
 
-    private static let normalZeroInputAreaWidth: CGFloat = innerPadding * 5 + buttonSize * 3
-    private static let compressedTextGapWidth: CGFloat = innerPadding * 4 + buttonSize * 3
-    private static let collapsedPlusVisibleWidth: CGFloat = innerPadding * 3 + buttonSize * 2
+    private static let normalZeroInputAreaWidth: CGFloat =
+        AppAgentInputBarMetrics.innerPadding * 5 + AppAgentInputBarMetrics.buttonSize * 3
+    private static let compressedTextGapWidth: CGFloat =
+        AppAgentInputBarMetrics.innerPadding * 4 + AppAgentInputBarMetrics.buttonSize * 3
+    private static let collapsedPlusVisibleWidth: CGFloat =
+        AppAgentInputBarMetrics.innerPadding * 3 + AppAgentInputBarMetrics.buttonSize * 2
 
     private static let panDirectionThreshold: CGFloat = 6
     private static let collapsedHoldPositionThreshold: CGFloat = 4
@@ -327,6 +314,14 @@ public final class AppAgentInputBar: UIView {
     public let plusButton = UIButton(type: .system)
     /// 右侧动作槽：与 plusButton 同一块矩形，按 `trailingAction` 显示发送或停止。
     public let trailingActionButton = UIButton(type: .custom)
+    /// 发送 / 停止的图标单独挂一层 image view，不用按钮自己的 image。
+    ///
+    /// 按钮自带图标会被 UIKit 在按下时整体调暗，而关掉这个行为的 `adjustsImageWhenHighlighted`
+    /// 从 iOS / Mac Catalyst 15 起已废弃（官方口径是改用 `UIButton.Configuration` +
+    /// `configurationUpdateHandler`）。这一格是自绘实心圆 + `layer` 背景色，交给 configuration
+    /// 等于把背景绘制权让给系统、再补一层 background configuration 还原外观，收益是负的。
+    /// 图标既然不属于按钮自身的渲染内容，highlight 就与它无关：不变暗，也不依赖废弃 API。
+    private let trailingActionIcon = UIImageView()
 
     private lazy var inputBarPan: UIPanGestureRecognizer = {
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handleInputBarPan(_:)))
@@ -397,7 +392,7 @@ public final class AppAgentInputBar: UIView {
     }
 
     public var isCollapsed: Bool {
-        bounds.width <= Self.collapsedMinWidth + 0.5
+        bounds.width <= AppAgentInputBarMetrics.collapsedMinWidth + 0.5
     }
 
     public func clearText() {
@@ -495,7 +490,7 @@ public final class AppAgentInputBar: UIView {
     }
 
     private func setup() {
-        layer.cornerRadius = Self.expandedCornerRadius
+        layer.cornerRadius = AppAgentInputBarMetrics.expandedCornerRadius
         layer.masksToBounds = false
         layer.shadowRadius = 8
         layer.shadowOffset = CGSize(width: 0, height: -2)
@@ -511,7 +506,11 @@ public final class AppAgentInputBar: UIView {
         // 点按范围靠 BOUIKit 外扩回整格 40pt（约定：命中区用 bo_，不手写 hitTest）。
         trailingActionButton.layer.cornerRadius = Self.trailingActionCircleSide / 2
         trailingActionButton.layer.masksToBounds = true
-        trailingActionButton.adjustsImageWhenHighlighted = false
+        // 图标居中铺满整圆：`contentMode = .center` 让符号按原始点数居中，不随圆的尺寸缩放；
+        // 关掉交互，点按事件照旧落在按钮本体上。
+        trailingActionIcon.contentMode = .center
+        trailingActionIcon.isUserInteractionEnabled = false
+        trailingActionButton.addSubview(trailingActionIcon)
         trailingActionButton.bo_hitAreaOutsets = UIEdgeInsets(
             top: Self.trailingActionHitOutset,
             left: Self.trailingActionHitOutset,
@@ -538,7 +537,6 @@ public final class AppAgentInputBar: UIView {
         voiceInputHoldButton.contentHorizontalAlignment = .center
         voiceInputHoldButton.layer.cornerRadius = inputAreaHeight / 2
         voiceInputHoldButton.layer.masksToBounds = true
-        voiceInputHoldButton.adjustsImageWhenHighlighted = false
         voiceInputHoldButton.accessibilityLabel = "按住说话"
         voiceInputHoldButton.addGestureRecognizer(voiceModePressGesture)
 
@@ -579,7 +577,7 @@ public final class AppAgentInputBar: UIView {
         plusButton.tintColor = AppAgentAppearance.icon
         inputSourceButton.tintColor = AppAgentAppearance.icon
         trailingActionButton.backgroundColor = AppAgentAppearance.actionButtonBackground
-        trailingActionButton.tintColor = AppAgentAppearance.actionButtonIcon
+        trailingActionIcon.tintColor = AppAgentAppearance.actionButtonIcon
         voiceInputHoldButton.setTitleColor(AppAgentAppearance.primaryText, for: .normal)
         setVoiceInputHolding(isHoldingVoiceInput)
         menuButton.setNeedsDisplay()
@@ -634,38 +632,41 @@ public final class AppAgentInputBar: UIView {
     }
 
     private func layoutContent(for size: CGSize) {
-        let width = max(size.width, Self.collapsedMinWidth)
-        let contentY = size.height >= Self.barHeight ? (size.height - Self.barHeight) / 2 : 0
-        let buttonY = contentY + (Self.barHeight - Self.buttonSize) / 2
-        let inputAreaY = contentY + (Self.barHeight - inputAreaHeight) / 2
+        let width = max(size.width, AppAgentInputBarMetrics.collapsedMinWidth)
+        let barHeight = AppAgentInputBarMetrics.barHeight
+        let innerPadding = AppAgentInputBarMetrics.innerPadding
+        let buttonSize = AppAgentInputBarMetrics.buttonSize
+        let contentY = size.height >= barHeight ? (size.height - barHeight) / 2 : 0
+        let buttonY = contentY + (barHeight - buttonSize) / 2
+        let inputAreaY = contentY + (barHeight - inputAreaHeight) / 2
 
-        let menuX = Self.innerPadding
+        let menuX = innerPadding
         let inputAreaX: CGFloat
         let inputAreaWidth: CGFloat
         let inputSourceX: CGFloat
         let plusX: CGFloat
 
         if width >= Self.normalZeroInputAreaWidth {
-            inputAreaX = menuX + Self.buttonSize + Self.innerPadding
+            inputAreaX = menuX + buttonSize + innerPadding
             inputAreaWidth = width - Self.normalZeroInputAreaWidth
-            plusX = width - Self.innerPadding - Self.buttonSize
-            inputSourceX = plusX - Self.innerPadding - Self.buttonSize
+            plusX = width - innerPadding - buttonSize
+            inputSourceX = plusX - innerPadding - buttonSize
         } else if width >= Self.compressedTextGapWidth {
             let compressedMenuTextGap = width - Self.compressedTextGapWidth
-            inputAreaX = menuX + Self.buttonSize + compressedMenuTextGap
+            inputAreaX = menuX + buttonSize + compressedMenuTextGap
             inputAreaWidth = 0
-            inputSourceX = inputAreaX + Self.innerPadding
-            plusX = inputSourceX + Self.buttonSize + Self.innerPadding
+            inputSourceX = inputAreaX + innerPadding
+            plusX = inputSourceX + buttonSize + innerPadding
         } else if width >= Self.collapsedPlusVisibleWidth {
-            inputAreaX = menuX + Self.buttonSize
+            inputAreaX = menuX + buttonSize
             inputAreaWidth = 0
-            inputSourceX = width - Self.buttonSize * 2 - Self.innerPadding * 2
-            plusX = width - Self.buttonSize - Self.innerPadding
+            inputSourceX = width - buttonSize * 2 - innerPadding * 2
+            plusX = width - buttonSize - innerPadding
         } else {
-            inputAreaX = menuX + Self.buttonSize
+            inputAreaX = menuX + buttonSize
             inputAreaWidth = 0
             inputSourceX = menuX
-            plusX = width - Self.buttonSize - Self.innerPadding
+            plusX = width - buttonSize - innerPadding
         }
 
         inputAreaContainer.frame = CGRect(
@@ -677,24 +678,24 @@ public final class AppAgentInputBar: UIView {
         textField.frame = CGRect(
             x: 0,
             y: 0,
-            width: max(inputAreaWidth, Self.minimumInputAreaWidth),
+            width: max(inputAreaWidth, AppAgentInputBarMetrics.minimumInputAreaWidth),
             height: inputAreaHeight
         )
         voiceInputHoldButton.frame = CGRect(
             x: 0,
             y: 0,
-            width: max(inputAreaWidth, Self.minimumInputAreaWidth),
+            width: max(inputAreaWidth, AppAgentInputBarMetrics.minimumInputAreaWidth),
             height: inputAreaHeight
         )
 
-        plusButton.frame = CGRect(x: plusX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
-        inputSourceButton.frame = CGRect(x: inputSourceX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
-        menuButton.frame = CGRect(x: menuX, y: buttonY, width: Self.buttonSize, height: Self.buttonSize)
+        plusButton.frame = CGRect(x: plusX, y: buttonY, width: buttonSize, height: buttonSize)
+        inputSourceButton.frame = CGRect(x: inputSourceX, y: buttonY, width: buttonSize, height: buttonSize)
+        menuButton.frame = CGRect(x: menuX, y: buttonY, width: buttonSize, height: buttonSize)
 
         // inputBar 小于最小展开宽度后，输入区会从 80pt 逐步压缩到 0；alpha 同步由 1 线性过渡到 0。
         inputAreaContainer.alpha = AppAgentGeometry.clamp(
             (width - Self.normalZeroInputAreaWidth)
-                / (Self.minimumExpandedWidth - Self.normalZeroInputAreaWidth),
+                / (AppAgentInputBarMetrics.minimumExpandedWidth - Self.normalZeroInputAreaWidth),
             0,
             1
         )
@@ -705,8 +706,8 @@ public final class AppAgentInputBar: UIView {
             1
         )
         plusButton.alpha = AppAgentGeometry.clamp(
-            (width - Self.collapsedMinWidth)
-                / (Self.collapsedPlusVisibleWidth - Self.collapsedMinWidth),
+            (width - AppAgentInputBarMetrics.collapsedMinWidth)
+                / (Self.collapsedPlusVisibleWidth - AppAgentInputBarMetrics.collapsedMinWidth),
             0,
             1
         )
@@ -725,16 +726,20 @@ public final class AppAgentInputBar: UIView {
             height: side
         )
         trailingActionButton.alpha = plusButton.alpha
+        // 图标跟着圆走：圆的 frame 每次都是重算的，图标直接贴满它，居中由 contentMode 负责。
+        trailingActionIcon.frame = trailingActionButton.bounds
     }
 
     private func updateCapsuleCornerRadius(for size: CGSize) {
-        let width = max(size.width, Self.collapsedMinWidth)
-        let expandedTravel = Self.minimumExpandedWidth - Self.collapsedMinWidth
-        let expandedProgress = AppAgentGeometry.clamp((width - Self.collapsedMinWidth) / expandedTravel, 0, 1)
+        let collapsedMinWidth = AppAgentInputBarMetrics.collapsedMinWidth
+        let expandedCornerRadius = AppAgentInputBarMetrics.expandedCornerRadius
+        let width = max(size.width, collapsedMinWidth)
+        let expandedTravel = AppAgentInputBarMetrics.minimumExpandedWidth - collapsedMinWidth
+        let expandedProgress = AppAgentGeometry.clamp((width - collapsedMinWidth) / expandedTravel, 0, 1)
         let cornerRadiusCollapseRatio = 1 - expandedProgress
         let collapsedRadius = min(width, size.height) / 2
-        let radius = Self.expandedCornerRadius
-            + (collapsedRadius - Self.expandedCornerRadius) * cornerRadiusCollapseRatio
+        let radius = expandedCornerRadius
+            + (collapsedRadius - expandedCornerRadius) * cornerRadiusCollapseRatio
 
         if abs(layer.cornerRadius - radius) > 0.25 {
             layer.cornerRadius = radius
@@ -773,10 +778,10 @@ public final class AppAgentInputBar: UIView {
         case .plus:
             break
         case .send:
-            trailingActionButton.setImage(Self.sendIcon, for: .normal)
+            trailingActionIcon.image = Self.sendIcon
             trailingActionButton.accessibilityLabel = "发送"
         case .stop:
-            trailingActionButton.setImage(Self.stopIcon, for: .normal)
+            trailingActionIcon.image = Self.stopIcon
             trailingActionButton.accessibilityLabel = "停止"
         }
 
@@ -1290,7 +1295,7 @@ public final class AppAgentInputBar: UIView {
 
     private func expandedResizeFrame(deltaX: CGFloat) -> CGRect {
         let rightEdge = inputBarPanAnchorFrame.maxX
-        let width = max(Self.collapsedMinWidth, inputBarPanAnchorFrame.width - deltaX)
+        let width = max(AppAgentInputBarMetrics.collapsedMinWidth, inputBarPanAnchorFrame.width - deltaX)
         return CGRect(
             x: rightEdge - width,
             y: inputBarPanAnchorFrame.minY,

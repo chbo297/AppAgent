@@ -628,7 +628,7 @@ final class AppAgentVoiceInputOverlayView: UIView {
 
     private func makeBottomPanelFrame() -> CGRect {
         let safeBottom = safeAreaInsets.bottom
-        let panelHeight = Self.bottomPanelTopRevealHeight + AppAgentInputBar.barHeight + safeBottom
+        let panelHeight = Self.bottomPanelTopRevealHeight + AppAgentInputBarMetrics.barHeight + safeBottom
         return CGRect(
             x: 0,
             y: max(0, bounds.height - panelHeight),

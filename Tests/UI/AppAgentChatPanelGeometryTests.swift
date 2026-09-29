@@ -143,14 +143,14 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         )
         XCTAssertEqual(
             geometry.peekHeight,
-            34 + AppAgentInputBar.barHeight + AppAgentChatPanelGeometry.dragHandleAreaHeight,
+            34 + AppAgentInputBarMetrics.barHeight + AppAgentChatPanelGeometry.dragHandleAreaHeight,
             accuracy: 0.5
         )
         XCTAssertEqual(
             geometry.halfHeight,
             geometry.maximumDisplayHeight * 0.5
                 + AppAgentChatPanelGeometry.dragHandleAreaHeight
-                + AppAgentChatPanelNavigationBar.height,
+                + AppAgentChatPanelMetrics.navigationBarHeight,
             accuracy: 0.5
         )
         XCTAssertEqual(geometry.halfHeight, 486.5, accuracy: 0.001)
@@ -452,8 +452,8 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         let restingGeometry = try XCTUnwrap(makeGeometry())
         let restingDisplayHeight = coordinator.dragScrollView.displayHeight
 
-        // 键盘顶起：宿主只把整个容器上移（inputBar 展开态跟着上移），面板几何与展示高度都不参与。
-        let liftedInputBarFrame = inputBarExpandedFrame.offsetBy(dx: 0, dy: -320)
+        // 键盘顶起：宿主只把整个容器上移（inputBar 展开态跟着上移），面板几何与展示高度都不参与
+        // —— 所以这里重新布局时 bounds / safeAreaInsets 一个字节都不改，键盘量根本没有入口。
         coordinator.updateLayout(
             bounds: bounds,
             safeAreaInsets: safeAreaInsets
@@ -514,7 +514,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             coordinator.panelView.listView.participantScrollView.bounds.height,
             geometry.halfHeight
                 - AppAgentChatPanelGeometry.dragHandleAreaHeight
-                - AppAgentChatPanelNavigationBar.height,
+                - AppAgentChatPanelMetrics.navigationBarHeight,
             accuracy: 0.5
         )
     }
@@ -544,7 +544,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             coordinator.panelView.listView.participantScrollView.bounds.height,
             geometry.halfHeight
                 - AppAgentChatPanelGeometry.dragHandleAreaHeight
-                - AppAgentChatPanelNavigationBar.height,
+                - AppAgentChatPanelMetrics.navigationBarHeight,
             accuracy: 0.5
         )
     }
@@ -568,11 +568,10 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         defer { testWindow?.isHidden = true }
         let fixedBottomInset = geometry.listBottomInset
         let fixedTopAreaHeight = AppAgentChatPanelGeometry.dragHandleAreaHeight
-            + AppAgentChatPanelNavigationBar.height
+            + AppAgentChatPanelMetrics.navigationBarHeight
 
         coordinator.dragScrollView.scrollViewWillBeginDragging(coordinator.dragScrollView)
         let updatedBounds = CGRect(x: 0, y: 0, width: 393, height: 900)
-        let updatedInputBarFrame = CGRect(x: 12, y: 810, width: 369, height: 56)
         let updatedGeometry = try XCTUnwrap(
             AppAgentChatPanelGeometry(
                 bounds: updatedBounds,
@@ -639,7 +638,6 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(coordinator.dragScrollView.displayHeight, liveHeight, accuracy: 0.5)
 
         let updatedBounds = CGRect(x: 0, y: 0, width: 393, height: 900)
-        let updatedInputBarFrame = CGRect(x: 12, y: 810, width: 369, height: 56)
         let updatedGeometry = try XCTUnwrap(
             AppAgentChatPanelGeometry(
                 bounds: updatedBounds,
@@ -778,10 +776,10 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
     func testChatPanelContainerLayoutCollapsedKeepsTwelvePointOutsetAndFullHeight() {
         let collapsedFrame = CGRect(
-            x: bounds.maxX - AppAgentInputBar.collapsedMinWidth - 12,
+            x: bounds.maxX - AppAgentInputBarMetrics.collapsedMinWidth - 12,
             y: 620,
-            width: AppAgentInputBar.collapsedMinWidth,
-            height: AppAgentInputBar.barHeight
+            width: AppAgentInputBarMetrics.collapsedMinWidth,
+            height: AppAgentInputBarMetrics.barHeight
         )
         let layout = AppAgentChatPanelContainerLayout(
             bounds: bounds,
@@ -806,7 +804,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     }
 
     func testChatPanelContainerLayoutFollowsIntermediateInputBarFrameExactly() {
-        let intermediateWidth = (inputBarExpandedFrame.width + AppAgentInputBar.collapsedMinWidth) / 2
+        let intermediateWidth = (inputBarExpandedFrame.width + AppAgentInputBarMetrics.collapsedMinWidth) / 2
         let intermediateFrame = CGRect(
             x: inputBarExpandedFrame.maxX - intermediateWidth,
             y: inputBarExpandedFrame.minY,
@@ -833,7 +831,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     }
 
     func testChatPanelAlphaUsesEaseOutDuringInteractiveCollapse() {
-        let collapseTravel = inputBarExpandedFrame.width - AppAgentInputBar.collapsedMinWidth
+        let collapseTravel = inputBarExpandedFrame.width - AppAgentInputBarMetrics.collapsedMinWidth
         let quarterCollapsedFrame = CGRect(
             x: inputBarExpandedFrame.minX + collapseTravel * 0.25,
             y: inputBarExpandedFrame.minY,
@@ -865,10 +863,10 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
     func testChatPanelContainerHasNoOuterMaskAndCollapsedStateIsInactive() {
         let collapsedFrame = CGRect(
-            x: bounds.maxX - AppAgentInputBar.collapsedMinWidth - 12,
+            x: bounds.maxX - AppAgentInputBarMetrics.collapsedMinWidth - 12,
             y: 620,
-            width: AppAgentInputBar.collapsedMinWidth,
-            height: AppAgentInputBar.barHeight
+            width: AppAgentInputBarMetrics.collapsedMinWidth,
+            height: AppAgentInputBarMetrics.barHeight
         )
         let layout = AppAgentChatPanelContainerLayout(
             bounds: bounds,
@@ -946,7 +944,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     func testContentLayoutAtTransitionStartUsesVisibleHeightAndFullContentCoordinates() {
         let panelBounds = CGRect(x: 0, y: 0, width: 393, height: 793)
         let minimumHeight = safeAreaInsets.bottom
-            + AppAgentInputBar.barHeight
+            + AppAgentInputBarMetrics.barHeight
             + AppAgentChatPanelGeometry.dragHandleAreaHeight
         let halfHeight = panelBounds.height * 0.5
         let layout = AppAgentChatPanelContentLayout(
@@ -972,7 +970,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     func testContentLayoutAboveTransitionTracksDisplayHeightNotPanelHeight() {
         let panelBounds = CGRect(x: 0, y: 0, width: 393, height: 793)
         let minimumHeight = safeAreaInsets.bottom
-            + AppAgentInputBar.barHeight
+            + AppAgentInputBarMetrics.barHeight
             + AppAgentChatPanelGeometry.dragHandleAreaHeight
         let halfHeight = panelBounds.height * 0.5
         let layout = AppAgentChatPanelContentLayout(
@@ -996,7 +994,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     func testContentLayoutAtPanelHeightUsesEntireContentArea() {
         let panelBounds = CGRect(x: 0, y: 0, width: 393, height: 793)
         let minimumHeight = safeAreaInsets.bottom
-            + AppAgentInputBar.barHeight
+            + AppAgentInputBarMetrics.barHeight
             + AppAgentChatPanelGeometry.dragHandleAreaHeight
         let layout = AppAgentChatPanelContentLayout(
             bounds: panelBounds,
@@ -1012,7 +1010,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     func testContentLayoutAtPeekMatchesInputBarAndDoesNotResizeActualContent() {
         let panelBounds = CGRect(x: 0, y: 0, width: 393, height: 793)
         let minimumHeight = safeAreaInsets.bottom
-            + AppAgentInputBar.barHeight
+            + AppAgentInputBarMetrics.barHeight
             + AppAgentChatPanelGeometry.dragHandleAreaHeight
         let halfHeight = panelBounds.height * 0.5
         let layout = AppAgentChatPanelContentLayout(
@@ -1028,15 +1026,15 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.contentFrame, CGRect(x: -12, y: 0, width: 393, height: 765))
         XCTAssertEqual(layout.navigationBarFrame, CGRect(x: -12, y: 0, width: 393, height: 48))
         XCTAssertEqual(layout.messageListFrame, CGRect(x: -12, y: 48, width: 393, height: 717))
-        XCTAssertEqual(layout.topCornerRadius, AppAgentInputBar.expandedCornerRadius, accuracy: 0.001)
-        XCTAssertEqual(layout.bottomCornerRadius, AppAgentInputBar.expandedCornerRadius, accuracy: 0.001)
+        XCTAssertEqual(layout.topCornerRadius, AppAgentInputBarMetrics.expandedCornerRadius, accuracy: 0.001)
+        XCTAssertEqual(layout.bottomCornerRadius, AppAgentInputBarMetrics.expandedCornerRadius, accuracy: 0.001)
         XCTAssertEqual(layout.compactProgress, 1, accuracy: 0.001)
     }
 
     func testContentLayoutInterpolatesBetweenHalfAndPeek() {
         let panelBounds = CGRect(x: 0, y: 0, width: 393, height: 793)
         let minimumHeight = safeAreaInsets.bottom
-            + AppAgentInputBar.barHeight
+            + AppAgentInputBarMetrics.barHeight
             + AppAgentChatPanelGeometry.dragHandleAreaHeight
         let halfHeight = panelBounds.height * 0.5
         let layout = AppAgentChatPanelContentLayout(
@@ -1076,7 +1074,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     func testPanelViewInstallsContentInsideClippedViewport() {
         let panelView = AppAgentChatPanelView(frame: CGRect(x: 0, y: 0, width: 393, height: 793))
         let minimumHeight = safeAreaInsets.bottom
-            + AppAgentInputBar.barHeight
+            + AppAgentInputBarMetrics.barHeight
             + AppAgentChatPanelGeometry.dragHandleAreaHeight
         let halfHeight = panelView.bounds.height * 0.5
 
@@ -1097,7 +1095,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertTrue(panelView.viewportView.clipsToBounds)
         XCTAssertEqual(
             panelView.viewportView.layer.cornerRadius,
-            AppAgentInputBar.expandedCornerRadius,
+            AppAgentInputBarMetrics.expandedCornerRadius,
             accuracy: 0.001
         )
         XCTAssertEqual(panelView.viewportView.frame, CGRect(x: 12, y: 0, width: 369, height: 56))

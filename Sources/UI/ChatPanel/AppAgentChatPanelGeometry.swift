@@ -71,14 +71,14 @@ struct AppAgentChatPanelGeometry: Equatable {
 
         let listBottomInset = min(
             maximumDisplayHeight,
-            max(0, safeAreaInsets.bottom + AppAgentInputBar.barHeight)
+            max(0, safeAreaInsets.bottom + AppAgentInputBarMetrics.barHeight)
         )
         let peekHeight = min(
             maximumDisplayHeight,
             max(0, listBottomInset + Self.dragHandleAreaHeight)
         )
         // 在原 half 高度上补足顶部手柄区与标题栏占用的空间，不改变 peek/full。
-        let fixedTopAreaHeight = Self.dragHandleAreaHeight + AppAgentChatPanelNavigationBar.height
+        let fixedTopAreaHeight = Self.dragHandleAreaHeight + AppAgentChatPanelMetrics.navigationBarHeight
         let halfHeight = min(
             maximumDisplayHeight,
             max(peekHeight, maximumDisplayHeight * 0.5) + fixedTopAreaHeight
@@ -250,7 +250,7 @@ struct AppAgentChatPanelContentLayout: Equatable {
             x: compactInset,
             y: 0,
             width: max(0, contentAreaFrame.width - compactInset * 2),
-            height: min(AppAgentInputBar.barHeight, contentAreaFrame.height)
+            height: min(AppAgentInputBarMetrics.barHeight, contentAreaFrame.height)
         )
 
         let isInsideCompactTransition = normalizedDisplayHeight <= transitionStart
@@ -272,7 +272,7 @@ struct AppAgentChatPanelContentLayout: Equatable {
             height: contentAreaFrame.height
         )
         let navigationBarHeight = min(
-            AppAgentChatPanelNavigationBar.height,
+            AppAgentChatPanelMetrics.navigationBarHeight,
             contentFrame.height
         )
         navigationBarFrame = CGRect(
@@ -290,7 +290,7 @@ struct AppAgentChatPanelContentLayout: Equatable {
 
         let maximumRadius = max(0, min(presentationFrame.width, presentationFrame.height) / 2)
         let expandedCornerRadius = AppAgentChatPanelGeometry.topCornerRadius
-        let compactCornerRadius = AppAgentInputBar.expandedCornerRadius
+        let compactCornerRadius = AppAgentInputBarMetrics.expandedCornerRadius
         topCornerRadius = min(
             maximumRadius,
             Self.interpolate(

@@ -81,11 +81,27 @@ public final class Locked<Value: Sendable>: @unchecked Sendable {
 /// Supports both concrete class types and class-bound protocol existentials
 /// (e.g., `any AIAgentDelegate` where `AIAgentDelegate: AnyObject`).
 ///
+/// 边界（写清楚以免又变成「靠调用方自觉」）：
+/// - `Value: Sendable` 是硬约束，所以取出来的引用可以跨隔离域用 —— 这一点和
+///   `Locked` / `TrackedLocked` 对齐，不再是「盒子安全、内容随缘」。
+/// - **不能**再加 `Value: AnyObject`：`AIAgent.delegate` 存的是 `any AIAgentDelegate`
+///   这种类约束协议的存在类型，而存在类型不满足 `AnyObject` 泛型约束
+///   （编译器原话：`requires that 'any AIAgentDelegate' be a class type`）。
+///   因此「Value 必须是引用类型」仍然是调用方的责任：塞进值类型的话，
+///   `as AnyObject?` 会把它桥成临时对象，弱引用下一刻就空。
+/// - 盒子只保证**引用读写本身**是原子的；被引用对象内部状态的线程安全由那个类型自己负责。
+///
+/// 当前使用点（都满足上面两条）：
+/// - `AISessionManager.agent` / `AIAgentMask._agent`：`AIAgent`（class，`@unchecked Sendable`）。
+/// - `AIAgent.delegate`：`any AIAgentDelegate`，协议声明为 `AnyObject, Sendable`。
+/// - 测试里的 `WeakLocked<UIView>` / `WeakLocked<AISession>`：只取元类型做身份判定，
+///   两者都是 class（`UIView` 因为 `@MainActor` 隔离而隐式 Sendable）。
+///
 /// Usage:
 ///     @WeakLocked
 ///     public private(set) var agent: AIAgent?
 @propertyWrapper
-public final class WeakLocked<Value>: @unchecked Sendable {
+public final class WeakLocked<Value: Sendable>: @unchecked Sendable {
     private let _lock = UnfairLock()
     private weak var _ref: AnyObject?
 

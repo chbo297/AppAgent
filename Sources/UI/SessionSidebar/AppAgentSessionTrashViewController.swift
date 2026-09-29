@@ -30,13 +30,11 @@ final class AppAgentSessionTrashViewController: UIViewController, AppAgentRuntim
             super.init()
         }
 
+        /// 用户自己把菜单关掉（下滑关 sheet、iPad 上点 popover 外面）时没有任何 action handler
+        /// 会被调用，这里是 VC 唯一能知道「菜单没了」的入口 —— 不消费 token，表格和右上角按钮
+        /// 就一直停在不可交互状态。iOS 13 起两种关闭方式都走这一条，
+        /// 旧的 `popoverPresentationControllerDidDismissPopover` 已废弃且行为完全重合，故不再实现。
         func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
-            _ = owner?.consumeActionSheet(token)
-        }
-
-        func popoverPresentationControllerDidDismissPopover(
-            _ popoverPresentationController: UIPopoverPresentationController
-        ) {
             _ = owner?.consumeActionSheet(token)
         }
     }

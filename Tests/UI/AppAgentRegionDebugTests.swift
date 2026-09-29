@@ -213,7 +213,7 @@ final class AppAgentRegionDebugTests: XCTestCase {
     /// 点击 / 上滑的输入命中区要纵向撑满整条 bar 的白色背景。
     func testExtendedInputAreaSpansFullBarHeight() {
         let bar = AppAgentInputBar()
-        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBar.barHeight)
+        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBarMetrics.barHeight)
         bar.layoutIfNeeded()
 
         let extended = bar.extendedInputAreaHitRect
@@ -232,7 +232,7 @@ final class AppAgentRegionDebugTests: XCTestCase {
     /// 但左侧 menuButton 的命中不能被抢走。
     func testTapAboveInputCapsuleRedirectsIntoInputArea() {
         let bar = AppAgentInputBar()
-        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBar.barHeight)
+        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBarMetrics.barHeight)
         bar.layoutIfNeeded()
 
         let extended = bar.extendedInputAreaHitRect
@@ -254,7 +254,7 @@ final class AppAgentRegionDebugTests: XCTestCase {
 
     func testExtendedRectIsUsedForOutline() {
         let bar = AppAgentInputBar()
-        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBar.barHeight)
+        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBarMetrics.barHeight)
         bar.layoutIfNeeded()
         let container = UIView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         container.addSubview(bar)
@@ -274,7 +274,7 @@ final class AppAgentRegionDebugTests: XCTestCase {
     /// 「上滑触发键盘」的起始区域判定必须和「点击输入」用同一块矩形。
     func testKeyboardSwipeRegionMatchesInputTapRegion() {
         let bar = AppAgentInputBar()
-        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBar.barHeight)
+        bar.frame = CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBarMetrics.barHeight)
         bar.layoutIfNeeded()
 
         let hit = bar.extendedInputAreaHitRect
