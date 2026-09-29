@@ -87,6 +87,14 @@ final class AppAgentVoiceInputCoordinatorTests: XCTestCase {
         let provider: FakeRecognitionProvider
         let feedback: FeedbackRecorder
         let delegate: DelegateRecorder
+        /// 假时钟：测试自己推进，判定「松手太快」不依赖真实耗时。
+        let clock: Clock
+    }
+
+    /// 可推进的假时钟。
+    private final class Clock {
+        var now: TimeInterval = 0
+        func advance(_ seconds: TimeInterval) { now += seconds }
     }
 
     private func makeHarness(
@@ -96,14 +104,22 @@ final class AppAgentVoiceInputCoordinatorTests: XCTestCase {
         let provider = FakeRecognitionProvider()
         let feedback = FeedbackRecorder()
         let delegate = DelegateRecorder()
+        let clock = Clock()
         let coordinator = AppAgentVoiceInputCoordinator(
             recognitionManager: provider,
             feedback: feedback,
-            timings: timings
+            timings: timings,
+            now: { clock.now }
         )
         coordinator.delegate = delegate
         coordinator.releaseActionResolver = resolver
-        return Harness(coordinator: coordinator, provider: provider, feedback: feedback, delegate: delegate)
+        return Harness(
+            coordinator: coordinator,
+            provider: provider,
+            feedback: feedback,
+            delegate: delegate,
+            clock: clock
+        )
     }
 
     /// 让识别事件流的消费 Task 有机会跑完（AsyncStream 在 MainActor 上异步投递）。
@@ -198,10 +214,40 @@ final class AppAgentVoiceInputCoordinatorTests: XCTestCase {
     func testFinishRequestUsesConfiguredTimings() {
         let harness = makeHarness(timings: AppAgentVoiceInputTimings(trailingCapture: 0.3, finalizationTimeout: 1.2, prewarmWatchdog: 1.5))
         harness.coordinator.begin(source: .voiceModePress, location: .zero)
+        harness.clock.advance(0.5)
         harness.coordinator.end(at: .zero)
 
         XCTAssertEqual(harness.provider.finishRequests.first?.trailingCapture, 0.3)
         XCTAssertEqual(harness.provider.finishRequests.first?.finalizationTimeout, 1.2)
+    }
+
+    /// 面板亮起不足 0.3s 就松手 = 误触：立刻取消关面板，不多录尾音、不等最终结果、不发送。
+    func testTooShortPressIsDiscardedWithoutTrailingCapture() {
+        let harness = makeHarness(timings: .standard)
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
+        harness.coordinator.updateTranscript("误触")
+        harness.clock.advance(0.2)
+        harness.coordinator.end(at: .zero)
+
+        XCTAssertFalse(harness.coordinator.isActive)
+        XCTAssertTrue(harness.provider.finishRequests.isEmpty, "误触不走优雅收尾，也就没有 0.3s 尾音")
+        if case .cancelled = harness.provider.stopReasons.first {} else {
+            XCTFail("误触应以 cancelled 停止识别")
+        }
+        XCTAssertEqual(harness.delegate.events.last, "finish")
+        XCTAssertFalse(harness.delegate.events.contains { $0.hasPrefix("send") })
+        XCTAssertFalse(harness.delegate.events.contains { $0.hasPrefix("edit") })
+    }
+
+    /// 刚过 0.3s 就是有效输入：照常进收尾、照常发送。
+    func testPressJustOverMinimumStillFinalizes() {
+        let harness = makeHarness(timings: .standard)
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
+        harness.clock.advance(0.31)
+        harness.coordinator.end(at: .zero)
+
+        XCTAssertEqual(harness.provider.finishRequests.count, 1)
+        XCTAssertEqual(harness.provider.finishRequests.first?.trailingCapture, 0.3)
     }
 
     func testMoveIgnoredWhileFinalizing() {

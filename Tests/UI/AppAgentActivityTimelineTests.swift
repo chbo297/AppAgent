@@ -4,6 +4,10 @@ import UIKit
 @testable import AppAgent
 
 /// 过程时间线的折叠/摘要逻辑，以及 cell / 列表的展开切换。
+///
+/// `@MainActor`：用例直接驱动 `ChatMessageCell` / `AppAgentActivityView`，
+/// UIKit 本来就只能在主线程摆；标上之后传 `ChatMessage` / timeline 也不再跨隔离域。
+@MainActor
 final class AppAgentActivityTimelineTests: XCTestCase {
 
     func testConsecutiveThinkingMergesIntoOneStep() {
@@ -455,14 +459,33 @@ final class AppAgentActivityTimelineTests: XCTestCase {
         let item = AppAgentActivityItem(id: "1", kind: .tool, title: "file_read", state: .done)
         XCTAssertEqual(AppAgentActivityTranscript.heading(for: item), "• 已调用 file_read")
         let text = "第一行\n第二行\n第三行\n第四行\n" + String(repeating: "说明🙂", count: 300) + "错误尾部"
-        let preview = AppAgentActivityTranscript.detail(text, expanded: false)
-        XCTAssertFalse(preview.contains("第一行"))
-        XCTAssertTrue(preview.contains("└ 第三行"))
-        XCTAssertTrue(preview.contains("…"))
-        let full = AppAgentActivityTranscript.detail(text, expanded: true)
+        let full = AppAgentActivityTranscript.detail(text)
         XCTAssertTrue(full.contains("└ 第一行"))
+        XCTAssertTrue(full.contains("    第三行"))
         XCTAssertTrue(full.hasSuffix("错误尾部"))
         XCTAssertGreaterThan(full.count, 600)
+    }
+
+    /// 运行中点收起必须只剩标题行：标题已经在说「思考中…」，
+    /// 底下再渲染一条「• 思考」预览就是同一条明细出现两遍。
+    @MainActor
+    func testCollapsingWhileRunningLeavesOnlyHeaderRow() {
+        var timeline = AppAgentActivityTimeline()
+        timeline.setStage(.streaming)
+        timeline.appendThinking("先看清楚这段代码在干什么")
+        XCTAssertEqual(timeline.headerTitle(), "思考中…")
+
+        let view = AppAgentActivityView()
+        view.configure(with: timeline, expanded: false)
+        XCTAssertTrue(Self.hasVisibleLabel(in: view, text: "思考中…"))
+        XCTAssertFalse(Self.hasVisibleText(in: view, containing: "• 思考"),
+                       "收起后不许再出现第二个「思考」块")
+        XCTAssertFalse(Self.hasVisibleText(in: view, containing: "先看清楚这段代码在干什么"))
+        XCTAssertTrue(view.detailScrollView.isHidden, "收起时整块明细区域都不占位")
+
+        view.configure(with: timeline, expanded: true)
+        XCTAssertTrue(Self.hasVisibleText(in: view, containing: "先看清楚这段代码在干什么"),
+                      "展开仍给全文")
     }
 
     @MainActor
@@ -527,7 +550,7 @@ final class AppAgentActivityTimelineTests: XCTestCase {
         view.configure(with: timeline, expanded: true)
         XCTAssertTrue(Self.hasVisibleText(
             in: view,
-            containing: AppAgentActivityTranscript.detail("失败：" + error, expanded: true)
+            containing: AppAgentActivityTranscript.detail("失败：" + error)
         ))
     }
 

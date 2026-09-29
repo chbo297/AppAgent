@@ -113,13 +113,34 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
 
     // MARK: - JS 执行
 
+    /// JS 求值的结果只有两种下场：一段要给模型看的文本，或者一条失败说明。
+    /// **`Any` 不许跨过 continuation** —— `Result<Any, Error>` 不是 Sendable，
+    /// Swift 6 的 region isolation 会直接拦住；而 WKWebView 的回调本来就在主线程，
+    /// 在回调里就地压成字符串既合规又少一层类型。
+    private enum JSOutcome: Sendable {
+        case value(String)
+        case failure(String)
+    }
+
     @MainActor
-    private func evaluate(_ js: String, on webView: WKWebView, pageWorld: Bool) async -> Result<Any, Error> {
+    private func evaluate(_ js: String, on webView: WKWebView, pageWorld: Bool) async -> JSOutcome {
         let world = pageWorld ? WKContentWorld.page : WKContentWorld.world(name: Self.worldName)
         return await withCheckedContinuation { continuation in
             webView.evaluateJavaScript(js, in: nil, in: world) { result in
-                continuation.resume(returning: result)
+                continuation.resume(returning: Self.outcome(of: result))
             }
+        }
+    }
+
+    /// 字符串原样、NSNull 记成 `(null)`、其余交给 `String(describing:)`。
+    private static func outcome(of result: Result<Any, any Error>) -> JSOutcome {
+        switch result {
+        case .success(let value):
+            if let text = value as? String { return .value(text) }
+            if value is NSNull { return .value("(null)") }
+            return .value(String(describing: value))
+        case .failure(let error):
+            return .failure(error.localizedDescription)
         }
     }
 
@@ -135,18 +156,11 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
             }
             return "(no web view found on screen)"
         }
-        let result = await evaluate(makeScript(view), on: view, pageWorld: pageWorld)
-        switch result {
-        case .success(let value):
-            if let text = value as? String {
-                return text
-            }
-            if value is NSNull {
-                return "(null)"
-            }
-            return String(describing: value)
-        case .failure(let error):
-            return "JS error: \(error.localizedDescription)"
+        switch await evaluate(makeScript(view), on: view, pageWorld: pageWorld) {
+        case .value(let text):
+            return text
+        case .failure(let message):
+            return "JS error: \(message)"
         }
     }
 
@@ -260,13 +274,12 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
             Self.installedScripts.insert(id)
         }
         // 当前已经加载完的页面不会再跑 documentStart 脚本，所以立刻在页面 world 里补装一次。
-        let result = await evaluate(Self.consoleProbeJS, on: view, pageWorld: true)
-        switch result {
-        case .success:
+        switch await evaluate(Self.consoleProbeJS, on: view, pageWorld: true) {
+        case .value:
             return "OK. console capture armed for \(id). Only logs produced from now on are captured; "
                 + "reproduce the problem, then call op='console_read'."
-        case .failure(let error):
-            return "Failed to arm console capture for \(id): \(error.localizedDescription)"
+        case .failure(let message):
+            return "Failed to arm console capture for \(id): \(message)"
         }
     }
 

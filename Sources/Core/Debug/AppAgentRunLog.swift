@@ -15,15 +15,12 @@ public final class AppAgentRunLog: @unchecked Sendable {
 
     public static let shared = AppAgentRunLog()
 
-    /// 单个文件上限，超过就换下一个。
-    public var maxFileBytes: Int = 2 * 1024 * 1024
-    /// 保留的文件个数（含当前正在写的那个）。
-    public var maxFiles: Int = 3
-
     private let queue = DispatchQueue(label: "com.appagent.runlog", qos: .utility)
     private let lock = ReadersWriterLock()
     private var _directory: URL
     private var _isInstalled = false
+    private var _maxFileBytes: Int = 2 * 1024 * 1024
+    private var _maxFiles: Int = 3
 
     /// 以下三个只在 `queue` 上访问。
     private var handle: FileHandle?
@@ -41,6 +38,22 @@ public final class AppAgentRunLog: @unchecked Sendable {
     }
 
     public var isInstalled: Bool { lock.read { _isInstalled } }
+
+    /// 单个文件上限，超过就换下一个。
+    ///
+    /// 和 `directory` 一样走锁：宿主在主线程设，滚动判定在 `queue` 上读。这个类是
+    /// `@unchecked Sendable`，裸 `public var` 等于对外宣称了一个自己没有的线程安全
+    /// —— 同类里其余可变状态要么走 `lock`，要么只在 `queue` 上访问，这两个不该例外。
+    public var maxFileBytes: Int {
+        get { lock.read { _maxFileBytes } }
+        set { lock.writeSync { _maxFileBytes = max(1, newValue) } }
+    }
+
+    /// 保留的文件个数（含当前正在写的那个）。
+    public var maxFiles: Int {
+        get { lock.read { _maxFiles } }
+        set { lock.writeSync { _maxFiles = max(1, newValue) } }
+    }
 
     private static func defaultDirectory() -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
@@ -97,6 +110,7 @@ public final class AppAgentRunLog: @unchecked Sendable {
 
     private func writeSync(_ line: String, directory dir: URL) {
         guard let data = (line + "\n").data(using: .utf8) else { return }
+        // 上限只读一次：同一次判定里前后两次读有可能撞上宿主改配置，读出两个值。
         if handle == nil || writtenBytes + data.count > maxFileBytes {
             rotate(directory: dir)
         }
@@ -130,8 +144,9 @@ public final class AppAgentRunLog: @unchecked Sendable {
 
     private func prune(directory dir: URL) {
         let all = AppAgentRunLog.logFiles(in: dir)
-        guard all.count > maxFiles else { return }
-        for url in all.prefix(all.count - maxFiles) where url != currentURL {
+        let keep = maxFiles
+        guard all.count > keep else { return }
+        for url in all.prefix(all.count - keep) where url != currentURL {
             try? FileManager.default.removeItem(at: url)
         }
     }

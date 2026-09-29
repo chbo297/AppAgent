@@ -39,20 +39,66 @@ public enum AppAgentLogLevel: Int, Comparable, Sendable {
 /// ```
 public enum Logger {
 
+    /// 进程级日志配置。
+    ///
+    /// 这四项是真正的跨线程共享可变状态：宿主在启动时写，`log` 在任何线程读。Swift 6 下裸
+    /// `static var` 直接是错误（`#MutableGlobalVariable`），而且原来的写法确实没有任何保护。
+    /// 统一收进一把锁，并且**一次取一份快照**——`log` 原来要分别读 4 个字段，既是 4 次加锁，
+    /// 也可能读到宿主改了一半的配置（比如换 handler 的同时关掉开关）。
+    private final class Configuration: @unchecked Sendable {
+        struct Snapshot {
+            var isEnabled: Bool
+            var minimumLevel: AppAgentLogLevel
+            var handler: (@Sendable (AppAgentLogLevel, String) -> Void)?
+            var redactSensitive: Bool
+        }
+
+        private let lock = UnfairLock()
+        private var value = Snapshot(
+            isEnabled: false,
+            minimumLevel: .debug,
+            handler: nil,
+            redactSensitive: true
+        )
+
+        var snapshot: Snapshot { lock.withLock { value } }
+
+        func mutate(_ body: (inout Snapshot) -> Void) {
+            lock.withLock { body(&value) }
+        }
+    }
+
+    private static let configuration = Configuration()
+
     /// Master switch. When false, no log statements execute. Default: false.
-    public static var isEnabled: Bool = false
+    public static var isEnabled: Bool {
+        get { configuration.snapshot.isEnabled }
+        set { configuration.mutate { $0.isEnabled = newValue } }
+    }
 
     /// Minimum log level. Messages below this level are suppressed. Default: .debug.
-    public static var minimumLevel: AppAgentLogLevel = .debug
+    public static var minimumLevel: AppAgentLogLevel {
+        get { configuration.snapshot.minimumLevel }
+        set { configuration.mutate { $0.minimumLevel = newValue } }
+    }
 
     /// Optional custom log handler. When set, replaces the default `print` output.
     /// The closure receives the log level and the fully-formatted message string
     /// (already including the `[AppAgent]` prefix).
-    public static var handler: ((AppAgentLogLevel, String) -> Void)?
+    ///
+    /// 必须是 `@Sendable`：它会在任何产生日志的线程上被调用，这一点本来就成立，现在只是让类型
+    /// 把它说出来。
+    public static var handler: (@Sendable (AppAgentLogLevel, String) -> Void)? {
+        get { configuration.snapshot.handler }
+        set { configuration.mutate { $0.handler = newValue } }
+    }
 
     /// Whether to redact sensitive information (API keys, tokens, etc.) from log output.
     /// Default: true.
-    public static var redactSensitive: Bool = true
+    public static var redactSensitive: Bool {
+        get { configuration.snapshot.redactSensitive }
+        set { configuration.mutate { $0.redactSensitive = newValue } }
+    }
 
     /// Log a message.
     ///
@@ -65,10 +111,12 @@ public enum Logger {
         subsystem: String,
         _ message: @autoclosure () -> String
     ) {
-        guard isEnabled, level >= minimumLevel else { return }
+        // 一次快照：整行日志用同一份配置，不会出现「按旧开关放行、按新 handler 投递」。
+        let config = configuration.snapshot
+        guard config.isEnabled, level >= config.minimumLevel else { return }
         let raw = "[AppAgent] [\(level.label)] [\(subsystem)] \(message())"
-        let formatted = redactSensitive ? redact(raw) : raw
-        if let handler = handler {
+        let formatted = config.redactSensitive ? redact(raw) : raw
+        if let handler = config.handler {
             handler(level, formatted)
         } else {
             print(formatted)

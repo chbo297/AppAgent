@@ -16,6 +16,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
     public let requestTimeout: TimeInterval
     public let defaultRequestMaxTokens: Int
     private let concurrencyLimiter: ConcurrencyLimiter
+    private let session: URLSession
 
     /// Anthropic API version, managed internally.
     private let apiVersion = "2023-06-01"
@@ -40,6 +41,24 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         self.requestTimeout = requestTimeout
         self.defaultRequestMaxTokens = defaultRequestMaxTokens
         self.concurrencyLimiter = ConcurrencyLimiter(limit: maxConcurrency)
+        self.session = Self.makeSession(requestTimeout: requestTimeout)
+    }
+
+    /// 每个 provider 自己一条 session，不用 `URLSession.shared`。
+    ///
+    /// 关键是 `shouldUseExtendedBackgroundIdleMode`：它只能在 configuration 上开，
+    /// 作用是请求系统在 App 进入后台时**尽量保住已建立的 TCP 连接**。这是「切后台再回来」
+    /// 这条路径上唯一能提高连接存活率的开关，`.shared` 拿不到。
+    /// 连接活下来最好，没活下来也不再表现为无限期卡住 —— 由 `StreamIdleGuard` 判死重试。
+    ///
+    /// `timeoutIntervalForRequest` 与 `buildRequest` 里的 `request.timeoutInterval` 是同一个
+    /// 语义（两次无数据之间的上限），两处都写是因为 `URLRequest` 自带 60s 默认值、不写就会
+    /// 悄悄盖掉配置；两处取同一个 `requestTimeout`，不许各写一个数。
+    private static func makeSession(requestTimeout: TimeInterval) -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.shouldUseExtendedBackgroundIdleMode = true
+        configuration.timeoutIntervalForRequest = requestTimeout
+        return URLSession(configuration: configuration)
     }
 
     /// Stream a completion from the model.
@@ -58,23 +77,24 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
     ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
-                await self.concurrencyLimiter.wait()
                 do {
-                    guard let spec = self.modelSpec(for: modelId) else {
-                        throw ModelError.providerError("Model '\(modelId)' not found in provider '\(self.name)'")
-                    }
-                    try Task.checkCancellation()
-                    let requestMaxTokens = min(spec.maxTokens, self.defaultRequestMaxTokens)
-                    let request = try self.buildRequest(messages: messages, system: system, tools: tools, modelId: modelId, maxTokens: requestMaxTokens)
-                    Logger.info("Anthropic", "streamCompletion: starting, model=\(modelId)")
+                    // 额度的取与放由 withPermit 配对，提前 return / 抛错都不会漏还。
+                    try await self.concurrencyLimiter.withPermit {
+                        guard let spec = self.modelSpec(for: modelId) else {
+                            throw ModelError.providerError("Model '\(modelId)' not found in provider '\(self.name)'")
+                        }
+                        try Task.checkCancellation()
+                        let requestMaxTokens = min(spec.maxTokens, self.defaultRequestMaxTokens)
+                        let request = try self.buildRequest(messages: messages, system: system, tools: tools, modelId: modelId, maxTokens: requestMaxTokens)
+                        Logger.info("Anthropic", "streamCompletion: starting, model=\(modelId)")
 
-                    // 最低支持 iOS 15 / macOS 12，`URLSession.bytes` 一定可用——
-                    // 原来的 iOS 13/14 delegate 降级路径已随最低版本上调删除。
-                    try await self.streamWithBytes(request: request, continuation: continuation)
+                        // 最低支持 iOS 15 / macOS 12，`URLSession.bytes` 一定可用——
+                        // 原来的 iOS 13/14 delegate 降级路径已随最低版本上调删除。
+                        try await self.streamWithBytes(request: request, continuation: continuation)
+                    }
                 } catch {
                     continuation.finish(throwing: error)
                 }
-                await self.concurrencyLimiter.signal()
             }
             continuation.onTermination = { @Sendable _ in
                 task.cancel()
@@ -88,7 +108,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         request: URLRequest,
         continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
     ) async throws {
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             continuation.finish(throwing: ModelError.invalidResponse)
             return

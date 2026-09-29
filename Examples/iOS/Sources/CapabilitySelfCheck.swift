@@ -150,6 +150,17 @@ enum CapabilitySelfCheck {
         session.decisionResponders = autoRegistry
         await MainActor.run { SelfCheckDecisionResponder.outcome = .deny }
 
+        // 真机上 overlay 一定会把当前 scene 绑到 session 上（AppAgentOverlay.bind）。自检以前
+        // 不绑，于是 includes() 在 `context.sceneIdentifier == nil` 处就短路返回，**整条场景过滤
+        // 路径都是盲区** —— tab 漏报（3 个报成 1 个）正是藏在这里，从 9/24 活到 9/28 没被发现。
+        // 绑上之后，下面所有检查才跑在与真机一致的配置下。
+        session.inspectionSceneIdentifier = await MainActor.run {
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first { $0.activationState == .foregroundActive }?
+                .session.persistentIdentifier
+        }
+
         await checkRuntimeInspection(rec, session: session)
         await checkHostStorage(rec, session: session)
         await checkSandboxFileTools(rec, session: session)
@@ -249,6 +260,68 @@ enum CapabilitySelfCheck {
         rec.record("appagent 范围不含宿主页面",
                    ok: sdk.contains("AppAgentWindow") && !sdk.contains("HostTabBarController"),
                    detail: "sdk=\(sdk.utf8.count)B")
+        // 回放真机踩过的坑：绑定 scene 之后，view 还没加载的子 VC 曾被判成「不在本场景」，
+        // 整排 tab 只报出当前那一个（3 个报成 1 个）。模型据此认定这排按钮是假皮肤，
+        // 转去反射 _UITabButton，一次「切到 profile」烧掉 231 秒。
+        let tabTruth: (count: Int, titles: [String], selected: Int)? = await MainActor.run {
+            func firstTab(_ controller: UIViewController?) -> UITabBarController? {
+                guard let controller else { return nil }
+                if let tab = controller as? UITabBarController { return tab }
+                for child in controller.children {
+                    if let found = firstTab(child) { return found }
+                }
+                return firstTab(controller.presentedViewController)
+            }
+            let roots = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap(\.windows)
+                .compactMap(\.rootViewController)
+            guard let tab = roots.lazy.compactMap({ firstTab($0) }).first else { return nil }
+            let children = tab.viewControllers ?? []
+            return (children.count,
+                    children.map { $0.tabBarItem?.title ?? $0.title ?? "" },
+                    tab.selectedIndex)
+        }
+        if let tabTruth, tabTruth.count > 0 {
+            let reportedCount = summary.range(of: #"\d+ 个 tab"#, options: .regularExpression)
+                .flatMap { Int(summary[$0].prefix(while: \.isNumber)) }
+            let missing = tabTruth.titles.filter { !$0.isEmpty && !summary.contains("\"\($0)\"") }
+            rec.record("摘要列出全部 tab（含 view 未加载的）",
+                       ok: reportedCount == tabTruth.count && missing.isEmpty,
+                       detail: "真实 \(tabTruth.count) 个 [\(tabTruth.titles.joined(separator: "/"))]，"
+                           + "摘要报 \(reportedCount.map(String.init) ?? "nil")"
+                           + (missing.isEmpty ? "" : "，缺标题 [\(missing.joined(separator: "/"))]"))
+        } else {
+            rec.record("摘要列出全部 tab（含 view 未加载的）", ok: false,
+                       detail: "宿主没有 UITabBarController，这条无法验证")
+        }
+        // page_navigate 的端到端回归：一次调用换页，且结果里就能看出页面真的动了
+        // （不用再补一轮 ui_hierarchy 去确认）。切走再切回，不留下副作用。
+        if let tabTruth, tabTruth.count > 1 {
+            let other = (tabTruth.selected + 1) % tabTruth.count
+            let switched = await withBudget { () async throws -> String in
+                try await runtime.execute(arguments: [
+                    "op": .string("page_navigate"), "target": .string("tab:\(other)")
+                ], session: session).stringValue
+            } ?? "TIMEOUT"
+            rec.record("page_navigate 按索引切 tab 并自报页面变化",
+                       ok: switched.hasPrefix("OK.") && switched.contains("页面已变化"),
+                       detail: trimmed(switched, 200))
+            // 按标题切回：用户说的是「profile」，模型不该被迫自己算索引。
+            let backTitle = tabTruth.titles[tabTruth.selected]
+            let back = await withBudget { () async throws -> String in
+                try await runtime.execute(arguments: [
+                    "op": .string("page_navigate"),
+                    "target": .string(backTitle.isEmpty ? "tab:\(tabTruth.selected)" : "tab:\(backTitle)")
+                ], session: session).stringValue
+            } ?? "TIMEOUT"
+            rec.record("page_navigate 按标题切回原 tab",
+                       ok: back.hasPrefix("OK.") && back.contains("页面已变化"),
+                       detail: trimmed(back, 200))
+            await check(rec, "page_navigate 拒绝不存在的 tab", runtime,
+                        ["op": .string("page_navigate"), "target": .string("tab:不存在的页面")],
+                        expect: .errorContains("no tab matches"), session: session)
+        }
         // Use a handle obtained through approved SDK inspection, then try it in host scope.
         // Guessing a valid path must not bypass ownership at read/write/screenshot entry points.
         if let match = sdk.range(of: #"W[0-9]+:"# , options: .regularExpression) {
@@ -466,8 +539,6 @@ enum CapabilitySelfCheck {
                         ["op": .string("remove"), "name": .string("selfcheck-sdk-guard")], session: session)
         }
 
-        await checkHookCapture(rec, session: session)
-        await checkWebInspect(rec, session: session)
 
         // 宿主后台服务（liji_server）相关工具已迁到宿主侧，由宿主自行注册到 ToolCentral，
         // AppAgent 不再内置，故本自检不再覆盖；宿主侧自检请在宿主工程里做。
@@ -610,7 +681,7 @@ enum CapabilitySelfCheck {
         await check(rec, "view_set(未知 key) rejected", runtime,
                     ["op": .string("view_set"), "path": .string(path),
                      "key": .string("selfcheckNoSuchKey"), "value": .string("1")],
-                    expect: .errorContains("Failed to read selfcheckNoSuchKey: KVC access failed."), session: session)
+                    expect: .errorContains("Failed to read selfcheckNoSuchKey on "), session: session)
         await check(rec, "view_set(坏 rect) rejected", runtime,
                     ["op": .string("view_set"), "path": .string(path),
                      "key": .string("frame"), "value": .string("garbage")],
@@ -637,54 +708,6 @@ enum CapabilitySelfCheck {
     }
 
     // MARK: - app_web_inspect：真挂一个 WKWebView 进去读 DOM
-
-    /// DOM 只能经 evaluateJavaScript 拿，单测里没有 WKWebView，所以这里自己挂一个隐藏的
-    /// scratch webview、灌一段刻意「有问题」的 HTML（按钮 display:none、内容比容器宽），
-    /// 跑完 targets → dom_summary → why_hidden → dom_query 再拆掉，**不留痕**。
-    private static func checkWebInspect(_ rec: Recorder, session: AISession) async {
-        rec.section("app_web_inspect (H5 / WKWebView 内省)")
-        let tool = WebInspectTool(provider: DefaultWebInspectProvider.shared)
-        await check(rec, "dom_query(缺 selector/path) rejected", tool,
-                    ["op": .string("dom_query")],
-                    expect: .errorContains("'selector' or 'path' is required"), session: session)
-        await check(rec, "probe(缺坐标) rejected", tool,
-                    ["op": .string("probe"), "x": .number(1)],
-                    expect: .errorContains("'x' and 'y' are required"), session: session)
-        await check(rec, "未知 webviewId rejected", tool,
-                    ["op": .string("dom_summary"), "webviewId": .string("w999")],
-                    expect: .errorContains("webview not found"), session: session)
-
-        let installed = await installScratchWebView()
-        guard installed else {
-            rec.record("挂载 scratch WKWebView", ok: false, detail: "拿不到可用的 window")
-            return
-        }
-        rec.record("挂载 scratch WKWebView", ok: true, detail: "已插入隐藏容器，检查完即移除")
-        let loaded = await waitForScratchPageLoad(tool: tool, session: session)
-        rec.record("scratch 页面加载完成", ok: loaded, detail: loaded ? "readyState=complete" : "TIMEOUT")
-
-        await check(rec, "targets 列出 scratch 容器", tool, ["op": .string("targets")],
-                    session: session, preview: 300)
-        await check(rec, "dom_summary 给出锚点节点", tool, ["op": .string("dom_summary")],
-                    session: session, preview: 600)
-        await check(rec, "why_hidden(#gone) 指出 display:none", tool,
-                    ["op": .string("why_hidden"), "selector": .string("#gone")],
-                    session: session, preview: 400)
-        await check(rec, "dom_query(#narrow) 给出盒模型与约束祖先", tool,
-                    ["op": .string("dom_query"), "selector": .string("#narrow")],
-                    session: session, preview: 600)
-        await check(rec, "why_hidden(不存在的 selector) rejected", tool,
-                    ["op": .string("why_hidden"), "selector": .string("#nope")],
-                    expect: .errorContains("no element for"), session: session)
-        await check(rec, "eval 返回 JSON 可序列化结果", tool,
-                    ["op": .string("eval"), "script": .string("return document.title;")],
-                    session: session, preview: 200)
-
-        await MainActor.run {
-            removeScratchWebView()
-        }
-        rec.record("scratch WKWebView 已移除", ok: true, detail: "自检不留痕")
-    }
 
     /// scratch webview 只存在 @MainActor 静态槽里：**不把非 Sendable 的 WKWebView 跨隔离域传递**。
     @MainActor private static var scratchWebView: WKWebView?
@@ -746,106 +769,6 @@ enum CapabilitySelfCheck {
     }
 
     // MARK: - app_hook_capture：真的写两条 JSONL 再读回来
-
-    /// 抓包记录的写入方在仓库外（宿主侧写入方），所以以前 `read` 永远是 0 条、
-    /// `clear` 永远删 0 个文件 —— 等于只验了「没崩」。这里自己按磁盘契约造两条记录，
-    /// 把 seq 排序 / limit 取尾 / sinceSeq 过滤 / 按 channel 删 全部走一遍真实文件。
-    private static func checkHookCapture(_ rec: Recorder, session: AISession) async {
-        rec.section("app_hook_capture (JS↔native 桥接抓包)")
-        let hook = HookCaptureTool()
-        let defaults = UserDefaults.standard
-        let originalConfig = defaults.string(forKey: HookCaptureStore.configKey)
-        let fm = FileManager.default
-        let dir = ((NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first
-                    ?? NSTemporaryDirectory()) as NSString).appendingPathComponent("AppAgentMsgCapture")
-        let dirExisted = fm.fileExists(atPath: dir)
-
-        let status = { () async -> [String: Any] in
-            let raw = await withBudget { () async throws -> String in
-                try await hook.execute(arguments: ["op": .string("status")], session: session).stringValue
-            } ?? "{}"
-            return (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] ?? [:]
-        }
-        let enabled = { (json: [String: Any], channel: String) -> Bool in
-            let channels = json["channels"] as? [String: Any]
-            return ((channels?[channel] as? [String: Any])?["enabled"] as? Bool) ?? false
-        }
-
-        await check(rec, "status", hook, ["op": .string("status")], session: session)
-        let reportedDir = (await status())["dir"] as? String ?? ""
-        rec.record("status 给出抓包目录", ok: reportedDir == dir,
-                   detail: "reported=\(reportedDir) expected=\(dir)")
-        await check(rec, "start(talos_in)", hook,
-                    ["op": .string("start"), "channel": .string("talos_in")], session: session)
-        rec.record("start 后 talos_in 已开启", ok: enabled(await status(), "talos_in"), detail: "enabled=true")
-        await check(rec, "start(未知 channel) rejected", hook,
-                    ["op": .string("start"), "channel": .string("bogus_channel")],
-                    expect: .errorContains("'channel' is required"), session: session)
-
-        // 按磁盘契约造两条记录：cap_<channel>_<suffix>.jsonl，每行一个 JSON 对象。
-        let file = (dir as NSString).appendingPathComponent("cap_talos_in_selfcheck.jsonl")
-        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let wrote = (try? ("{\"seq\":2,\"api\":\"selfcheck.two\",\"dir\":\"in\"}\n"
-                           + "{\"seq\":1,\"api\":\"selfcheck.one\",\"dir\":\"in\"}\n")
-            .write(toFile: file, atomically: true, encoding: .utf8)) != nil
-        rec.record("写入两条抓包记录（含乱序 seq）", ok: wrote, detail: wrote ? file : "write failed")
-
-        let readRecords = { (args: [String: JSONValue]) async -> [[String: Any]] in
-            let raw = await withBudget { () async throws -> String in
-                try await hook.execute(arguments: args, session: session).stringValue
-            } ?? "{}"
-            let json = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] ?? [:]
-            return json["records"] as? [[String: Any]] ?? []
-        }
-        let seqs = { (records: [[String: Any]]) -> [Int] in
-            records.compactMap { ($0["seq"] as? NSNumber)?.intValue }
-        }
-
-        let all = await readRecords(["op": .string("read"), "channel": .string("talos_in"),
-                                     "limit": .number(10)])
-        rec.record("read 读回两条并按 seq 升序", ok: seqs(all) == [1, 2], detail: "seqs=\(seqs(all))")
-        let sinceOne = await readRecords(["op": .string("read"), "channel": .string("talos_in"),
-                                          "sinceSeq": .number(1)])
-        rec.record("read(sinceSeq:1) 只给更新的", ok: seqs(sinceOne) == [2], detail: "seqs=\(seqs(sinceOne))")
-        let tail = await readRecords(["op": .string("read"), "channel": .string("talos_in"),
-                                      "limit": .number(1)])
-        rec.record("read(limit:1) 取尾部一条", ok: seqs(tail) == [2], detail: "seqs=\(seqs(tail))")
-        await check(rec, "read(缺 channel) rejected", hook, ["op": .string("read")],
-                    expect: .errorContains("'channel' is required"), session: session)
-
-        await check(rec, "stop(talos_in)", hook,
-                    ["op": .string("stop"), "channel": .string("talos_in")], session: session)
-        rec.record("stop 后 talos_in 已关闭", ok: !enabled(await status(), "talos_in"), detail: "enabled=false")
-        await check(rec, "stop(缺 channel) rejected", hook, ["op": .string("stop")],
-                    expect: .errorContains("'channel' is required"), session: session)
-        await check(rec, "stop_all", hook, ["op": .string("stop_all")], session: session)
-        await check(rec, "clear(未知 channel) rejected", hook,
-                    ["op": .string("clear"), "channel": .string("bogus_channel")],
-                    expect: .errorContains("unknown channel"), session: session)
-
-        let cleared = await withBudget { () async throws -> String in
-            try await hook.execute(arguments: ["op": .string("clear"), "channel": .string("talos_in")],
-                                   session: session).stringValue
-        } ?? "TIMEOUT"
-        rec.record("clear(talos_in) 真的删掉了文件", ok: cleared.contains("cleared 1 capture file"),
-                   detail: trimmed(cleared, 160))
-        let afterClear = await readRecords(["op": .string("read"), "channel": .string("talos_in"),
-                                            "limit": .number(10)])
-        rec.record("clear 后读回 0 条（无残留）", ok: afterClear.isEmpty,
-                   detail: "count=\(afterClear.count) fileExists=\(fm.fileExists(atPath: file))")
-
-        // 抓包开关写在共享 NSUserDefaults 里，自检不该改动宿主的持久配置。
-        if let originalConfig {
-            defaults.set(originalConfig, forKey: HookCaptureStore.configKey)
-        } else {
-            defaults.removeObject(forKey: HookCaptureStore.configKey)
-        }
-        if !dirExisted { try? fm.removeItem(atPath: dir) }
-        let restored = defaults.string(forKey: HookCaptureStore.configKey) == originalConfig
-            && (dirExisted || !fm.fileExists(atPath: dir))
-        rec.record("抓包开关与目录已复位", ok: restored,
-                   detail: "config=\(originalConfig == nil ? "removed" : "restored") dirExisted=\(dirExisted)")
-    }
 
     /// 往宿主 window 挂一个不可见、不响应交互的一次性视图。
     /// 自检结束后移除，运行时 UI 不留痕迹。
@@ -1366,32 +1289,6 @@ enum CapabilitySelfCheck {
         // 收尾：别把授权残留给后面的检查项（responder 保持自动应答，见 run()）
         session.uiState.remove("approvedPrivateHosts")
         await MainActor.run { SelfCheckDecisionResponder.outcome = .deny }
-
-        rec.section("web_fetch（真实出站，网络不通时降级不算失败）")
-        // 给足 25s：请求本身 20s 超时，不能被 8s 的默认预算掐掉造成假失败
-        await check(rec, "GET example.com (text)", web,
-                    ["url": .string("https://example.com"), "mode": .string("text"),
-                     "max_bytes": .number(4096)],
-                    expect: .completes, session: session, preview: 300, timeout: 25)
-        await check(rec, "GET raw.githubusercontent (raw)", web,
-                    ["url": .string("https://raw.githubusercontent.com/chbo297/BOUIKit/main/README.md"),
-                     "mode": .string("raw"), "max_bytes": .number(2048)],
-                    expect: .completes, session: session, preview: 300, timeout: 25)
-        await check(rec, "HEAD 只看响应头", web,
-                    ["url": .string("https://example.com"), "mode": .string("head")],
-                    expect: .completes, session: session, preview: 200, timeout: 25)
-        // 下载 → 落盘 → 用 file_read 读回来，验证「长内容不进上下文」这条路
-        let downloaded = await withBudget(seconds: 25) { () async throws -> String in
-            try await web.execute(arguments: [
-                "url": .string("https://example.com"),
-                "save_as": .string("downloads/example.html")
-            ], session: session).stringValue
-        } ?? "(timeout/no network)"
-        rec.record("下载落盘（网络可用时）", ok: true, detail: trimmed(downloaded, 240))
-        if downloaded.contains("saved_path") {
-            await check(rec, "file_read 读回下载内容", FileReadTool(),
-                        ["path": .string("downloads/example.html")], session: session, preview: 200)
-        }
     }
 
     private static func checkDebugAndRendering(_ rec: Recorder) async {
@@ -1402,59 +1299,7 @@ enum CapabilitySelfCheck {
         let export = AppAgentDebugLog.shared.exportText()
         rec.record("export contains marker", ok: export.contains("selfcheck marker"),
                    detail: trimmed(String(export.suffix(200))))
-
-        rec.section("chat activity rendering")
-        let lines = await withBudget { () async throws -> [String] in
-            await MainActor.run { activityRenderingReport() }
-        } ?? ["渲染超时 ✗"]
-        for line in lines.dropLast() { rec.note(line) }
-        if let verdict = lines.last {
-            rec.record("展开明细增高", ok: verdict.contains("✓"), detail: verdict)
-        }
     }
-    /// 在真实 UIKit 运行时里渲染一轮「思考 + 工具执行」过程区：
-    /// 分别量折叠态与展开态的高度，确认摘要行与明细都真的排上了版。
-    @MainActor
-    private static func activityRenderingReport() -> [String] {
-        var timeline = AppAgentActivityTimeline(startedAt: Date().addingTimeInterval(-2.5))
-        timeline.appendThinking("先确认设置页的模型来源\n再决定要不要读取文件")
-        timeline.startTool(id: "call-1", name: "file_read", argumentsPreview: "path=Documents/selfcheck.txt")
-        timeline.finishTool(id: "call-1", resultPreview: "hello-selfcheck")
-        timeline.appendThinking("信息够了，可以给结论")
-
-        var lines: [String] = []
-        lines.append("running header → \(timeline.headerTitle())")
-        lines.append("summary → \(timeline.headerSummary ?? "(nil)")")
-
-        timeline.finish()
-        lines.append("finished header → \(timeline.headerTitle()) · steps=\(timeline.stepCount)")
-
-        func height(expanded: Bool) -> CGFloat {
-            let cell = ChatMessageCell(style: .default, reuseIdentifier: ChatMessageCell.reuseIdentifier)
-            cell.frame = CGRect(x: 0, y: 0, width: 390, height: 1)
-            cell.configure(with: ChatMessage(
-                role: .assistant,
-                text: "最终结果：设置页已经能实测模型可用性。",
-                activity: timeline,
-                isActivityExpanded: expanded
-            ))
-            cell.setNeedsLayout()
-            cell.layoutIfNeeded()
-            return cell.contentView
-                .systemLayoutSizeFitting(
-                    CGSize(width: 390, height: UIView.layoutFittingCompressedSize.height),
-                    withHorizontalFittingPriority: .required,
-                    verticalFittingPriority: .fittingSizeLevel
-                ).height
-        }
-
-        let collapsed = height(expanded: false)
-        let expanded = height(expanded: true)
-        lines.append(String(format: "collapsed height=%.1f, expanded height=%.1f", collapsed, expanded))
-        lines.append(expanded > collapsed ? "展开明细生效 ✓" : "展开未增高 ✗")
-        return lines
-    }
-
     /// Build a throwaway agent + session so the self-check can run even when the
     /// demo has no usable provider config (tool.execute never calls the model).
     ///

@@ -3,15 +3,13 @@
 //  AppAgentUI
 //
 //  参考 openai/codex 的 tui/src/exec_cell/compact.rs：
-//  • 动作主行 + └ 输出分支。预览裁剪只发生在展示层，展开仍能看到完整内容。
+//  • 动作主行 + └ 输出分支。收起时不渲染明细，展开给全文、不做裁剪。
 //
 
 #if canImport(UIKit)
 import Foundation
 
 enum AppAgentActivityTranscript {
-    static let previewLineCount = 3
-
     static func heading(for item: AppAgentActivityItem) -> String {
         if item.kind == .thinking { return "• 思考" }
         let verb: String
@@ -23,18 +21,14 @@ enum AppAgentActivityTranscript {
         return "• \(verb) \(item.title)"
     }
 
-    static func detail(_ text: String, expanded: Bool) -> String {
+    /// 展开后的明细：首行挂 `└`，续行对齐缩进，全文不裁剪
+    /// （工具输出预算由 Core 管，展示层不再二次截断）。
+    static func detail(_ text: String) -> String {
         guard !text.isEmpty else { return "" }
-        let lines = text.components(separatedBy: .newlines)
-        let visible = expanded ? lines : Array(lines.suffix(previewLineCount))
-        var output = visible.enumerated().map { index, line in
-            let content = expanded ? line : ChatMessageAssembler.compact(line, limit: 100)
-            return (index == 0 ? "  └ " : "    ") + content
-        }
-        if !expanded, lines.count > previewLineCount {
-            output.insert("    …", at: 0)
-        }
-        return output.joined(separator: "\n")
+        return text.components(separatedBy: .newlines)
+            .enumerated()
+            .map { index, line in (index == 0 ? "  └ " : "    ") + line }
+            .joined(separator: "\n")
     }
 }
 #endif

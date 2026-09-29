@@ -118,7 +118,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             guard let target = Self.kvcTarget(className: className, context: context) as? NSObject else {
                 return "(no target object for KVC; className=\(className ?? "top page"))"
             }
-            return Self.writeProperty(on: target, keyPath: keyPath, value: value, context: context)
+            let before = Self.pageFingerprint(context: context)
+            let result = Self.writeProperty(on: target, keyPath: keyPath, value: value, context: context)
+            guard result.hasPrefix("OK.") else { return result }
+            return result + Self.pageChangeNote(from: before, context: context)
         }
     }
 
@@ -178,7 +181,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     public func setViewValue(path: String, key: String, value: String, context: HostInspectionContext) async -> String {
         await MainActor.run {
             guard let view = Self.view(atPath: path, context: context) else { return "(no view at path '\(path)')" }
-            return Self.applyValue(to: view, key: key, value: value, context: context)
+            let before = Self.pageFingerprint(context: context)
+            let result = Self.applyValue(to: view, key: key, value: value, context: context)
+            guard result.hasPrefix("OK.") else { return result }
+            return result + Self.pageChangeNote(from: before, context: context)
         }
     }
 
@@ -206,6 +212,20 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
         }
     }
 
+    // MARK: - 模拟用户操作（语义级）
+
+    public func activateView(path: String, event: String?, context: HostInspectionContext) async -> String {
+        await MainActor.run { Self.activate(path: path, event: event, context: context) }
+    }
+
+    public func navigatePage(target: String, context: HostInspectionContext) async -> String {
+        await MainActor.run { Self.navigate(target: target, context: context) }
+    }
+
+    public func scrollPage(path: String?, direction: String, amount: Double?, context: HostInspectionContext) async -> String {
+        await MainActor.run { Self.scroll(path: path, direction: direction, amount: amount, context: context) }
+    }
+
     // MARK: - 分层摘要：先给地图，细节按需二次调用
 
     public func uiHierarchySummary(context: HostInspectionContext) async -> String {
@@ -229,6 +249,331 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
     }
 
     // MARK: - Helpers
+
+    /// 页面指纹：判断一次操作到底有没有产生用户看得见的页面变化。
+    /// 只取「栈顶 VC + 容器位置 + 标题」——足够区分换页，又不必全树遍历。
+    struct PageFingerprint: Equatable, Sendable {
+        var topController: String
+        var containers: [String]
+        var title: String?
+    }
+
+    /// 沿「当前可见」的容器链收集 VC：present > tab 选中项 > nav 栈顶 > 最后一个 child。
+    /// 页面指纹和容器导航共用它，避免两处各写一份「谁是当前页」的判断。
+    @MainActor
+    static func visibleControllerChain(context: HostInspectionContext = .init()) -> [UIViewController] {
+        var chain: [UIViewController] = []
+        var node = keyWindow(context: context)?.rootViewController
+        var visited = Set<ObjectIdentifier>()
+        while let current = node, visited.insert(ObjectIdentifier(current)).inserted {
+            guard HostInspectionUIKit.includes(current, context: context) else { break }
+            chain.append(current)
+            if let presented = current.presentedViewController {
+                node = presented
+            } else if let tab = current as? UITabBarController {
+                node = tab.selectedViewController
+            } else if let nav = current as? UINavigationController {
+                node = nav.topViewController
+            } else {
+                node = current.children.last
+            }
+        }
+        return chain
+    }
+
+    @MainActor
+    static func pageFingerprint(context: HostInspectionContext = .init()) -> PageFingerprint {
+        let chain = visibleControllerChain(context: context)
+        var containers: [String] = []
+        for controller in chain {
+            if let tab = controller as? UITabBarController {
+                containers.append("tab \(tab.selectedIndex)")
+            } else if let nav = controller as? UINavigationController {
+                containers.append("nav 深度 \(nav.viewControllers.count)")
+            } else if controller.presentedViewController != nil {
+                containers.append("present")
+            }
+        }
+        let top = chain.last
+        return PageFingerprint(
+            topController: top.map { "\(type(of: $0))" } ?? "(none)",
+            containers: containers,
+            title: top?.title ?? top?.tabBarItem?.title
+        )
+    }
+
+    /// 把「属性改了」和「页面真的动了」分开说清楚。一次没生效的修改如果只回 `OK.`，
+    /// 模型会当成功，然后得再花一轮 ui_hierarchy 才发现白改了——真机上那一轮 32 秒。
+    @MainActor
+    static func pageChangeNote(from before: PageFingerprint, context: HostInspectionContext = .init()) -> String {
+        let after = pageFingerprint(context: context)
+        guard after != before else { return " · 页面未变化（仍 \(describePage(before))）" }
+        return " · 页面已变化：\(describePage(before)) → \(describePage(after))"
+    }
+
+    static func describePage(_ fingerprint: PageFingerprint) -> String {
+        var parts = [fingerprint.topController]
+        if !fingerprint.containers.isEmpty { parts.append(fingerprint.containers.joined(separator: " / ")) }
+        if let title = fingerprint.title, !title.isEmpty { parts.append("\"\(clip(title))\"") }
+        return parts.joined(separator: " ")
+    }
+
+    // MARK: 语义级激活
+
+    /// 按「越接近用户真实点击」的顺序降级，并如实报告走了哪条路径。
+    /// 真正的触摸注入要自己构造 UITouch / IOHID 事件（私有 API），这里不做：
+    /// 做不到的情况直接报错，绝不返回一个让模型以为点过了的 `OK.`。
+    @MainActor
+    static func activate(path: String, event: String?, context: HostInspectionContext) -> String {
+        guard let hit = view(atPath: path, context: context) else { return "(no view at path '\(path)')" }
+        guard let controlEvent = controlEvent(named: event) else {
+            return "(unknown event '\(event ?? "")'; use touchUpInside / touchDown / touchUpOutside "
+                + "/ valueChanged / primaryActionTriggered)"
+        }
+        let before = pageFingerprint(context: context)
+        // 1) 最近的 UIControl 祖先。点中的往往是 label / icon 这种叶子，用户真正点的是它的按钮祖先。
+        if let found = nearestControl(from: hit, context: context) {
+            guard found.control.isEnabled else {
+                return "(control \(type(of: found.control)) at '\(path)' is disabled)"
+            }
+            found.control.sendActions(for: controlEvent)
+            return "OK. 已激活 \(location(path: path, hops: found.hops, object: found.control)) "
+                + "via sendActions(\(eventName(controlEvent)))"
+                + pageChangeNote(from: before, context: context)
+        }
+        // 2) 无障碍激活：自定义控件只要实现了 accessibilityActivate，就会走它本该走的分支。
+        //    指定了具体 control 事件时不降级到这里——语义不一样，不能悄悄换。
+        if event == nil, let activated = accessibilityActivated(from: hit, context: context) {
+            return "OK. 已激活 \(location(path: path, hops: activated.hops, object: activated.view)) "
+                + "via accessibilityActivate()"
+                + pageChangeNote(from: before, context: context)
+        }
+        return "(no activatable target at or above '\(path)': 没有 UIControl 祖先，accessibilityActivate() 也不接受。"
+            + "只挂手势识别器的视图无法可靠触发——页面跳转请用 page_navigate，其它状态改动用 view_set / property_set)"
+    }
+
+    @MainActor
+    private static func nearestControl(
+        from view: UIView, context: HostInspectionContext
+    ) -> (control: UIControl, hops: Int)? {
+        var node: UIView? = view
+        var hops = 0
+        // 6 层足够从图标/文字走到按钮，再往上就容易误伤整个 cell 或容器了。
+        while let current = node, hops <= 6 {
+            if let control = current as? UIControl, HostInspectionUIKit.includes(control, context: context) {
+                return (control, hops)
+            }
+            node = current.superview
+            hops += 1
+        }
+        return nil
+    }
+
+    @MainActor
+    private static func accessibilityActivated(
+        from view: UIView, context: HostInspectionContext
+    ) -> (view: UIView, hops: Int)? {
+        var node: UIView? = view
+        var hops = 0
+        while let current = node, hops <= 6 {
+            if HostInspectionUIKit.includes(current, context: context), current.accessibilityActivate() {
+                return (current, hops)
+            }
+            node = current.superview
+            hops += 1
+        }
+        return nil
+    }
+
+    @MainActor
+    private static func location(path: String, hops: Int, object: NSObject) -> String {
+        hops == 0 ? "[\(path)] \(type(of: object))" : "[\(path)] 往上第 \(hops) 层的 \(type(of: object))"
+    }
+
+    static func controlEvent(named name: String?) -> UIControl.Event? {
+        guard let name, !name.isEmpty else { return .touchUpInside }
+        switch name {
+        case "touchUpInside": return .touchUpInside
+        case "touchDown": return .touchDown
+        case "touchUpOutside": return .touchUpOutside
+        case "valueChanged": return .valueChanged
+        case "primaryActionTriggered": return .primaryActionTriggered
+        default: return nil
+        }
+    }
+
+    static func eventName(_ event: UIControl.Event) -> String {
+        switch event {
+        case .touchDown: return "touchDown"
+        case .touchUpOutside: return "touchUpOutside"
+        case .valueChanged: return "valueChanged"
+        case .primaryActionTriggered: return "primaryActionTriggered"
+        default: return "touchUpInside"
+        }
+    }
+
+    // MARK: 容器级导航
+
+    /// 走容器 VC 的公开入口，并让 delegate 回调照常发生 —— 宿主监听 tab 切换做的事
+    /// （埋点、灰度、未登录拦截）不能因为「这次是 agent 点的」就被跳过。
+    @MainActor
+    static func navigate(target: String, context: HostInspectionContext) -> String {
+        let trimmed = target.trimmingCharacters(in: .whitespaces)
+        let key = trimmed.lowercased()
+        let before = pageFingerprint(context: context)
+        let chain = visibleControllerChain(context: context)
+        if key.hasPrefix("tab:") {
+            return selectTab(
+                key: String(trimmed.dropFirst(4)).trimmingCharacters(in: .whitespaces),
+                in: chain, before: before, context: context
+            )
+        }
+        switch key {
+        case "pop", "poptoroot":
+            guard let nav = chain.compactMap({ $0 as? UINavigationController }).last else {
+                return "(no UINavigationController in the scoped window)"
+            }
+            let popped = key == "poptoroot"
+                ? nav.popToRootViewController(animated: true)
+                : nav.popViewController(animated: true).map { [$0] }
+            guard let popped, !popped.isEmpty else { return "(already at the root of the navigation stack)" }
+            // 出栈/关闭是带动画的，此刻界面还在过渡，拿指纹下结论会得到假的「未变化」。
+            return "OK. 已出栈 \(popped.count) 层（起点 \(describePage(before))；"
+                + "动画进行中，要确认结果就再调一次 ui_hierarchy）"
+        case "dismiss":
+            guard let presenter = chain.last(where: { $0.presentedViewController != nil }) else {
+                return "(nothing is presented modally)"
+            }
+            presenter.dismiss(animated: true)
+            return "OK. 已关闭模态页（动画进行中，要确认结果就再调一次 ui_hierarchy）"
+        default:
+            return "(unknown target '\(target)'; use tab:<索引或标题> / pop / popToRoot / dismiss)"
+        }
+    }
+
+    /// 索引和标题都收：用户说的是「profile」，模型不该被迫自己猜索引。
+    @MainActor
+    private static func selectTab(
+        key: String, in chain: [UIViewController], before: PageFingerprint, context: HostInspectionContext
+    ) -> String {
+        guard let tab = chain.compactMap({ $0 as? UITabBarController }).last else {
+            return "(no UITabBarController in the scoped window)"
+        }
+        let children = tab.viewControllers ?? []
+        guard !children.isEmpty else { return "(the tab bar controller has no view controllers)" }
+        let index: Int
+        if let parsed = Int(key), children.indices.contains(parsed) {
+            index = parsed
+        } else if let matched = children.firstIndex(where: {
+            let title = $0.tabBarItem?.title ?? $0.title ?? ""
+            return !title.isEmpty
+                && title.compare(key, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }) {
+            index = matched
+        } else {
+            let list = children.enumerated()
+                .map { "\($0.offset)=\"\($0.element.tabBarItem?.title ?? $0.element.title ?? "(无标题)")\"" }
+                .joined(separator: ", ")
+            return "(no tab matches '\(key)'; available: \(list))"
+        }
+        guard HostInspectionUIKit.includes(children[index], context: context) else {
+            return "(tab \(index) is outside the current inspection scope)"
+        }
+        guard index != tab.selectedIndex else {
+            return "OK. 已经在 tab \(index)，未做改动 · \(describePage(before))"
+        }
+        // 先问 delegate。跳过这一步就不是「模拟用户点击」而是绕开宿主自己的规则了。
+        if let delegate = tab.delegate,
+           delegate.tabBarController?(tab, shouldSelect: children[index]) == false {
+            return "(the host's UITabBarControllerDelegate refused to select tab \(index))"
+        }
+        tab.selectedIndex = index
+        // 程序化改 selectedIndex 时 UIKit 不会发 didSelect，用户点击时会——补上才算等价。
+        tab.delegate?.tabBarController?(tab, didSelect: children[index])
+        return "OK. 已切到 tab \(index)" + pageChangeNote(from: before, context: context)
+    }
+
+    // MARK: 滚动
+
+    /// scrollView 直接改 contentOffset —— 比伪造手势确定得多，而且 UIKit 会照常发
+    /// scrollViewDidScroll。没有 scrollView 的容器交给无障碍滚动。翻页单位是「屏」。
+    @MainActor
+    static func scroll(path: String?, direction: String, amount: Double?, context: HostInspectionContext) -> String {
+        let screens = amount ?? 1
+        guard screens > 0 else { return "(amount must be greater than 0)" }
+        let start: UIView
+        if let path, !path.isEmpty, path != "root" {
+            guard let found = view(atPath: path, context: context) else { return "(no view at path '\(path)')" }
+            start = found
+        } else {
+            guard let window = keyWindow(context: context) else { return "(no key window)" }
+            start = window
+        }
+        guard let scrollView = nearestScrollView(from: start, context: context) else {
+            guard let axis = accessibilityScrollDirection(direction) else {
+                return "(unknown direction '\(direction)'; use up / down / left / right)"
+            }
+            guard start.accessibilityScroll(axis) else {
+                return "(nothing scrollable at or under the given path, and accessibilityScroll() was refused)"
+            }
+            return "OK. 已按无障碍滚动翻一页（\(direction)）"
+        }
+        let size = scrollView.bounds.size
+        let content = scrollView.contentSize
+        let inset = scrollView.adjustedContentInset
+        var offset = scrollView.contentOffset
+        switch direction.lowercased() {
+        case "down": offset.y += size.height * CGFloat(screens)
+        case "up": offset.y -= size.height * CGFloat(screens)
+        case "right": offset.x += size.width * CGFloat(screens)
+        case "left": offset.x -= size.width * CGFloat(screens)
+        default: return "(unknown direction '\(direction)'; use up / down / left / right)"
+        }
+        offset.y = min(max(offset.y, -inset.top), max(-inset.top, content.height + inset.bottom - size.height))
+        offset.x = min(max(offset.x, -inset.left), max(-inset.left, content.width + inset.right - size.width))
+        let previous = scrollView.contentOffset
+        guard offset != previous else { return "OK. 已经到 \(direction) 方向的尽头，未做改动" }
+        scrollView.setContentOffset(offset, animated: true)
+        return "OK. \(type(of: scrollView)) 往 \(direction) 滚 \(screens) 屏："
+            + "contentOffset (\(Int(previous.x)), \(Int(previous.y))) → (\(Int(offset.x)), \(Int(offset.y)))"
+    }
+
+    /// 先往上找（path 指进了某个 scrollView 内部），再往下找（path 给的是窗口或容器，
+    /// 能滚的那个在子树里）。往下只认「内容确实超出可视区」的，否则会选中一堆不能滚的壳。
+    @MainActor
+    private static func nearestScrollView(from view: UIView, context: HostInspectionContext) -> UIScrollView? {
+        var node: UIView? = view
+        while let current = node {
+            if let scrollView = current as? UIScrollView,
+               HostInspectionUIKit.includes(scrollView, context: context) { return scrollView }
+            node = current.superview
+        }
+        var queue = [view]
+        var index = 0
+        while index < queue.count, index < 4096 {
+            let current = queue[index]
+            index += 1
+            guard HostInspectionUIKit.canTraverse(current, context: context) else { continue }
+            if let scrollView = current as? UIScrollView,
+               HostInspectionUIKit.includes(scrollView, context: context),
+               scrollView.contentSize.height > scrollView.bounds.height + 1
+                   || scrollView.contentSize.width > scrollView.bounds.width + 1 {
+                return scrollView
+            }
+            queue.append(contentsOf: current.subviews)
+        }
+        return nil
+    }
+
+    static func accessibilityScrollDirection(_ direction: String) -> UIAccessibilityScrollDirection? {
+        switch direction.lowercased() {
+        case "down": return .down
+        case "up": return .up
+        case "left": return .left
+        case "right": return .right
+        default: return nil
+        }
+    }
 
     @MainActor
     static func keyWindow(context: HostInspectionContext = .init()) -> UIWindow? {
@@ -430,8 +775,24 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             return error.localizedDescription
         } catch {
             // NSException.reason can contain the excluded object's description. Do not echo it.
-            return "Failed to read \(keyPath): KVC access failed."
+            // 类名本身不敏感，而「读的是谁」恰恰是模型最缺的信息：真机上它为了猜
+            // selectedIndex 挂在哪个对象上，连着烧了两轮共 167 秒。
+            return "Failed to read \(keyPath) on \(type(of: target)): KVC access failed."
+                + containerHint(for: target)
         }
+    }
+
+    /// 读写失败时补一句「当前目标是谁 + 容器怎么走」。默认目标是最内层可见页面，
+    /// 对 tab 应用来说那是选中的子页，容器属性必须显式走 `tabBarController.…`。
+    @MainActor
+    static func containerHint(for target: NSObject) -> String {
+        guard let controller = target as? UIViewController else { return "" }
+        var hints: [String] = []
+        if controller.tabBarController != nil { hints.append("tabBarController.<key>") }
+        if controller.navigationController != nil { hints.append("navigationController.<key>") }
+        if controller.parent != nil { hints.append("parent.<key>") }
+        guard !hints.isEmpty else { return "" }
+        return " 它是当前最内层可见页面；要读容器的属性请走 " + hints.joined(separator: " / ") + "。"
     }
 
     @MainActor
@@ -457,7 +818,8 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
         } catch let error as UIKitInspectionError {
             return error.localizedDescription
         } catch {
-            return "Failed to set \(keyPath): KVC access failed."
+            return "Failed to set \(keyPath) on \(type(of: target)): KVC access failed."
+                + containerHint(for: target)
         }
     }
 
@@ -1035,7 +1397,11 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
             let selected = visible.contains(where: { $0.offset == tab.selectedIndex }) ? "\(tab.selectedIndex)" : "out-of-scope"
             out += "\(pad)  \(visible.count) 个 tab，当前 = \(selected)\n"
             for (index, child) in visible {
-                out += "\(pad)  [tab \(index)\(index == tab.selectedIndex ? " ← 可见" : "")]\n"
+                // 标签文字是模型把用户说的「profile 页」对上索引的唯一线索。未加载的子 VC
+                // 只会打印类名（三个 tab 都是同一个占位类时完全无从分辨），所以标题必须带上。
+                let title = child.tabBarItem?.title ?? child.title
+                let label = title.map { " \"\(clip($0))\"" } ?? ""
+                out += "\(pad)  [tab \(index)\(label)\(index == tab.selectedIndex ? " ← 可见" : "")]\n"
                 describeVCSkeleton(child, indent: indent + 2, context: context, into: &out)
             }
         } else {

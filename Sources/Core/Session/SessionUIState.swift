@@ -51,7 +51,14 @@ public final class SessionUIState: @unchecked Sendable {
 
     // MARK: - Observer (backing)
 
-    private var _onChange: ((_ key: String) -> Void)?
+    /// 变更观察者。
+    ///
+    /// **类型里就写明「总在主线程」**：这个回调一直是 `DispatchQueue.main.async` 投递的（见类型
+    /// 头部注释），以前只是注释里这么说。标成 `@MainActor @Sendable` 之后，UI 侧闭包捕获
+    /// UIViewController 这类主线程对象才是编译器认可的，而不是靠约定。
+    public typealias ChangeHandler = @MainActor @Sendable (_ key: String) -> Void
+
+    private var _onChange: ChangeHandler?
 
     // MARK: - Public Read Access
 
@@ -90,7 +97,7 @@ public final class SessionUIState: @unchecked Sendable {
     ///
     /// Built-in keys: "isStreaming", "streamingText", "lastError"
     /// Custom keys: whatever the tools set via `set(_:value:)`
-    public var onChange: ((_ key: String) -> Void)? {
+    public var onChange: ChangeHandler? {
         get { lock.read { _onChange } }
         set { lock.writeSync { _onChange = newValue } }
     }
@@ -100,7 +107,7 @@ public final class SessionUIState: @unchecked Sendable {
     // MARK: - Built-in State Updates (internal, called by AISession)
 
     func setStreaming(_ value: Bool) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             _isStreaming = value
             return _onChange
         }
@@ -108,7 +115,7 @@ public final class SessionUIState: @unchecked Sendable {
     }
 
     func appendStreamingText(_ delta: String) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             _streamingText += delta
             return _onChange
         }
@@ -120,7 +127,7 @@ public final class SessionUIState: @unchecked Sendable {
     }
 
     func appendReasoningText(_ delta: String) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             _reasoningText += delta
             return _onChange
         }
@@ -132,7 +139,7 @@ public final class SessionUIState: @unchecked Sendable {
     }
 
     func setError(_ error: Error?) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             _lastError = error
             return _onChange
         }
@@ -145,7 +152,7 @@ public final class SessionUIState: @unchecked Sendable {
 
     /// 推进到某一阶段。开新一轮（`.preparing`）时顺手清掉上一轮的失败阶段。
     func setRunStage(_ stage: AIAgentRunStage?) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             guard _runStage != stage else { return nil }
             _runStage = stage
             if stage == .preparing { _failedStage = nil }
@@ -156,7 +163,7 @@ public final class SessionUIState: @unchecked Sendable {
 
     /// 标记「失败发生在这一步」。阶段本身保持在失败点，不往前走。
     func setFailedStage(_ stage: AIAgentRunStage?) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             guard _failedStage != stage else { return nil }
             _failedStage = stage
             return _onChange
@@ -168,7 +175,7 @@ public final class SessionUIState: @unchecked Sendable {
 
     /// 进入「等用户决定」态。`AISession.requestDecision` 在问人之前调用。
     public func setPendingDecision(_ decision: DecisionRequest) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             _pendingDecisions.append(decision)
             return _onChange
         }
@@ -180,7 +187,7 @@ public final class SessionUIState: @unchecked Sendable {
     /// 传上原来的 request，多个请求并发在等时才摘得准；**显式传了但没命中就什么都不做**
     /// （宁可漏摘也不能把别人还在等的那一条摘掉）。缺省（nil）时摘最后入栈的那个。
     public func clearPendingDecision(_ decision: DecisionRequest? = nil) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             guard !_pendingDecisions.isEmpty else { return nil }
             if let decision = decision {
                 guard let index = _pendingDecisions.lastIndex(of: decision) else { return nil }
@@ -194,23 +201,28 @@ public final class SessionUIState: @unchecked Sendable {
     }
 
     // MARK: - Custom State (public, tools can read/write)
+
     /// Set a custom state value.
-    public func set<T>(_ key: String, value: T) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+    ///
+    /// **`T` 必须是 `Sendable`**：这个字典被工具（executor 的 Task 里）和 UI（主线程，经 `onChange`）
+    /// 同时访问，`lock` 保住的只是**容器**，保不住装进去的东西。无约束的泛型等于允许塞一个可变 class
+    /// 进来，两边各拿同一个引用读写，锁完全不起作用 —— 而本类是 `@unchecked Sendable`，编译器不会拦。
+    public func set<T: Sendable>(_ key: String, value: T) {
+        let callback = lock.writeSync { () -> ChangeHandler? in
             _customState[key] = value
             return _onChange
         }
         dispatchCallback(callback, key: key)
     }
 
-    /// Get a custom state value.
-    public func get<T>(_ key: String) -> T? {
+    /// Get a custom state value. 约束同 `set(_:value:)`。
+    public func get<T: Sendable>(_ key: String) -> T? {
         lock.read { _customState[key] as? T }
     }
 
     /// Remove a custom state value.
     public func remove(_ key: String) {
-        let callback = lock.writeSync { () -> ((String) -> Void)? in
+        let callback = lock.writeSync { () -> ChangeHandler? in
             _customState.removeValue(forKey: key)
             return _onChange
         }
@@ -224,7 +236,7 @@ public final class SessionUIState: @unchecked Sendable {
     /// （下一次同样的操作还会再问一遍）。授权名单只增不减，所以合并即可。
     @discardableResult
     public func appendUnique(_ value: String, forKey key: String) -> [String] {
-        let (callback, merged) = lock.writeSync { () -> (((String) -> Void)?, [String]) in
+        let (callback, merged) = lock.writeSync { () -> (ChangeHandler?, [String]) in
             var list = _customState[key] as? [String] ?? []
             if !list.contains(value) { list.append(value) }
             _customState[key] = list
@@ -236,8 +248,9 @@ public final class SessionUIState: @unchecked Sendable {
 
     // MARK: - Private
 
-    private func dispatchCallback(_ callback: ((String) -> Void)?, key: String) {
+    private func dispatchCallback(_ callback: ChangeHandler?, key: String) {
         guard let callback else { return }
-        DispatchQueue.main.async { callback(key) }
+        // 已经在往主队列投了，`assumeIsolated` 只是把这个事实告诉编译器，不改变行为。
+        DispatchQueue.main.async { MainActor.assumeIsolated { callback(key) } }
     }
 }

@@ -11,13 +11,16 @@ import UIKit
 extension AppAgentViewController {
     func setupKeyboardObservers() {
         let observer = AppAgentKeyboardObserver(referenceView: view)
-        observer.onChange = { [weak self] height, duration in
-            self?.handleKeyboardHeightChange(height: height, duration: duration)
+        observer.onChange = { [weak self] height, animation in
+            self?.handleKeyboardHeightChange(height: height, animation: animation)
         }
         keyboardObserver = observer
     }
 
-    func handleKeyboardHeightChange(height: CGFloat, duration: TimeInterval) {
+    func handleKeyboardHeightChange(
+        height: CGFloat,
+        animation: AppAgentKeyboardObserver.Animation
+    ) {
         let oldEffectiveKeyboardHeight = effectiveKeyboardHeight
         observedKeyboardHeight = height
         let newEffectiveKeyboardHeight = effectiveKeyboardHeight
@@ -34,7 +37,16 @@ extension AppAgentViewController {
 
         // 键盘顶起就一件事：在键盘自己的动画块里重算 inputBar 与 ChatPanel 容器的位置，整个容器
         // 一起上移。面板自身高度、展示高度、档位都不变，块内的派生写入直接提交、继承这条动画上下文。
-        UIView.animate(withDuration: duration) {
+        // 时长**和曲线**都用键盘给的那份，否则两者同时出发却不同速，中途会看出错位。
+        //
+        // 这条曲线也要带给宿主：块内的 `applyInputBarFrame` 拿到的是 `.immediate`，
+        // 只有这里记得住真实时长曲线，宿主要靠它才能跟着同速移动自己的内容。
+        ambientKeyboardAnimation = AppAgentPresentationAnimation(
+            duration: animation.duration,
+            options: animation.options
+        )
+        defer { ambientKeyboardAnimation = nil }
+        animation.run {
             self.layoutInputBar(reason: .keyboard)
         }
     }

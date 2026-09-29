@@ -2,9 +2,9 @@
 
 AppAgent currently exposes UIKit UI types from the single `AppAgent` module on iOS and Mac Catalyst. The UI source lives under `Sources/UI`, but there is no separate `AppAgentUI` product. Native AppKit targets can use AppAgent Core but do not compile these UIKit overlay types.
 
-## Overlay Window
+## Overlay Window — the only way to mount the chat UI
 
-The recommended iOS and Mac Catalyst entry point is `AppAgentOverlay`. It creates a passthrough `AppAgentWindow` above the host app and hosts an `AppAgentViewController`.
+`AppAgentOverlay` is the single iOS / Mac Catalyst entry point. It creates a passthrough `AppAgentWindow` above the host app and hosts an `AppAgentViewController` as that window's `rootViewController`.
 
 ```swift
 import UIKit
@@ -21,6 +21,8 @@ overlay.show()
 
 Taps on empty overlay areas pass through to the app below. The overlay only handles touches on its own visible controls.
 
+**Hosts do not embed `AppAgentViewController` into their own view-controller hierarchy.** Panel geometry, keyboard tracking and decision-card placement are all derived from owning one dedicated passthrough window; none of those premises hold inside a host container. If you need chat UI that lives inside a host screen, build it against `AISession` (see below) instead of reusing AppAgent's controller.
+
 ## Attach First, Bind Later
 
 If you already have a session:
@@ -31,21 +33,31 @@ overlay.bind(agent: agent, sessionId: session.id)
 overlay.show()
 ```
 
-## Direct View Controller Embedding
+## Observing AppAgent's Presentation
 
-You can embed `AppAgentViewController` inside your own navigation stack:
+Adopt `AppAgentPresentationDelegate` to learn where AppAgent currently sits and what of the host it covers:
 
 ```swift
-let session = await agent.createSession(title: "Support")
+overlay.viewController.presentationDelegate = self
 
-let viewController = AppAgentViewController()
-viewController.agent = agent
-viewController.switchSession(to: session.id)
-
-navigationController?.pushViewController(viewController, animated: true)
+func appAgentPresentationDidChange(_ state: AppAgentPresentationState) {
+    // 输入栏（收起态就是悬浮球）位置、对话面板可见区的位置与高度
+    let ball = state.inputBarFrame
+    let panel = state.chatPanelFrame          // nil = 面板不可见
+    // 所有盖住宿主的区域；opacity 低于阈值说明正在淡出、其实不再遮挡
+    let blocking = state.areas.filter { $0.opacity > 0.5 }
+    // 想跟着一起动就用同一份动画参数；duration == 0 表示手势跟手帧
+    if state.animation.isAnimated {
+        UIView.animate(withDuration: state.animation.duration,
+                       delay: 0,
+                       options: state.animation.options) { relayout(around: blocking) }
+    } else {
+        relayout(around: blocking)
+    }
+}
 ```
 
-The controller reads from `AISession.messages` and observes `session.uiState.onChange` for streaming text, errors, and completion.
+All rects are in host **window** coordinates. State is de-duplicated by geometry, so the same picture is never reported twice. `viewController.presentationState` gives the same snapshot on demand.
 
 ## Custom UI with AISession
 
@@ -108,37 +120,12 @@ session.uiState.onChange = { key in
 }
 ```
 
-## SwiftUI Wrapper
-
-Wrap `AppAgentViewController` with `UIViewControllerRepresentable`:
-
-```swift
-import SwiftUI
-import AppAgent
-
-struct AppAgentChatView: UIViewControllerRepresentable {
-    let agent: AIAgent
-    let session: AISession
-
-    func makeUIViewController(context: Context) -> AppAgentViewController {
-        let viewController = AppAgentViewController()
-        viewController.agent = agent
-        viewController.switchSession(to: session.id)
-        return viewController
-    }
-
-    func updateUIViewController(
-        _ uiViewController: AppAgentViewController,
-        context: Context
-    ) {}
-}
-```
-
 ## Input Bar and Message Types
 
 The UIKit layer is intentionally small:
 
-- `AppAgentViewController`: table view plus input bar binding
+- `AppAgentOverlay`: the host-facing entry point (passthrough window + chat controller)
+- `AppAgentViewController`: chat panel plus input bar, only valid as `AppAgentWindow`'s root
 - `AppAgentInputBar`: text field, send button, collapsed menu behavior
 - `AppAgentTextField`: custom text field used by the input bar
 - `AppAgentMenuButton`: compact menu button

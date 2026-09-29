@@ -26,6 +26,10 @@ public enum FailoverReason: String, Sendable {
     case formatError = "format_error"
     /// Network timeout — retryable
     case timeout = "timeout"
+    /// 传输层中断：连接被撕掉、网络切换、或流静默到被看门狗判死。
+    /// 与 `timeout` 分开是因为处理策略不同 —— 这类错误**换模型没用**，
+    /// 重试同一个端点才是对的（见 `ErrorClassifier.classify` 里的 `shouldFallback: false`）。
+    case transport = "transport"
     /// Unclassifiable — retryable with backoff
     case unknown = "unknown"
 }
@@ -66,7 +70,7 @@ public enum ErrorClassifier {
         // URLError — network/transport issues
         if let urlError = error as? URLError {
             return ClassifiedError(
-                reason: .timeout,
+                reason: urlError.code == .timedOut ? .timeout : .transport,
                 statusCode: nil,
                 message: urlError.localizedDescription,
                 retryable: true,
@@ -104,6 +108,16 @@ public enum ErrorClassifier {
         switch error {
         case .httpError(let statusCode, let body):
             return classifyHTTPError(statusCode: statusCode, body: body)
+        case .streamStalled:
+            // 端点是好的，是连接断了 / 进程被冻结过。换模型解决不了，重试同一个才对。
+            return ClassifiedError(
+                reason: .transport,
+                statusCode: nil,
+                message: error.errorDescription ?? String(describing: error),
+                retryable: true,
+                shouldCompress: false,
+                shouldFallback: false
+            )
         case .invalidURL, .invalidResponse, .decodingError:
             return ClassifiedError(
                 reason: .formatError,

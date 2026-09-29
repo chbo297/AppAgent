@@ -91,6 +91,11 @@ public final class LLMExecutor: @unchecked Sendable {
                 return
             }
 
+            // 整轮都在后台执行断言的保护下跑：切到后台再回来这种常见操作不该把这一轮打断。
+            // 这条 defer 注册得最早，所以 LIFO 下它最后执行 —— 断言在收尾全部做完之后才释放。
+            let endBackgroundAssertion = BackgroundActivity.begin("AppAgent run")
+            defer { endBackgroundAssertion() }
+
             // 这一轮所有状态写入的唯一出口。依赖用闭包注入，journal 不认识 executor。
             let journal = TurnJournal(
                 session: self.session,
@@ -732,11 +737,28 @@ public final class LLMExecutor: @unchecked Sendable {
             if let preparedHostContext {
                 messagesForProvider.append(preparedHostContext.message(turnID: turnID))
             }
-            let stream = state.provider.streamCompletion(
-                messages: messagesForProvider,
-                system: systemParts,
-                tools: toolSegments,
-                modelId: state.modelId
+            let stream = StreamIdleGuard.wrap(
+                state.provider.streamCompletion(
+                    messages: messagesForProvider,
+                    system: systemParts,
+                    tools: toolSegments,
+                    modelId: state.modelId
+                ),
+                idleLimit: session.executionPolicy.streamIdleTimeout,
+                onStall: { [sessionId = session.id, provider = state.provider,
+                            modelId = state.modelId, iteration = state.iteration] idle in
+                    Logger.error("LLMExecutor", "streamStalled: iteration=\(iteration), idle=\(String(format: "%.1f", idle))s")
+                    AppAgentDebugLog.shared.record(
+                        .failure,
+                        message: String(format: "模型响应中断：%.1fs 没有新内容，按可重试错误处理", idle),
+                        sessionId: sessionId,
+                        provider: provider.name,
+                        apiProtocol: provider.apiProtocol.rawValue,
+                        modelId: modelId,
+                        iteration: iteration,
+                        reason: FailoverReason.transport.rawValue
+                    )
+                }
             )
             // 请求已发出，等首个内容：卡在这一步基本是网络 / 鉴权 / 网关问题。
             setStage(.requesting)
@@ -859,6 +881,10 @@ public final class LLMExecutor: @unchecked Sendable {
                         finishWithError(AIAgentError.cancelled, messages: state.currentMessages)
                         return
                     }
+                    // 重试和换模型一样要丢掉这次尝试已经吐出来的正文，否则界面上两截会接起来
+                    // （`assistantText` 是每轮迭代的局部变量，重来时从空开始，但 uiState 不会）。
+                    // 流被看门狗判死后重试是最常见的入口，漏了这一句就是「半截 + 完整」两遍。
+                    journal.attemptDiscarded()
                     continue
                 }
 

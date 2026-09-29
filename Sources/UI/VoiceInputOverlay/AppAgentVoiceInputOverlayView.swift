@@ -731,9 +731,10 @@ extension AppAgentVoiceInputOverlayView: AppAgentVoiceEditModeSessionHost {
         setNeedsLayout()
     }
 
-    func editSessionKeyboardHeightDidChange(duration: TimeInterval) {
+    func editSessionKeyboardHeightDidChange(animation: AppAgentKeyboardObserver.Animation) {
         guard isEditingModeActive, !isHidden else { return }
-        UIView.animate(withDuration: max(duration, 0.01)) {
+        // 时长和曲线都用键盘那份，编辑态浮层与键盘同速同步上移。
+        animation.run {
             self.setNeedsLayout()
             self.layoutIfNeeded()
         }

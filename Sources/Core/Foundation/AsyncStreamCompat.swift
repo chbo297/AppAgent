@@ -17,3 +17,16 @@ extension AsyncStream {
         }
     }
 }
+
+extension AsyncThrowingStream where Failure == Error {
+    /// Create a (stream, continuation) pair with backward compatibility for iOS < 17.
+    static func makePair() -> (stream: AsyncThrowingStream, continuation: Continuation) {
+        if #available(iOS 17.0, macOS 14.0, *) {
+            return makeStream()
+        } else {
+            var cont: Continuation!
+            let stream = AsyncThrowingStream { cont = $0 }
+            return (stream, cont)
+        }
+    }
+}

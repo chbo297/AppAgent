@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 import XCTest
 @testable import AppAgent
@@ -373,6 +374,48 @@ final class AppAgentRowRefreshTests: XCTestCase {
         table.layoutIfNeeded()
         XCTAssertEqual(table.delegate?.tableView?(table, heightForRowAt: path), narrowHeight)
         assertHeightsMatch(in: list)
+    }
+
+    /// 过程明细的阅读位置由列表按行身份给出，视图只负责「应用」。
+    ///
+    /// 这里锁的是「应用」这一半（可确定性断言）：给定位置就滚到那儿，贴底态跟随最大 offset。
+    /// 「列表按身份存 / 跨复用恢复」那一半依赖真实拖动手势，单测里造不出 `isDragging`，
+    /// 只能靠模拟器上手动验；但身份键与迁移逻辑本身由 `testRowIdentityStaysStableAcrossRebuild` 覆盖。
+    func testActivityViewAppliesGivenDetailPositionAndPinnedFollowsBottom() {
+        let view = AppAgentActivityView(frame: CGRect(x: 0, y: 0, width: 360, height: 240))
+        var timeline = AppAgentActivityTimeline()
+        timeline.setStage(.streaming)
+        for index in 0..<12 {
+            timeline.appendThinking("很长的一段过程明细，用来把内部滚动撑出可滚动空间 \(index)")
+        }
+
+        view.configure(with: timeline, expanded: true, detailPosition: .pinnedToBottom)
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        let maximum = view.detailScrollView.bo_maximumContentOffsetY
+        XCTAssertGreaterThan(maximum, 0, "明细要足够长才谈得上阅读位置")
+        XCTAssertEqual(view.detailScrollView.contentOffset.y, maximum, accuracy: 0.5)
+
+        // 用户上翻过：给回一个非贴底位置，必须落在那儿而不是被拉回底部。
+        let readingOffset = maximum / 2
+        view.configure(
+            with: timeline,
+            expanded: true,
+            detailPosition: AppAgentActivityDetailPosition(offsetY: readingOffset, isPinnedToBottom: false)
+        )
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        XCTAssertEqual(view.detailScrollView.contentOffset.y, readingOffset, accuracy: 0.5)
+
+        // 存下来的位置可能比当前最大 offset 大（明细收缩过）：读的时候夹一次，不许越界。
+        view.configure(
+            with: timeline,
+            expanded: true,
+            detailPosition: AppAgentActivityDetailPosition(offsetY: maximum + 500, isPinnedToBottom: false)
+        )
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        XCTAssertEqual(view.detailScrollView.contentOffset.y, maximum, accuracy: 0.5)
     }
 
     private func completedReply() -> ChatMessage {

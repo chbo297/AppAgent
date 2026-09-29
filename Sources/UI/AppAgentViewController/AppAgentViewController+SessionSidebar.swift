@@ -118,10 +118,12 @@ extension AppAgentViewController {
             view.bringSubviewToFront(voiceInputOverlayView)
         }
         sessionSidebarView.setPresented(true, animated: animated)
+        notifyPresentationChangeIfNeeded(reason: .visibility)
     }
 
     func hideSessionSidebar(animated: Bool) {
         sessionSidebarView.setPresented(false, animated: animated)
+        notifyPresentationChangeIfNeeded(reason: .visibility)
     }
 
     /// 刷新真实 Session；当前数量不足时补演示数据，后续接入完整多 Session 后无需改列表组件。

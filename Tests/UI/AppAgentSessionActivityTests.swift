@@ -3,6 +3,10 @@ import XCTest
 import UIKit
 @testable import AppAgent
 
+/// 整个用例类都在主线程：它断言的是 UIKit 视图的布局与刷新行为，连那条期望高度都由
+/// `AppAgentChatMessageListView` 的 MainActor 常量算出来。隔离标在类上一次，
+/// 省掉每个方法各标一遍，也让存储属性的默认值有合法的求值环境。
+@MainActor
 final class AppAgentSessionActivityTests: XCTestCase {
     private let expectedCoordinatorLatestReplyInitialHeight: CGFloat = max(
         44,
@@ -12,7 +16,6 @@ final class AppAgentSessionActivityTests: XCTestCase {
             - AppAgentChatMessageListView.latestReplyUserTailHeight
     )
 
-    @MainActor
     func testTerminalReloadRetainsAllocatedHeightAndSessionSwitchResetsIt() async throws {
         let central = AIAgentCentral()
         let agent = await central.create(
@@ -64,7 +67,6 @@ final class AppAgentSessionActivityTests: XCTestCase {
         )
     }
 
-    @MainActor
     func testStageRefreshPreservesLiveContentAndCollapseChoice() async throws {
         let central = AIAgentCentral()
         let agent = await central.create(
@@ -119,7 +121,6 @@ final class AppAgentSessionActivityTests: XCTestCase {
         XCTAssertTrue(controller.chatMessages.last?.isActivityExpanded == true)
     }
 
-    @MainActor
     func testCompletedReasoningSurvivesReloadExpansionAndFollowingTurn() async throws {
         let central = AIAgentCentral()
         let agent = await central.create(
@@ -191,7 +192,6 @@ final class AppAgentSessionActivityTests: XCTestCase {
         XCTAssertTrue(controller.chatMessages.last?.activity?.isEmpty == true)
     }
 
-    @MainActor
     func testTerminalWithoutWireActivityPreservesDisplayedDetails() async throws {
         let central = AIAgentCentral()
         let agent = await central.create(
@@ -245,7 +245,6 @@ final class AppAgentSessionActivityTests: XCTestCase {
         }
     }
 
-    @MainActor
     func testTerminalRefreshUsesRecordedFailureAndIgnoresLateLiveEvents() async throws {
         let central = AIAgentCentral()
         let agent = await central.create(

@@ -963,16 +963,30 @@ final class AppAgentCoreTests: XCTestCase {
 
     // MARK: - ConcurrencyLimiter
 
-    func testConcurrencyLimiterBasic() async {
+    func testConcurrencyLimiterCapsParallelWork() async throws {
         let limiter = ConcurrencyLimiter(limit: 2)
+        let inFlight = Locked(wrappedValue: 0)
+        let peak = Locked(wrappedValue: 0)
 
-        // First two should pass immediately
-        await limiter.wait()
-        await limiter.wait()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<6 {
+                group.addTask {
+                    try await limiter.withPermit {
+                        let current = inFlight.mutate { value -> Int in
+                            value += 1
+                            return value
+                        }
+                        peak.mutate { $0 = max($0, current) }
+                        try? await Task.sleep(nanoseconds: 20_000_000)
+                        inFlight.mutate { $0 -= 1 }
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
 
-        // Signal to free a slot
-        await limiter.signal()
-        await limiter.signal()
+        XCTAssertEqual(inFlight.wrappedValue, 0, "额度必须全部归还")
+        XCTAssertEqual(peak.wrappedValue, 2, "并发不能超过 limit，也不该被串行化成 1")
     }
 
     // MARK: - 多模态：Tool.Output.image → 两种协议的 wire format
@@ -1448,11 +1462,13 @@ final class AppAgentCoreTests: XCTestCase {
 
     func testSessionUIState() {
         let state = SessionUIState()
-        var changedKeys: [String] = []
+        // onChange 是 `@MainActor @Sendable`，不能直接捕获并写局部 var（Swift 6 会判定跨隔离域
+        // 发送）。用 Locked 收集，读写都过锁。
+        let changedKeys = Locked<[String]>(wrappedValue: [])
         let expectation = XCTestExpectation(description: "onChange called")
         expectation.expectedFulfillmentCount = 4 // setStreaming(true), appendx2, setStreaming(false)
         state.onChange = { key in
-            changedKeys.append(key)
+            changedKeys.mutate { $0.append(key) }
             expectation.fulfill()
         }
 
@@ -1469,8 +1485,8 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(state.streamingText, "")
 
         wait(for: [expectation], timeout: 2.0)
-        XCTAssertTrue(changedKeys.contains("isStreaming"))
-        XCTAssertTrue(changedKeys.contains("streamingText"))
+        XCTAssertTrue(changedKeys.wrappedValue.contains("isStreaming"))
+        XCTAssertTrue(changedKeys.wrappedValue.contains("streamingText"))
     }
 
     func testSessionUIStateCustomState() {

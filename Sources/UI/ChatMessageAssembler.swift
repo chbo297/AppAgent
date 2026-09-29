@@ -351,13 +351,6 @@ public enum ChatMessageAssembler {
         }
         return text
     }
-
-    static func compact(_ text: String, limit: Int = 160) -> String {
-        let single = text
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return single.count <= limit ? single : String(single.prefix(limit)) + "…"
-    }
 }
 
 #endif

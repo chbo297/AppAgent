@@ -45,6 +45,9 @@ final class AppAgentChatPanelView: UIView {
     /// 内容展示窗口；所有实际内容都添加到这里，由它自己的 bounds + 圆角裁切出最终可见范围。
     let viewportView = UIView()
 
+    /// 可见区（`viewportView`）几何变化后的通知。控制器用它把面板的展示位置和高度报给宿主。
+    var onViewportChanged: (() -> Void)?
+
     private let backgroundView = AppAgentChatPanelBackgroundView()
     private let grabberView = UIView()
 
@@ -150,6 +153,10 @@ final class AppAgentChatPanelView: UIView {
         // A/B 过渡区间四角同半径；高于 A 点是「上圆角、下直角」。
         applyCornerRadius(top: layout.topCornerRadius, bottom: layout.bottomCornerRadius, to: viewportView)
         backgroundView.applyCornerRadius(top: layout.topCornerRadius, bottom: layout.bottomCornerRadius)
+
+        // 可见区变了：冒泡给控制器去报给宿主。竖向拖拽拉高不经过 inputBar 那条路，
+        // 只有这里知道面板的展示高度变了。
+        onViewportChanged?()
     }
 
     /// 上下圆角只有「四角同半径」与「只上两角」两种形态，正好能用 `maskedCorners` 表达。

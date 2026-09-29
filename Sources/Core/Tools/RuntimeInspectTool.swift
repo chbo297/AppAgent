@@ -38,14 +38,28 @@ public struct RuntimeInspectTool: ToolProtocol {
         - 'property_set': write a 'keyPath' value via KVC using 'value' (optional 'class', defaults to top page)
         - 'invoke': call 'selector' on 'class' with 'argumentsJSON' (a JSON array). Powerful — use carefully. \
         Object-only, same as 'view_invoke'.
+        Simulating the user (prefer these over reflection when the goal is "do what a tap would do"):
+        - 'page_navigate': switch pages through the container view controller. 'target' = \
+        "tab:Profile" / "tab:2" / "pop" / "popToRoot" / "dismiss". Tab selection also fires the host's \
+        UITabBarControllerDelegate callbacks, and a host that refuses the selection is reported as such. \
+        **This is the first thing to try for "go to page X" — one call, no reflection.**
+        - 'view_activate': activate the view at 'path' the way a tap would: the nearest UIControl \
+        ancestor gets sendActions (optional 'event' = touchUpInside (default) / touchDown / \
+        touchUpOutside / valueChanged / primaryActionTriggered), otherwise accessibilityActivate(). \
+        Touch events are NOT synthesized; if neither entry point exists it fails instead of pretending.
+        - 'page_scroll': scroll. 'direction' = up/down/left/right, 'amount' = screens (default 1). \
+        Uses the nearest UIScrollView's contentOffset, else accessibilityScroll.
+        Mutating ops report whether the visible page actually changed, so a write that had no effect \
+        is visible immediately instead of needing another ui_hierarchy round trip.
         Typical flow for UI surgery: 'ui_hierarchy' (summary) → 'view_tree' on the interesting path → \
-        'view_info' → 'view_set' / 'view_invoke'.
+        'view_info' → 'view_activate' / 'view_set' / 'view_invoke'.
         """
     public let parameters = Tool.Schema(
         properties: [
             "scope": HostInspectionScope.parameter,
             "op": .string(description: "Operation.",
                           enumValues: ["ui_hierarchy", "view_tree", "view_info", "view_set", "view_invoke",
+                                       "view_activate", "page_navigate", "page_scroll",
                                        "class_list", "method_list", "property_list", "property_value", "property_set", "invoke"]),
             "detail": .string(description: "For ui_hierarchy: 'summary' (default, cheap) or 'full' (everything, large).",
                               enumValues: ["summary", "full"],
@@ -56,10 +70,20 @@ public struct RuntimeInspectTool: ToolProtocol {
             "path": .string(description: "View path using actual subviews indices. \"0/2/1\" is relative to the scoped default window; \"W1:0/2/1\" uses stable window handle W1; \"root\" is the default window."),
             "key": .string(description: "Property name for view_set (frame/alpha/backgroundColor/text/...)."),
             "maxDepth": .integer(description: "Depth limit for view_tree (default 12).", minimum: 1, maximum: 40),
-            "keyPath": .string(description: "Key path for property_value/property_set."),
+            "keyPath": .string(description: "Key path for property_value/property_set. Resolved against the "
+                               + "innermost visible view controller unless 'class' is given — for a tab bar app "
+                               + "that is the selected child, so reach the container via 'tabBarController.…' "
+                               + "or 'navigationController.…'."),
             "value": .string(description: "New value (string) for property_set / view_set."),
             "selector": .string(description: "Selector for invoke/view_invoke."),
-            "argumentsJSON": .string(description: "JSON array string of arguments for invoke/view_invoke.")
+            "argumentsJSON": .string(description: "JSON array string of arguments for invoke/view_invoke."),
+            "target": .string(description: "For page_navigate: \"tab:<index or title>\", \"pop\", \"popToRoot\" or \"dismiss\"."),
+            "event": .string(description: "For view_activate: which UIControl event to send. Defaults to touchUpInside.",
+                             enumValues: ["touchUpInside", "touchDown", "touchUpOutside",
+                                          "valueChanged", "primaryActionTriggered"]),
+            "direction": .string(description: "For page_scroll: scroll direction.",
+                                 enumValues: ["up", "down", "left", "right"]),
+            "amount": .number(description: "For page_scroll: how many screens to scroll (default 1).")
         ],
         required: ["op"]
     )
@@ -75,6 +99,11 @@ public struct RuntimeInspectTool: ToolProtocol {
              "class_list", "method_list", "property_list", "property_value":
             return .safe
         case "view_set", "property_set":
+            return .moderate
+        // 模拟用户操作等价于用户自己点/滑了一下：宿主的 delegate、埋点、拦截逻辑全都照常
+        // 跑，能做的事不超过一个真实用户。所以按普通改动对待，不再弹授权卡；
+        // `toolMutationPolicy == .readOnly` 的硬边界仍然拦得住它们。
+        case "view_activate", "page_navigate", "page_scroll":
             return .moderate
         case "view_invoke", "invoke":
             return .sensitive
@@ -146,6 +175,26 @@ public struct RuntimeInspectTool: ToolProtocol {
             let argsJSON = arguments["argumentsJSON"]?.stringValue ?? "[]"
             return output(await provider.invokeOnView(path: path, selector: selector, argumentsJSON: argsJSON, context: context))
 
+        case "view_activate":
+            guard let path = arguments["path"]?.stringValue else { return .error("'path' is required for view_activate") }
+            return mutationOutput(await provider.activateView(
+                path: path, event: arguments["event"]?.stringValue, context: context
+            ))
+        case "page_navigate":
+            guard let target = arguments["target"]?.stringValue else {
+                return .error("'target' is required for page_navigate (e.g. \"tab:Profile\", \"pop\", \"dismiss\")")
+            }
+            return mutationOutput(await provider.navigatePage(target: target, context: context))
+        case "page_scroll":
+            guard let direction = arguments["direction"]?.stringValue else {
+                return .error("'direction' is required for page_scroll (up / down / left / right)")
+            }
+            return mutationOutput(await provider.scrollPage(
+                path: arguments["path"]?.stringValue,
+                direction: direction,
+                amount: arguments["amount"]?.numberValue,
+                context: context
+            ))
         case "class_list":
             // 无过滤时进程内 ObjC 类是万级规模，直接返回等于烧掉整个上下文。
             let filter = arguments["filter"]?.stringValue

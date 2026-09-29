@@ -16,6 +16,98 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertFalse(AppAgentViewController().usesFixedDebugReply)
     }
 
+    // MARK: - 展示状态上报（宿主据此知道被挡住了什么）
+
+    /// 收集 `appAgentPresentationDidChange` 的假宿主。
+    private final class PresentationSpy: AppAgentPresentationDelegate {
+        var states: [AppAgentPresentationState] = []
+        func appAgentPresentationDidChange(_ state: AppAgentPresentationState) {
+            states.append(state)
+        }
+    }
+
+    private func makeLaidOutViewController() -> AppAgentViewController {
+        let viewController = AppAgentViewController()
+        viewController.view.frame = bounds
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutIfNeeded()
+        return viewController
+    }
+
+    /// 输入栏与对话面板都要出现在遮挡列表里，且面板给的是**可见区**（viewport），
+    /// 不是那块铺满控制器的内容画布。
+    func testPresentationStateReportsInputBarAndChatPanelAreas() throws {
+        let viewController = makeLaidOutViewController()
+        let state = viewController.presentationState
+
+        let inputBarFrame = try XCTUnwrap(state.inputBarFrame)
+        XCTAssertEqual(inputBarFrame, viewController.inputBar.frame)
+
+        let panelFrame = try XCTUnwrap(state.chatPanelFrame, "面板可见区必须报给宿主")
+        XCTAssertGreaterThan(panelFrame.height, 0)
+        XCTAssertLessThan(
+            panelFrame.height,
+            viewController.view.bounds.height,
+            "报的应是裁切后的可见区，不是铺满控制器的内容画布"
+        )
+        XCTAssertTrue(
+            state.occludedUnion.contains(inputBarFrame),
+            "并集必须覆盖每一块区域"
+        )
+    }
+
+    /// 竖向拖拽把面板拉高：报出来的面板高度跟着变，且原因是面板高度而不是输入栏。
+    func testChatPanelHeightChangeIsReportedWithPanelReason() throws {
+        let viewController = makeLaidOutViewController()
+        let spy = PresentationSpy()
+        viewController.presentationDelegate = spy
+
+        // 先落到一个中间展示高度（默认状态下 viewport 已经是满高，再加只会被 bounds 夹掉）。
+        viewController.chatPanelView.updateDisplayHeight(
+            300,
+            minimumDisplayHeight: 120,
+            compactTransitionStartDisplayHeight: 300
+        )
+        let before = try XCTUnwrap(viewController.presentationState.chatPanelFrame)
+        spy.states.removeAll()
+
+        // BODragScroll 发布展示高度的那条入口，等价于用户把面板拖高。
+        viewController.chatPanelView.updateDisplayHeight(
+            500,
+            minimumDisplayHeight: 120,
+            compactTransitionStartDisplayHeight: 300
+        )
+
+        let after = try XCTUnwrap(viewController.presentationState.chatPanelFrame)
+        XCTAssertGreaterThan(after.height, before.height, "拖高后面板可见区必须变高")
+        XCTAssertEqual(spy.states.last?.reason, .chatPanelHeightPan)
+    }
+
+    /// 同一份画面不重复报：判等只看几何与显隐，reason 不参与。
+    func testIdenticalGeometryIsNotReportedTwice() {
+        let viewController = makeLaidOutViewController()
+        let spy = PresentationSpy()
+        viewController.presentationDelegate = spy
+        let baseline = spy.states.count
+
+        viewController.notifyPresentationChangeIfNeeded(reason: .layout)
+        viewController.notifyPresentationChangeIfNeeded(reason: .keyboard)
+
+        XCTAssertEqual(spy.states.count, baseline, "几何没变就不该再报")
+    }
+
+    /// 输入栏收到底时面板按 ease-out 淡出：宿主要能看出「透明了、其实不再遮挡」。
+    func testCollapsedInputBarFadesChatPanelOpacity() throws {
+        let viewController = makeLaidOutViewController()
+        viewController.collapseInputBar(animated: false)
+        viewController.view.layoutIfNeeded()
+
+        let state = viewController.presentationState
+        XCTAssertTrue(state.isInputBarCollapsed)
+        let panelOpacity = state.areas.first { $0.kind == .chatPanel }?.opacity ?? 0
+        XCTAssertLessThan(panelOpacity, 0.5, "收起态面板已经淡出，不该报成实心遮挡")
+    }
+
     /// 固定假回复只在宿主显式打开时生效（脱离模型联调 UI 用）。
     func testFixedDebugReplyIsAppendedImmediatelyWhenExplicitlyEnabled() {
         let viewController = AppAgentViewController()

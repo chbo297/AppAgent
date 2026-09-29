@@ -7,55 +7,14 @@
 import BOUIKit
 import UIKit
 
-/// AppAgentViewController 实际应用 inputBar frame 变化的原因。
-public enum AppAgentInputBarFrameChangeReason {
-    /// 场景：`viewDidLayoutSubviews` 或容器尺寸变化时，AppAgentViewController 主动重新计算并应用 inputBar frame。
-    case layout
-
-    /// 场景：inputBar 自己的 textField 激活/失焦，或键盘高度变化后，需要根据键盘避让策略重新应用 inputBar frame。
-    case keyboard
-
-    /// 场景：收起态点击 menu 按钮、手势结算判定为展开，或外部主动请求展开 inputBar。
-    case expand
-
-    /// 场景：展开态点击 menu 按钮、手势结算判定为收起，或外部主动请求收起 inputBar。
-    case collapse
-
-    /// 场景：展开态从 menu 按钮起手横向拖拽 resize，inputBar 跟随手指实时改变宽度。
-    case expandedResizePan
-
-    /// 场景：收起态从 menu 按钮起手拖拽移动，inputBar 跟随手指实时改变位置。
-    case collapsedMovePan
-
-    /// 场景：收起态拖拽结束后，根据稳定停留、速度和吸附策略计算最终落点并应用 frame。
-    case collapsedMoveResolution
-}
-
-/// AppAgentViewController 完成 inputBar frame 应用后对外通知的上下文。
-public struct AppAgentInputBarFrameChangeContext {
-    public let reason: AppAgentInputBarFrameChangeReason
-    public let oldFrame: CGRect
-    public let newFrame: CGRect
-    public let animated: Bool
-
-    public init(
-        reason: AppAgentInputBarFrameChangeReason,
-        oldFrame: CGRect,
-        newFrame: CGRect,
-        animated: Bool
-    ) {
-        self.reason = reason
-        self.oldFrame = oldFrame
-        self.newFrame = newFrame
-        self.animated = animated
-    }
-}
-
 /// Main view controller for AppAgent chat interface.
 /// Hosts a draggable ChatPanel and an input bar (AppAgentInputBar).
-/// Intended to be used as the rootViewController of an `AppAgentWindow`.
 /// All layout is done via manual frames in `viewDidLayoutSubviews`.
-open class AppAgentViewController: UIViewController {
+///
+/// **只能作为 `AppAgentWindow` 的 rootViewController 使用**（由 `AppAgentOverlay` 装配）。
+/// 不支持宿主把它塞进自己的 VC 层级：面板几何、键盘联动、决策卡片定位都按「独占一个穿透
+/// window」推导，嵌进宿主容器后这些前提都不成立。宿主要自定义 UI 就直接对着 `AISession` 写。
+public class AppAgentViewController: UIViewController {
 
     // MARK: - Public API
 
@@ -84,12 +43,22 @@ open class AppAgentViewController: UIViewController {
         }
     }
 
-    /// inputBar frame 被 AppAgentViewController 实际应用后触发，宿主可用它观察键盘、展开、收起和拖拽导致的位置变化。
-    public var onInputBarFrameChange: ((AppAgentInputBarFrameChangeContext) -> Void)?
+    /// UI 层展示事件（会话切换、面板显隐、展示几何与遮挡区域）的宿主回调。与核心 `AIAgentDelegate`
+    /// 分离：「当前展示的是哪个会话 / 面板是否可见 / 挡住了什么」是纯 UI 概念，核心 `AIAgent` 不应依赖 UI 层。
+    public weak var presentationDelegate: AppAgentPresentationDelegate? {
+        didSet { notifyPresentationChangeIfNeeded(reason: .layout) }
+    }
 
-    /// UI 层展示事件（会话切换、聊天面板显隐）的宿主回调。与核心 `AIAgentDelegate` 分离：
-    /// 「当前展示的是哪个会话 / 面板是否可见」是纯 UI 概念，核心 `AIAgent` 不应依赖 UI 层。
-    public weak var presentationDelegate: AppAgentPresentationDelegate?
+    /// 上一次报给宿主的展示状态，用来判等去重。
+    var lastReportedPresentationState: AppAgentPresentationState?
+
+    /// 当前正在应用的变化原因：面板可见区的变化由面板侧冒泡回来，需要沿用这一次的原因
+    /// 而不是一律记成竖向拖拽。
+    var currentPresentationChangeReason: AppAgentPresentationChangeReason?
+
+    /// 键盘驱动布局时的动画参数。键盘那条路是把 `layoutInputBar` 包在键盘自己的动画块里跑的，
+    /// inputBar 侧拿到的是 `.immediate`，真正的时长曲线只有这里记得住。
+    var ambientKeyboardAnimation: AppAgentPresentationAnimation?
 
     /// The currently displayed session ID.
     public private(set) var currentSessionId: String?
@@ -114,7 +83,7 @@ open class AppAgentViewController: UIViewController {
         chatMessages.removeAll()
         // 卡片是面板全局的一张：先撤掉上一个会话的，再贴新会话正在等的那张（如果有）。
         if isViewLoaded {
-            chatPanelView.dismissDecision()
+            dismissDecisionCard()
             // 一并清除已分配高度和过程阅读位置，避免相同 turn/start 跨会话继承。
             chatPanelView.listView.setMessages([])
         }
@@ -130,9 +99,6 @@ open class AppAgentViewController: UIViewController {
         presentationDelegate?.appAgent(didSwitchSessionFrom: old, to: sessionId)
     }
 
-    /// 子类可 override 观察 inputBar frame 变化。
-    open func inputBarFrameDidChange(_ context: AppAgentInputBarFrameChangeContext) {}
-
     // MARK: - Subviews
 
     public let inputBar = AppAgentInputBar()
@@ -141,7 +107,10 @@ open class AppAgentViewController: UIViewController {
     let chatPanelCoordinator = AppAgentChatPanelCoordinator()
 
     /// 决策卡片的呈现者（强持有；注册表里是弱引用）。
-    private var decisionPresenter: AppAgentDecisionPresenter?
+    ///
+    /// `nonisolated(unsafe)`：`deinit` 要读它来结清在飞的请求，而 deinit 永远是
+    /// 非隔离的。只在 `viewDidLoad` 写、在 `deinit` 读，两处都在主线程，安全。
+    nonisolated(unsafe) private var decisionPresenter: AppAgentDecisionPresenter?
     /// 独立诊断页面在加载视图前关闭注册，不能抢走宿主会话的授权请求。
     var registersDecisionPresenter = true
     let sessionSidebarView = AppAgentSessionSidebarView()
@@ -222,7 +191,7 @@ open class AppAgentViewController: UIViewController {
 
     // MARK: - Lifecycle
 
-    override open func viewDidLoad() {
+    override public func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
 
@@ -238,20 +207,21 @@ open class AppAgentViewController: UIViewController {
         registerDecisionPresenter()
     }
 
-    override open func viewWillAppear(_ animated: Bool) {
+    override public func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         prepareChatForPresentation()
     }
 
     deinit {
+        // 两件容易想歪的事：
+        // 1. 不用手动从 `DecisionResponderCentral` 注销 —— 注册表存的是弱引用，
+        //    presenter 跟着 self 一起走，register/unregister 都会顺手清掉空位。
+        // 2. 在飞的授权/澄清请求必须就地结清：continuation 归 presenter 所有，
+        //    面板只拿到 `complete` 闭包；面板一死那些闭包就没了，而等待的 executor
+        //    还强持着 presenter 挂在那儿——所以由这里发信号、presenter 自己结清。
+        //    → docs/Decisions.md
         NotificationCenter.default.removeObserver(self)
-        currentSession?.uiState.onChange = nil
-        if let presenter = decisionPresenter {
-            DecisionResponderCentral.default.unregister(presenter)
-        }
-        // 还在排队等卡片的请求必须就地答复（兜底语义），否则它们的 continuation
-        // 带着未恢复状态析构，发起它们的那一轮永远回不来。
-        drainPendingDecisions()
+        decisionPresenter?.settlePendingDecisions()
     }
 
     /// 把「等用户拍板」的呈现权拿到 AppAgent 自己手上：卡片在对话面板内弹，
@@ -304,7 +274,7 @@ open class AppAgentViewController: UIViewController {
 
     // MARK: - Manual Frame Layout
 
-    override open func viewDidLayoutSubviews() {
+    override public func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         layoutInputBar(reason: .layout)
         layoutChatPanel()

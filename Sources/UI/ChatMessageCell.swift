@@ -15,6 +15,10 @@ public final class ChatMessageCell: UITableViewCell {
     /// 点击过程区折叠行时回调（由列表转发给 ViewController）。
     var onToggleActivity: (() -> Void)?
 
+    /// 用户滚过过程明细后回调。阅读位置**存在列表侧**（按 `ChatRowIdentity`），
+    /// cell 只做透传：cell 会被复用，存在这里等于存在「谁碰巧复用了这一格」上。
+    var onActivityDetailPositionChanged: ((AppAgentActivityDetailPosition) -> Void)?
+
     private let rootStack = UIStackView()
     private let activityView = AppAgentActivityView()
     private let bubbleRow = UIView()
@@ -86,6 +90,9 @@ public final class ChatMessageCell: UITableViewCell {
         messageTextView.addSubview(streamingCaretView)
 
         activityView.onToggle = { [weak self] in self?.onToggleActivity?() }
+        activityView.onDetailPositionChanged = { [weak self] position in
+            self?.onActivityDetailPositionChanged?(position)
+        }
 
         rootStack.axis = .vertical
         rootStack.spacing = 6
@@ -135,10 +142,16 @@ public final class ChatMessageCell: UITableViewCell {
         displayedMessageID = nil
         renderedTextInput = nil
         onToggleActivity = nil
+        onActivityDetailPositionChanged = nil
         hideStreamingCaret()
     }
 
-    public func configure(with message: ChatMessage) {
+    /// - Parameter activityDetailPosition: 过程明细的阅读位置，由列表按行身份给出；
+    ///   `nil` 表示没有记录（新行，或模板 cell 只是在测高度）。
+    public func configure(
+        with message: ChatMessage,
+        activityDetailPosition: AppAgentActivityDetailPosition? = nil
+    ) {
         let baseFont = UIFont.systemFont(ofSize: 15)
         if displayedMessageID != message.id {
             messageTextView.selectedRange = NSRange(location: 0, length: 0)
@@ -206,7 +219,11 @@ public final class ChatMessageCell: UITableViewCell {
            activity.shouldDisplayActivity,
            !message.suppressResolvedActivity {
             activityView.isHidden = false
-            activityView.configure(with: activity, expanded: message.isActivityExpanded)
+            activityView.configure(
+                with: activity,
+                expanded: message.isActivityExpanded,
+                detailPosition: activityDetailPosition
+            )
         } else {
             activityView.isHidden = true
         }

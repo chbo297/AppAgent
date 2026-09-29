@@ -185,13 +185,17 @@ final class AppAgentChatScrollTraceTests: XCTestCase {
             Logger.minimumLevel = savedLevel
             Logger.handler = savedHandler
         }
-        var captured: [String] = []
+        // Logger.handler 是 @Sendable，可能从任意线程被调回 —— 收集缓冲必须自带同步。
+        // 捕获一个裸 var 不只是过不了 Swift 6，并发写 Array 本身就会丢行甚至崩。
+        let captured = Locked<[String]>(wrappedValue: [])
         Logger.isEnabled = true
         Logger.minimumLevel = .info
         Logger.handler = { _, line in
-            if line.contains("[ChatScrollTrace]") { captured.append(line) }
+            if line.contains("[ChatScrollTrace]") {
+                captured.mutate { $0.append(line) }
+            }
         }
-        body { captured }
+        body { captured.wrappedValue }
     }
 }
 #endif

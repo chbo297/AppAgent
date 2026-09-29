@@ -56,48 +56,92 @@ public enum HostInspectionUIKit {
         return false
     }
 
+    /// 归属只认窗口。AppAgent 的 UI 全部活在自己的窗口里（`AppAgentWindow`、调试用的
+    /// `AppAgentRegionDebugWindow`，或任何被标记过的窗口），宿主窗口里的一切都归宿主。
+    /// 三条规则顺序短路，宿主窗口内的视图只花一次 `view.window`，不再逐层爬类名：
+    ///   1. 对象自己被显式标记 —— 宿主把某棵子树交还 SDK 时唯一的后门
+    ///   2. 能定位到所在窗口 —— 窗口说了算
+    ///   3. 定位不到窗口（游离子树、纯逻辑对象）—— 才回退到类判定 + 祖先传播
     public static func isAppAgentOwned(_ object: NSObject) -> Bool {
-        var visited = Set<ObjectIdentifier>()
-        return owned(object, visited: &visited)
+        isAppAgentOwned(object, hostingWindow: window(hosting: object))
     }
 
-    private static func owned(_ object: NSObject, visited: inout Set<ObjectIdentifier>) -> Bool {
+    private static func isAppAgentOwned(_ object: NSObject, hostingWindow: UIWindow?) -> Bool {
+        if isExplicitlyMarked(object) { return true }
+        if let hostingWindow { return isAppAgentWindow(hostingWindow) }
+        var visited = Set<ObjectIdentifier>()
+        return detachedOwner(object, visited: &visited)
+    }
+
+    /// 再开新窗口时，让窗口类 conform `AppAgentRuntimeOwned` 或建完调一次
+    /// `markAppAgentOwned(window)`，整扇窗口就自动归 AppAgent。
+    public static func isAppAgentWindow(_ window: UIWindow) -> Bool {
+        if isExplicitlyMarked(window) { return true }
+        if let cls: AnyClass = object_getClass(window), isAppAgentClass(cls) { return true }
+        // 宿主拿普通 UIWindow 承载 AppAgent 面板时也算 AppAgent 的窗口：一次 root VC
+        // 判定就够，代价是常数，换来 agent 不会反过来内省自己的面板。
+        guard let root = window.rootViewController else { return false }
+        if isExplicitlyMarked(root) { return true }
+        guard let rootClass: AnyClass = object_getClass(root) else { return false }
+        return isAppAgentClass(rootClass)
+    }
+
+    private static func isExplicitlyMarked(_ object: NSObject) -> Bool {
+        objc_getAssociatedObject(object, &ownershipKey) != nil
+    }
+
+    /// 只读 `viewIfLoaded`：读 `view` 会强制加载并触发 `viewDidLoad`，内省不许有这种副作用。
+    /// 未加载的子 VC 沿 parent / presenting 链往上找，所以懒加载的 tab 也能正确归属到宿主窗口。
+    static func window(hosting object: NSObject) -> UIWindow? {
+        if let window = object as? UIWindow { return window }
+        if let view = object as? UIView { return view.window }
+        guard var current = object as? UIViewController else { return nil }
+        var visited = Set<ObjectIdentifier>()
+        while visited.insert(ObjectIdentifier(current)).inserted {
+            if let window = current.viewIfLoaded?.window { return window }
+            guard let next = current.parent ?? current.presentingViewController else { return nil }
+            current = next
+        }
+        return nil
+    }
+
+    /// 仅当对象不属于任何窗口时才走：类判定 + 祖先传播。游离的 SDK 子树（构造中、
+    /// 已摘下、单测里的裸树）没有窗口可问，这里是它们唯一的归属来源。
+    private static func detachedOwner(_ object: NSObject, visited: inout Set<ObjectIdentifier>) -> Bool {
         guard visited.insert(ObjectIdentifier(object)).inserted else { return false }
-        if objc_getAssociatedObject(object, &ownershipKey) != nil { return true }
+        if isExplicitlyMarked(object) { return true }
         if let cls = object_getClass(object), isAppAgentClass(cls) { return true }
         if let view = object as? UIView {
             // A controller's root may be a plain UIView, even when embedded in a host window.
-            if let controller = view.next as? UIViewController, owned(controller, visited: &visited) { return true }
-            if let parent = view.superview, owned(parent, visited: &visited) { return true }
+            if let controller = view.next as? UIViewController,
+               detachedOwner(controller, visited: &visited) { return true }
+            if let parent = view.superview, detachedOwner(parent, visited: &visited) { return true }
             if let window = view as? UIWindow, let root = window.rootViewController,
-               owned(root, visited: &visited) { return true }
+               detachedOwner(root, visited: &visited) { return true }
         }
         if let controller = object as? UIViewController {
-            if let parent = controller.parent, owned(parent, visited: &visited) { return true }
-            if let presenter = controller.presentingViewController, owned(presenter, visited: &visited) { return true }
-            if let root = controller.viewIfLoaded {
-                if objc_getAssociatedObject(root, &ownershipKey) != nil || isAppAgentClass(type(of: root)) { return true }
-                if let parent = root.superview, owned(parent, visited: &visited) { return true }
-            }
+            if let parent = controller.parent, detachedOwner(parent, visited: &visited) { return true }
+            if let presenter = controller.presentingViewController,
+               detachedOwner(presenter, visited: &visited) { return true }
+            if let root = controller.viewIfLoaded, let parent = root.superview,
+               detachedOwner(parent, visited: &visited) { return true }
         }
         return false
     }
 
     public static func includes(_ object: NSObject, context: HostInspectionContext = .init()) -> Bool {
-        guard context.scope.includes(appAgentOwned: isAppAgentOwned(object)) else { return false }
-        // Explicitly bound helpers may also be used on direct objects by the JS bridge.
-        if let expected = context.sceneIdentifier {
-            let actual: String?
-            if let view = object as? UIView {
-                actual = sceneIdentifier(for: view)
-            } else if let controller = object as? UIViewController {
-                actual = controller.viewIfLoaded.flatMap { sceneIdentifier(for: $0) }
-            } else {
-                return true // Non-UI objects have no UIKit scene identity.
-            }
-            guard actual == expected else { return false }
-        }
-        return true
+        // 窗口只解析一次：归属和场景身份共用同一个真相来源。
+        let hostingWindow = window(hosting: object)
+        guard context.scope.includes(
+            appAgentOwned: isAppAgentOwned(object, hostingWindow: hostingWindow)
+        ) else { return false }
+        guard let expected = context.sceneIdentifier else { return true }
+        // Non-UI objects have no UIKit scene identity.
+        guard object is UIView || object is UIViewController else { return true }
+        // 未加载 view 的子 VC 由 `window(hosting:)` 沿 parent 链解析。以前这里直接读
+        // `viewIfLoaded` 拿 nil，懒加载的 tab 全被判成「不在本场景」——真机上
+        // 3 个 tab 只报出当前那一个，模型据此认定 tab bar 是假皮肤，绕了一大圈。
+        return hostingWindow?.windowScene?.session.persistentIdentifier == expected
     }
 
     public static func sceneIdentifier(for view: UIView) -> String? {

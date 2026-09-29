@@ -91,8 +91,17 @@ final class AppAgentUITests: XCTestCase {
         XCTAssertEqual(inputBar.trailingAction, .send)
         XCTAssertTrue(inputBar.plusButton.isHidden)
         XCTAssertTrue(inputBar.inputSourceButton.isHidden)
-        // 发送 / 停止占的就是原来加号那一格。
-        XCTAssertEqual(inputBar.trailingActionButton.frame, inputBar.plusButton.frame)
+        // 圆比加号里的圆再大一圈（24 + 8 = 32pt），居中在加号那一格里。
+        XCTAssertEqual(inputBar.trailingActionButton.bounds.width, 32, accuracy: 0.001)
+        XCTAssertEqual(inputBar.trailingActionButton.bounds.height, 32, accuracy: 0.001)
+        XCTAssertEqual(
+            inputBar.trailingActionButton.center.x, inputBar.plusButton.center.x, accuracy: 0.001
+        )
+        XCTAssertEqual(
+            inputBar.trailingActionButton.center.y, inputBar.plusButton.center.y, accuracy: 0.001
+        )
+        // 圆比整格小，但点按范围仍外扩回整格：加号格子的角上也算命中。
+        XCTAssertTrue(inputBar.trailingActionButton.point(inside: CGPoint(x: -3, y: -3), with: nil))
 
         inputBar.clearText()
         XCTAssertEqual(inputBar.trailingAction, .stop)
@@ -140,6 +149,35 @@ final class AppAgentUITests: XCTestCase {
             session: AISession(id: "cannot-present")
         )
         XCTAssertNil(outcome)
+    }
+
+    /// 面板销毁时，在飞的等待必须被兜底结清。
+    ///
+    /// continuation 只活在 presenter 的在飞表里（面板拿到的只是 complete 闭包），
+    /// 面板一死那些闭包就没了——不结清就是永久挂死 + 运行时 "leaked its continuation"。
+    /// 注意这里**不能**靠 presenter 自己析构来触发：等待期间
+    /// `AISession.requestDecision` 的 `responders` 强引用数组一直持着它，
+    /// 所以必须由面板显式发信号（`AppAgentViewController.deinit` 里就是这么做的）。
+    func testPendingDecisionsSettleWhenPanelGoesAway() async {
+        let presenter = AppAgentDecisionPresenter(
+            present: { _, _, _, _ in true },   // 假装贴出来了，但永远不回调
+            dismiss: { _ in }
+        )
+        let session = AISession(id: "panel-dies-while-waiting")
+
+        let task = Task {
+            await presenter.respond(
+                to: .toolAuthorization(tool: "app_hotfix", safetyLevel: .dangerous, detail: nil),
+                session: session
+            )
+        }
+        // 让 respond 真的进到「已呈现、正在等」的状态。
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        presenter.settlePendingDecisions()   // 面板销毁时 deinit 发的那一刀
+
+        let outcome = await task.value
+        XCTAssertNil(outcome, "面板消失后应交回责任链兜底，而不是挂死")
     }
 }
 #endif

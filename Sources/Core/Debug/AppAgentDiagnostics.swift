@@ -39,10 +39,13 @@ public enum AppAgentDiagnostics {
     }
 
     /// 异步导出（在后台队列做文件拷贝与压缩，回调切回主线程）。
+    ///
+    /// `completion` 标 `@Sendable`：它在后台队列被创建、跨到主队列才调用，这一点本来就成立，
+    /// Swift 6 只是要求类型把它写出来。
     public static func export(
         debugLog: AppAgentDebugLog = .shared,
         runLog: AppAgentRunLog = .shared,
-        completion: @escaping (Result<Bundle, Error>) -> Void
+        completion: @escaping @Sendable (Result<Bundle, Error>) -> Void
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
             let result: Result<Bundle, Error>

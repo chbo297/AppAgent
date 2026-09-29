@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
@@ -16,11 +16,11 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/chbo297/BODragScroll.git",
-            from: "2.0.0"
+            from: "2.2.0"
         ),
         .package(
             url: "https://github.com/chbo297/BOUIKit.git",
-            from: "0.2.0"
+            from: "0.3.0"
         )
     ],
     targets: [

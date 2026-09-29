@@ -148,7 +148,7 @@ let overlay = await AppAgentOverlay.start(
 overlay.show()
 ```
 
-For direct embedding, create an `AppAgentViewController`, assign an agent, and switch it to an existing session id.
+The overlay window is the only supported way to mount AppAgent's chat UI; `AppAgentViewController` is not meant to be embedded in a host view-controller hierarchy. For UI that has to live inside a host screen, build against `AISession` directly.
 
 ## Documentation
 
@@ -158,7 +158,7 @@ For direct embedding, create an `AppAgentViewController`, assign an agent, and s
 | [Architecture](docs/Architecture.md) | Current single-module architecture and runtime flow |
 | [Providers](docs/Providers.md) | `ModelProvider`, `ModelSpec`, provider stream events |
 | [Tools](docs/Tools.md) | `ToolProtocol`, schemas, outputs, tool registration |
-| [UI Customization](docs/UICustomization.md) | Overlay UI, direct controller use, custom UI |
+| [UI Customization](docs/UICustomization.md) | Overlay UI and custom UI built on `AISession` |
 
 ## Example App
 

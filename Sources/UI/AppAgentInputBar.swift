@@ -4,6 +4,7 @@
 //
 
 #if canImport(UIKit)
+import BOUIKit
 import UIKit
 
 // MARK: - Delegate Protocol
@@ -25,27 +26,34 @@ public enum AppAgentInputBarFrameAnimation {
     /// 带阻尼的边界回弹；用于展开 resize 或收起 move 越界后的合法 frame 恢复。
     case boundaryRebound
 
-    var isAnimated: Bool {
+    var isAnimated: Bool { presentation.isAnimated }
+
+    /// 这一档动画的参数。`makeAnimator` 与上报给宿主的 `AppAgentPresentationAnimation`
+    /// 共用这一份：宿主要跟着一起动，拿到的必须就是我们真正用的那条曲线，两处常量不许各自漂移。
+    var presentation: AppAgentPresentationAnimation {
         switch self {
         case .immediate:
-            return false
-        case .standard, .boundaryRebound:
-            return true
+            return .immediate
+        case .standard:
+            return AppAgentPresentationAnimation(duration: 0.24, options: [.curveEaseOut])
+        case .boundaryRebound:
+            return AppAgentPresentationAnimation(duration: 0.30, options: [], springDamping: 0.78)
         }
     }
 
+    /// 造 UIKit 动画器：`UIViewPropertyAnimator` 本身是主线程类型，标 `@MainActor` 让调用方
+    /// 的主线程前提变成编译期事实（调用点本来全在 inputBar 的布局路径上）。
+    @MainActor
     func makeAnimator(animations: @escaping () -> Void) -> UIViewPropertyAnimator? {
-        switch self {
-        case .immediate:
-            return nil
-        case .standard:
-            return UIViewPropertyAnimator(duration: 0.24, curve: .easeOut, animations: animations)
-        case .boundaryRebound:
-            let timing = UISpringTimingParameters(dampingRatio: 0.78)
-            let animator = UIViewPropertyAnimator(duration: 0.30, timingParameters: timing)
-            animator.addAnimations(animations)
-            return animator
+        let params = presentation
+        guard params.isAnimated else { return nil }
+        guard let damping = params.springDamping else {
+            return UIViewPropertyAnimator(duration: params.duration, curve: .easeOut, animations: animations)
         }
+        let timing = UISpringTimingParameters(dampingRatio: damping)
+        let animator = UIViewPropertyAnimator(duration: params.duration, timingParameters: timing)
+        animator.addAnimations(animations)
+        return animator
     }
 }
 
@@ -161,6 +169,7 @@ public struct AppAgentInputBarFramePanEndContext {
 }
 
 /// inputBar 对外事件代理：文本发送、输入源变化、语音手势、展开收起 frame 意图都通过这里通知宿主。
+@MainActor
 public protocol AppAgentInputBarDelegate: AnyObject {
     func inputBar(_ bar: AppAgentInputBar, didSendText text: String)
     func inputBarDidTapVoice(_ bar: AppAgentInputBar)
@@ -228,12 +237,20 @@ public final class AppAgentInputBar: UIView {
     private static let minimumInputAreaWidth: CGFloat = 80
     private static let symbolIconPointSize: CGFloat = 24
     private static let keyboardIconPointSize: CGFloat = 17
+    /// 发送 / 停止的实心圆直径：比 `plus.circle` 画出来的圆（24pt）再大一圈——半径 +4pt，
+    /// 实心圆才压得住这一格的视觉重量。按钮本体就这么大，40pt 的点按范围靠 `bo_hitAreaOutsets` 外扩回来。
+    private static let trailingActionCircleSide: CGFloat = symbolIconPointSize + 8
+    /// 圆比整格小，命中区就按这个值外扩回 40pt，点按手感和加号完全一致。
+    private static var trailingActionHitOutset: CGFloat {
+        (buttonSize - trailingActionCircleSide) / 2
+    }
     /// 上箭头 = 发送；实心方块 = 停止（配上蓝色圆底就是参考图里的「外圆内方」）。
+    /// 点数按 32pt 圆的比例给：箭头约占一半，方块约三分之一。
     private static let sendIcon = systemSymbolImage(
-        primary: "arrow.up", fallbacks: ["arrow.up.circle"], pointSize: 20, weight: .semibold
+        primary: "arrow.up", fallbacks: ["arrow.up.circle"], pointSize: 16, weight: .semibold
     )
     private static let stopIcon = systemSymbolImage(
-        primary: "stop.fill", fallbacks: ["square.fill"], pointSize: 15, weight: .semibold
+        primary: "stop.fill", fallbacks: ["square.fill"], pointSize: 12, weight: .semibold
     )
     /// 展开态 inputBar 背景圆角；ChatPanel 收至最小高度时复用该值以保持视觉对齐。
     static let expandedCornerRadius: CGFloat = 16
@@ -490,10 +507,17 @@ public final class AppAgentInputBar: UIView {
         )
         plusButton.addTarget(self, action: #selector(plusTapped), for: .touchUpInside)
 
-        // 发送 / 停止共用这一个实心圆按钮：圆形铺满整个加号槽（40pt），图标白色。
-        trailingActionButton.layer.cornerRadius = Self.buttonSize / 2
+        // 发送 / 停止共用这一个实心圆按钮：圆比加号里的圆再大一圈（半径 +4pt），居中在加号那一格里，
+        // 点按范围靠 BOUIKit 外扩回整格 40pt（约定：命中区用 bo_，不手写 hitTest）。
+        trailingActionButton.layer.cornerRadius = Self.trailingActionCircleSide / 2
         trailingActionButton.layer.masksToBounds = true
         trailingActionButton.adjustsImageWhenHighlighted = false
+        trailingActionButton.bo_hitAreaOutsets = UIEdgeInsets(
+            top: Self.trailingActionHitOutset,
+            left: Self.trailingActionHitOutset,
+            bottom: Self.trailingActionHitOutset,
+            right: Self.trailingActionHitOutset
+        )
         trailingActionButton.addTarget(self, action: #selector(trailingActionTapped), for: .touchUpInside)
 
         inputSourceButton.addTarget(self, action: #selector(inputSourceTapped), for: .touchUpInside)
@@ -690,9 +714,16 @@ public final class AppAgentInputBar: UIView {
         applyTrailingActionGeometry()
     }
 
-    /// 右侧动作槽与加号共用同一块矩形和同一条淡出进度：布局改了和形态改了都要同步一次。
+    /// 右侧动作槽与加号共用同一格和同一条淡出进度：布局改了和形态改了都要同步一次。
+    /// 圆是 32pt，居中摆在加号那 40pt 的格子里；剩下的 4pt 边距由命中外扩补回点按范围。
     private func applyTrailingActionGeometry() {
-        trailingActionButton.frame = plusButton.frame
+        let side = Self.trailingActionCircleSide
+        trailingActionButton.frame = CGRect(
+            x: plusButton.frame.midX - side / 2,
+            y: plusButton.frame.midY - side / 2,
+            width: side,
+            height: side
+        )
         trailingActionButton.alpha = plusButton.alpha
     }
 

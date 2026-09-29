@@ -72,6 +72,13 @@ final class AppAgentChatMessageListView: UIView {
     /// 行高自己算并缓存，不走系统估算（见 `ChatMessageHeightCache` 头部注释）。
     private let heightCache = ChatMessageHeightCache()
 
+    /// 过程明细的阅读位置，按行身份持有。
+    ///
+    /// 和行高缓存同一个道理：cell 是复用的，位置存在 cell 里就会随复用漂移（滚出屏幕再滚回来
+    /// 归零、或者继承上一个占用这格的行）。身份用 `ChatRowIdentity`（turnID + role），
+    /// 跨重建稳定；换会话 / 清历史由 `setMessages` 一并清掉。
+    private var activityDetailPositions: [ChatRowIdentity: AppAgentActivityDetailPosition] = [:]
+
     /// 上一次测量行高时用的宽度；宽度变了要整体重测。
     private var measuredWidth: CGFloat = 0
 
@@ -128,7 +135,11 @@ final class AppAgentChatMessageListView: UIView {
     ) {
         let wasFollowingLatestMessage = isFollowingBottom(source: "setMessages")
         let isRunningReply = messages.last?.role == .assistant && messages.last?.status == .streaming
-        if !isSameLatestReply(in: messages) {
+        if isSameLatestReply(in: messages) {
+            // 乐观占位（还没拿到 turnID）转成权威记录时行身份会变，阅读位置要跟着搬过去，
+            // 否则「本轮刚读到一半」会在第一次权威重建时归零。
+            migrateActivityDetailPosition(to: messages)
+        } else {
             resetLatestReplyHeight()
         }
         if isRunningReply {
@@ -137,7 +148,11 @@ final class AppAgentChatMessageListView: UIView {
             resetLatestReplyHeight()
         }
         self.messages = messages
-        heightCache.retain(Set(messages.map(ChatRowIdentity.init)))
+        let identities = Set(messages.map(ChatRowIdentity.init))
+        heightCache.retain(identities)
+        // 已经不在列表里的行不再保留阅读位置：换会话 / 清历史走的就是这条路
+        // （`setMessages([])` → identities 为空 → 全清）。
+        activityDetailPositions = activityDetailPositions.filter { identities.contains($0.key) }
         reserveLatestReplyHeight()
         scrollTrace.observe("reloadData", on: tableView,
                             details: "rows=\(messages.count) forceFollow=\(forceScrollToBottom) follow=\(wasFollowingLatestMessage)") {
@@ -277,7 +292,7 @@ final class AppAgentChatMessageListView: UIView {
             return
         }
         let cell = tableView.cellForRow(at: indexPath) as? ChatMessageCell
-        cell?.configure(with: messages[index])
+        configure(cell, at: index)
         if abs(newHeight - previousHeight) <= 0.5 {
             // 包括离屏行：同高度不用 batch，也不为拿到 cell 而主动 dequeue。
             if synchronizeLayout {
@@ -295,6 +310,20 @@ final class AppAgentChatMessageListView: UIView {
                 tableView.layoutIfNeeded()
             }
         }
+    }
+
+    /// 配置 cell 的唯一入口：顺带把过程阅读位置注入进去、把用户滚动回写到列表。
+    ///
+    /// `cellForRowAt`（新出屏的行）和 `refreshRow`（原位更新现有 cell）都走这里，
+    /// 两条路径不能一条带位置一条不带 —— 否则原位刷新会把刚恢复的位置又丢掉。
+    private func configure(_ cell: ChatMessageCell?, at index: Int) {
+        guard let cell, messages.indices.contains(index) else { return }
+        let message = messages[index]
+        let identity = ChatRowIdentity(message)
+        cell.onActivityDetailPositionChanged = { [weak self] position in
+            self?.activityDetailPositions[identity] = position
+        }
+        cell.configure(with: message, activityDetailPosition: activityDetailPositions[identity])
     }
 
     private func reloadTableData() {
@@ -621,6 +650,16 @@ final class AppAgentChatMessageListView: UIView {
         reservesLatestReplyHeight = false
     }
 
+    /// 把尾回复的阅读位置从旧行身份搬到新行身份（乐观占位 → 权威 turnID）。
+    private func migrateActivityDetailPosition(to replacement: [ChatMessage]) {
+        guard let old = messages.last, let new = replacement.last else { return }
+        let oldIdentity = ChatRowIdentity(old)
+        let newIdentity = ChatRowIdentity(new)
+        guard oldIdentity != newIdentity,
+              let position = activityDetailPositions[oldIdentity] else { return }
+        activityDetailPositions[newIdentity] = position
+    }
+
     private func isSameLatestReply(in replacement: [ChatMessage]) -> Bool {
         guard let old = messages.last, old.role == .assistant,
               let new = replacement.last, new.role == .assistant else { return false }
@@ -665,7 +704,7 @@ extension AppAgentChatMessageListView: UITableViewDataSource {
             for: indexPath
         ) as! ChatMessageCell
         let message = messages[indexPath.row]
-        cell.configure(with: message)
+        configure(cell, at: indexPath.row)
         cell.onToggleActivity = { [weak self] in
             self?.toggleActivityExpanded(messageID: message.id)
         }

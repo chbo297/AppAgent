@@ -44,6 +44,19 @@ public protocol RuntimeInspectProvider: Sendable {
     func setViewValue(path: String, key: String, value: String, context: HostInspectionContext) async -> String
     /// 对某路径视图反射调用选择器（removeFromSuperview / setNeedsLayout 等结构性修改）。
     func invokeOnView(path: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String
+
+    // MARK: 模拟用户操作（语义级，不注入触摸事件）
+
+    /// 激活某个视图：按控件类型调用它本该响应用户点击的入口。
+    /// `event` 可指定 UIControl 事件名（touchUpInside / touchDown / valueChanged …），
+    /// 省略时按控件类型取默认事件。返回里会说明实际走了哪条路径、页面有没有因此变化。
+    func activateView(path: String, event: String?, context: HostInspectionContext) async -> String
+    /// 容器级页面导航：`tab:<索引或标题>` / `pop` / `popToRoot` / `dismiss`。
+    /// 走容器 VC 的公开入口并触发其 delegate 回调，宿主自己的监听逻辑照常执行。
+    func navigatePage(target: String, context: HostInspectionContext) async -> String
+    /// 滚动：`path` 指向（或其祖先是）UIScrollView 时改 contentOffset，否则走无障碍滚动。
+    /// `direction` 取 up / down / left / right，`amount` 为屏数（默认 1）。
+    func scrollPage(path: String?, direction: String, amount: Double?, context: HostInspectionContext) async -> String
 }
 
 public extension RuntimeInspectProvider {
@@ -78,5 +91,17 @@ public extension RuntimeInspectProvider {
 
     func invokeOnView(path: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String {
         "Inspection denied: invokeOnView is not supported by this runtime provider."
+    }
+
+    func activateView(path: String, event: String?, context: HostInspectionContext) async -> String {
+        "Inspection denied: activateView is not supported by this runtime provider."
+    }
+
+    func navigatePage(target: String, context: HostInspectionContext) async -> String {
+        "Inspection denied: navigatePage is not supported by this runtime provider."
+    }
+
+    func scrollPage(path: String?, direction: String, amount: Double?, context: HostInspectionContext) async -> String {
+        "Inspection denied: scrollPage is not supported by this runtime provider."
     }
 }

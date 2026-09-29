@@ -56,6 +56,9 @@ public enum ModelError: Error, LocalizedError, Sendable {
     case httpError(statusCode: Int, body: String)
     case decodingError(String)
     case providerError(String)
+    /// 流在 `idleSeconds` 秒内一个字节都没来，被空闲看门狗判死（见 `StreamIdleGuard`）。
+    /// 典型成因是 App 切后台被冻结、连接已断但 URLSession 既不吐数据也不报错。
+    case streamStalled(idleSeconds: TimeInterval)
 
     public var errorDescription: String? {
         switch self {
@@ -69,6 +72,8 @@ public enum ModelError: Error, LocalizedError, Sendable {
             return "Decoding error: \(msg)"
         case .providerError(let msg):
             return "Provider error: \(msg)"
+        case .streamStalled(let idleSeconds):
+            return String(format: "模型响应中断（%.0fs 没有新内容），正在重试。", idleSeconds)
         }
     }
 }

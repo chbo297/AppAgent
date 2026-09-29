@@ -359,7 +359,7 @@ extension AppAgentViewController {
             if session.uiState.pendingDecision == nil,
                let id = currentSessionId,
                pendingDecisions[id]?.isEmpty ?? true {
-                chatPanelView.dismissDecision()
+                dismissDecisionCard()
             }
 
         default:
@@ -400,28 +400,6 @@ extension AppAgentViewController {
         return true
     }
 
-    /// VC 要销毁了：把还在排队的请求按兜底语义答复掉。
-    ///
-    /// 不做的话那些 `CheckedContinuation` 会带着未恢复状态析构（运行时报
-    /// "leaked its continuation"），发起它们的那一轮 executor 永远回不来。
-    func drainPendingDecisions() {
-        let queues = pendingDecisions
-        pendingDecisions.removeAll()
-        for (_, queue) in queues {
-            for pending in queue {
-                pending.complete(Self.fallbackOutcome(for: pending.request))
-            }
-        }
-    }
-
-    /// 没人能回答时的结果，与 Core 的兜底保持一致：授权类拒绝，澄清类当作没回答。
-    static func fallbackOutcome(for request: DecisionRequest) -> DecisionOutcome {
-        switch request {
-        case .privateNetworkAccess, .toolAuthorization, .appAgentInspection: return .deny
-        case .clarification: return .answer(nil)
-        }
-    }
-
     /// 请求方不再等待（run 被取消）：把这一条摘掉；正在显示的话换下一张。
     ///
     /// 只做 UI 侧清理——continuation 已经由 `AppAgentDecisionPresenter` 在取消时恢复过了，
@@ -439,15 +417,21 @@ extension AppAgentViewController {
         Logger.info("AppAgentViewController", "decisionCancelled: session=\(sessionId)")
 
         guard wasShowing, sessionId == currentSessionId, isViewLoaded else { return }
-        chatPanelView.dismissDecision()
+        dismissDecisionCard()
         presentPendingDecision(for: sessionId)
+    }
+
+    /// 撤卡片的唯一出口：撤完顺手把遮挡变化报给宿主（卡片贴在面板可见区里，占一块区域）。
+    func dismissDecisionCard() {
+        chatPanelView.dismissDecision()
+        notifyPresentationChangeIfNeeded(reason: .visibility)
     }
 
     /// 把某个会话队首的卡片贴出来。呈现不了时返回 false（不动队列，下次切回来还能再试）。
     @discardableResult
     func presentPendingDecision(for sessionId: String) -> Bool {
         guard let pending = pendingDecisions[sessionId]?.first else { return false }
-        return chatPanelView.presentDecision(pending.request) { [weak self] outcome in
+        let shown = chatPanelView.presentDecision(pending.request) { [weak self] outcome in
             guard let self else {
                 pending.complete(outcome)
                 return
@@ -462,6 +446,10 @@ extension AppAgentViewController {
                 self.presentPendingDecision(for: sessionId)
             }
         }
+        if shown {
+            notifyPresentationChangeIfNeeded(reason: .visibility)
+        }
+        return shown
     }
 
     func sendMessage(text: String) {

@@ -51,33 +51,27 @@ public struct AIAgentProfile: Sendable {
     /// Publicly discoverable default loop budget.
     public static let defaultMaxIterations = AIAgentExecutionPolicy.defaultMaxIterations
 
+    // 下面这些都是 `executionPolicy` 的单字段转发，为的是宿主可以只改一项而不必重建整份策略。
+    // 策略字段是 `var`，所以每个 setter 只写自己那一格 —— 加字段时这里一行都不用动。
+    // （早先它们各自重建整个 `AIAgentExecutionPolicy`，于是加一个字段要改五处。）
+
     /// Maximum LLMExecutor loop iterations per user turn. Default: 70.
     /// Includes model requests after tool execution, retries, and model fallbacks.
     public var maxIterations: Int {
         get { executionPolicy.maxIterations }
-        set {
-            executionPolicy = AIAgentExecutionPolicy(
-                maxIterations: newValue,
-                toolTimeout: executionPolicy.toolTimeout,
-                toolOutputMaxBytes: executionPolicy.toolOutputMaxBytes,
-                autoPersist: executionPolicy.autoPersist,
-                toolMutationPolicy: executionPolicy.toolMutationPolicy
-            )
-        }
+        set { executionPolicy.maxIterations = newValue }
     }
 
     /// Single tool execution timeout in seconds. Default: 60s.
     public var toolTimeout: TimeInterval {
         get { executionPolicy.toolTimeout }
-        set {
-            executionPolicy = AIAgentExecutionPolicy(
-                maxIterations: executionPolicy.maxIterations,
-                toolTimeout: newValue,
-                toolOutputMaxBytes: executionPolicy.toolOutputMaxBytes,
-                autoPersist: executionPolicy.autoPersist,
-                toolMutationPolicy: executionPolicy.toolMutationPolicy
-            )
-        }
+        set { executionPolicy.toolTimeout = newValue }
+    }
+
+    /// 流式响应的空闲上界，秒。默认 25s，`<= 0` 关闭。见 `AIAgentExecutionPolicy.streamIdleTimeout`。
+    public var streamIdleTimeout: TimeInterval {
+        get { executionPolicy.streamIdleTimeout }
+        set { executionPolicy.streamIdleTimeout = newValue }
     }
 
     /// Agent-wide cap on how many UTF-8 bytes one tool result may hand the model.
@@ -87,15 +81,7 @@ public struct AIAgentProfile: Sendable {
     /// Default: 8 KB.
     public var toolOutputMaxBytes: Int {
         get { executionPolicy.toolOutputMaxBytes }
-        set {
-            executionPolicy = AIAgentExecutionPolicy(
-                maxIterations: executionPolicy.maxIterations,
-                toolTimeout: executionPolicy.toolTimeout,
-                toolOutputMaxBytes: newValue,
-                autoPersist: executionPolicy.autoPersist,
-                toolMutationPolicy: executionPolicy.toolMutationPolicy
-            )
-        }
+        set { executionPolicy.toolOutputMaxBytes = newValue }
     }
 
     /// Whether the agent may change runtime state at all. `.readOnly` refuses every
@@ -104,15 +90,7 @@ public struct AIAgentProfile: Sendable {
     /// debug builds or an explicit user opt-in. Default: `.allowed`.
     public var toolMutationPolicy: Tool.MutationPolicy {
         get { executionPolicy.toolMutationPolicy }
-        set {
-            executionPolicy = AIAgentExecutionPolicy(
-                maxIterations: executionPolicy.maxIterations,
-                toolTimeout: executionPolicy.toolTimeout,
-                toolOutputMaxBytes: executionPolicy.toolOutputMaxBytes,
-                autoPersist: executionPolicy.autoPersist,
-                toolMutationPolicy: newValue
-            )
-        }
+        set { executionPolicy.toolMutationPolicy = newValue }
     }
 
     // MARK: - Persistence
@@ -120,15 +98,7 @@ public struct AIAgentProfile: Sendable {
     /// Whether to auto-persist sessions after each completed agent run. Default: true.
     public var autoPersist: Bool {
         get { executionPolicy.autoPersist }
-        set {
-            executionPolicy = AIAgentExecutionPolicy(
-                maxIterations: executionPolicy.maxIterations,
-                toolTimeout: executionPolicy.toolTimeout,
-                toolOutputMaxBytes: executionPolicy.toolOutputMaxBytes,
-                autoPersist: newValue,
-                toolMutationPolicy: executionPolicy.toolMutationPolicy
-            )
-        }
+        set { executionPolicy.autoPersist = newValue }
     }
 
     // MARK: - Memory

@@ -22,6 +22,14 @@ extension AppAgentViewController {
         chatPanelView.onSessionListRequested = { [weak self] in
             self?.toggleSessionSidebar()
         }
+        // 面板可见区（展示位置 + 高度）变化的第二个来源：竖向拖拽不经过 inputBar 那条路，
+        // 只有面板自己知道。正在 `applyInputBarFrame` 里时沿用那一次的原因。
+        chatPanelView.onViewportChanged = { [weak self] in
+            guard let self else { return }
+            self.notifyPresentationChangeIfNeeded(
+                reason: self.currentPresentationChangeReason ?? .chatPanelHeightPan
+            )
+        }
         chatPanelView.onCollapseRequested = { [weak self] in
             self?.setChatPanelDetent(.peek, animated: true)
         }

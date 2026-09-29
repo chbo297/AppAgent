@@ -43,11 +43,18 @@ struct AppAgentVoiceInputTimings {
     /// 保证用户能看到识别出来的那句话，而不是一闪而过。
     var finalTextRenderHold: TimeInterval = 0.02
 
-    /// 生产默认：松手后多录 0.3s 尾音，再等最终结果最多 1.2s（最坏 1.5s 关面板）；预热看门狗 1.5s。
+    /// 面板亮起到松手的最短有效时长：比这还短就算误触，直接取消、不留尾音也不等最终结果。
+    /// 0 表示不做这道闸（单测用）。
+    var minimumValidPress: TimeInterval = 0.3
+
+    /// 生产默认：松手后多录 0.3s 尾音，再等最终结果最多 1.2s（最坏 1.5s 关面板）；预热看门狗 1.5s；
+    /// 面板亮起不足 0.3s 就松手按误触处理。
     static let standard = AppAgentVoiceInputTimings(trailingCapture: 0.3, finalizationTimeout: 1.2, prewarmWatchdog: 1.5)
 
-    /// 仅「等最终结果、不延长尾音」——用于只验证「不丢」的场景与单测。
-    static let phase1 = AppAgentVoiceInputTimings(trailingCapture: 0, finalizationTimeout: 1.2, prewarmWatchdog: 1.5)
+    /// 仅「等最终结果、不延长尾音」——用于只验证「不丢」的场景与单测；不判误触，方便同步 begin → end。
+    static let phase1 = AppAgentVoiceInputTimings(
+        trailingCapture: 0, finalizationTimeout: 1.2, prewarmWatchdog: 1.5, minimumValidPress: 0
+    )
 }
 
 /// 语音输入触觉反馈的抽象：协调器只表达“何时震动”，不关心震动如何实现。
@@ -72,6 +79,9 @@ struct AppAgentVoiceInputHapticFeedback: AppAgentVoiceInputFeedbackProviding {
 }
 
 /// 协调器 → 宿主的输出：宿主负责把这些语义映射到 overlay / inputBar / session。
+/// 纯 UI 协议：所有回调都在主线程发生，实现方也都是 UIViewController / UIView。
+/// 标 `@MainActor` 之后，实现里访问视图才是编译器认可的，而不是靠约定。
+@MainActor
 protocol AppAgentVoiceInputCoordinatorDelegate: AnyObject {
     /// 手势开始：宿主应展示语音输入面板。
     func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didBeginAt location: CGPoint)
@@ -97,6 +107,7 @@ protocol AppAgentVoiceInputCoordinatorDelegate: AnyObject {
 /// - 输出：delegate 语义回调，不直接触碰任何视图。
 ///
 /// 主线程使用；识别事件流由管理器保证主线程投递。
+@MainActor
 final class AppAgentVoiceInputCoordinator {
 
     weak var delegate: AppAgentVoiceInputCoordinatorDelegate?
@@ -127,14 +138,22 @@ final class AppAgentVoiceInputCoordinator {
     /// 「最终文本已上屏、等一帧再关面板」的延时任务。
     private var finishHoldTask: Task<Void, Never>?
 
+    /// 面板亮起（`begin`）的时刻，用来判定松手是不是快到算误触。
+    private var gestureBeganAt: TimeInterval?
+
+    /// 取时间的钩子：单测注入假时钟，生产用参考时间。
+    private let now: () -> TimeInterval
+
     init(
         recognitionManager: AppAgentVoiceRecognitionProviding = AppAgentVoiceRecognitionManager.shared,
         feedback: AppAgentVoiceInputFeedbackProviding,
-        timings: AppAgentVoiceInputTimings = .standard
+        timings: AppAgentVoiceInputTimings = .standard,
+        now: @escaping () -> TimeInterval = { Date.timeIntervalSinceReferenceDate }
     ) {
         self.recognitionManager = recognitionManager
         self.feedback = feedback
         self.timings = timings
+        self.now = now
     }
 
     deinit {
@@ -189,6 +208,7 @@ final class AppAgentVoiceInputCoordinator {
             state.recognitionState = .recording
         }
         renderState = state
+        gestureBeganAt = now()
         startRecognitionIfNeeded()
         delegate?.voiceInput(self, didBeginAt: location)
         render()
@@ -206,6 +226,12 @@ final class AppAgentVoiceInputCoordinator {
     /// 手势抬起：用最终位置刷新行为后，按 send/cancel/edit 收尾。
     func end(at location: CGPoint) {
         guard isActive, finalizeAction == nil else { return }
+        // 面板还没亮满 0.3s 就松手：算误触，这次交互当没发生过——直接取消识别、立刻关面板，
+        // 既不走「多录尾音 + 等最终结果」的收尾，也不发送、不进编辑态。
+        if isPressTooShortToBeValid {
+            finishInvalidShortPress()
+            return
+        }
         refreshReleaseAction(location: location)
 
         switch renderState?.releaseAction ?? .cancel {
@@ -216,6 +242,12 @@ final class AppAgentVoiceInputCoordinator {
         case .edit:
             finishEdit()
         }
+    }
+
+    /// 松手太快（面板展示不足 `timings.minimumValidPress`）= 误触，不算一次语音输入。
+    private var isPressTooShortToBeValid: Bool {
+        guard timings.minimumValidPress > 0, let began = gestureBeganAt else { return false }
+        return now() - began < timings.minimumValidPress
     }
 
     /// 系统取消/手势失败：刷新位置保持 UI 一致后统一按取消收尾（取消不等尾音）。
@@ -321,6 +353,14 @@ final class AppAgentVoiceInputCoordinator {
         finish()
     }
 
+    /// 误触收尾：不刷新松手区域、不再补一次震动（按下那一下已经震过），识别按取消停掉，面板立即关闭。
+    private func finishInvalidShortPress() {
+        print("[AppAgentVoiceInput] invalid short press, dismiss without capture")
+        finalizeAction = nil
+        stopRecognition(reason: .cancelled)
+        finish()
+    }
+
     /// 松手落在编辑区：同样等最终结果，拿到最终文本后再进编辑态（面板保留）。
     private func finishEdit() {
         feedback.impact(reason: "stop-edit")
@@ -389,6 +429,7 @@ final class AppAgentVoiceInputCoordinator {
     private func finish() {
         finishHoldTask?.cancel()
         finishHoldTask = nil
+        gestureBeganAt = nil
         renderState = nil
         delegate?.voiceInputDidFinish(self)
     }

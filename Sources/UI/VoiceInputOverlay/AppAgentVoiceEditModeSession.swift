@@ -10,6 +10,7 @@ import UIKit
 ///
 /// 关键约束：编辑态必须与手势态共享同一个气泡视图（保证 path 形变连续），
 /// 因此编辑态不是独立视图，而是一个操作宿主共享气泡的会话对象。
+@MainActor
 protocol AppAgentVoiceEditModeSessionHost: AnyObject {
     /// 挂载按钮与手势的宿主视图（overlay 自身）。
     var editSessionHostView: UIView { get }
@@ -24,7 +25,7 @@ protocol AppAgentVoiceEditModeSessionHost: AnyObject {
     func editSessionTextDidChange(_ text: String)
 
     /// 键盘高度变化：宿主触发带动画的重布局。
-    func editSessionKeyboardHeightDidChange(duration: TimeInterval)
+    func editSessionKeyboardHeightDidChange(animation: AppAgentKeyboardObserver.Animation)
 
     func editSessionDidTapCancel()
     func editSessionDidTapSend(_ text: String)
@@ -34,6 +35,7 @@ protocol AppAgentVoiceEditModeSessionHost: AnyObject {
 ///
 /// 生命周期：`begin(text:)` → 用户编辑/键盘交互 → 宿主经 cancel/send 回调收尾 → `end()`。
 /// 视图在首次 begin 时挂载到宿主上，之后仅做显示/隐藏切换。
+@MainActor
 final class AppAgentVoiceEditModeSession: NSObject {
 
     private(set) var isActive = false
@@ -196,8 +198,8 @@ final class AppAgentVoiceEditModeSession: NSObject {
         hostView.addGestureRecognizer(panGesture)
 
         let observer = AppAgentKeyboardObserver(referenceView: hostView)
-        observer.onChange = { [weak self] _, duration in
-            self?.host?.editSessionKeyboardHeightDidChange(duration: duration)
+        observer.onChange = { [weak self] _, animation in
+            self?.host?.editSessionKeyboardHeightDidChange(animation: animation)
         }
         keyboardObserver = observer
     }
