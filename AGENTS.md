@@ -141,7 +141,10 @@ page_navigate / page_scroll；反射：view_invoke）、`app_hotfix`、
 
 ## 代码规范
 
-- 当前项目仍处于本地开发、未发布阶段：不需要为了兼容旧 API 而保守。若重构能显著提升结构清晰度、命名一致性或长期可维护性，可以直接调整 public/internal API，并同步更新本仓库调用点。
+- 已发 tag，但停在 **0.0.x：API 未稳定**。不需要为了兼容旧 API 而保守：若重构能显著提升结构清晰度、
+  命名一致性或长期可维护性，可以直接调整 public/internal API，并同步更新本仓库调用点 ——
+  破坏性改动递增次版本号即可（`0.0.x` → `0.1.0`），不必留废弃期。改完记得同步 `CHANGELOG.md`
+  与 `AppAgent.podspec` 的版本；发版顺序见 `docs/Dependencies.md`。
 - 最低支持 iOS 15，不使用 iOS 16+ only API（除非有 `#available` 守卫）。升到 15 是为了 agent 回复的 markdown 渲染直接用系统 `AttributedString(markdown:)`，不必自研解析器或引入第三方依赖。
 - Sendable 严格，actor 隔离所有并发状态
 - 所有 provider/storage 通过协议抽象，可替换

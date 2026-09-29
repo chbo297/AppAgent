@@ -28,13 +28,14 @@ The repository keeps implementation files under `Sources/Core` and `Sources/UI` 
 
 | Integration | Minimum OS | Notes |
 |---|---:|---|
-| Swift Package Manager | iOS 13, macOS 12, Mac Catalyst 13.1 | Single `AppAgent` product |
-| CocoaPods | iOS 13, macOS 12, Mac Catalyst 13.1 | Single `AppAgent` pod |
-| UIKit overlay UI | iOS 13, Mac Catalyst 13.1 | Shared UIKit implementation on mobile and desktop |
+| Swift Package Manager | iOS 15, macOS 12, Mac Catalyst 15 | Single `AppAgent` product |
+| CocoaPods | iOS 15, macOS 12 | Single `AppAgent` pod |
+| UIKit overlay UI | iOS 15, Mac Catalyst 15 | Shared UIKit implementation on mobile and desktop |
 
-- Swift tools version: 5.10
+- Swift tools version: 6.0 (Swift 6 language mode)
 - Core has no third-party package dependencies
-- The iOS/Catalyst ChatPanel depends on `BODragScroll` 1.0.1 or later
+- The iOS/Catalyst ChatPanel depends on `BODragScroll` 2.2.1 or later; `BOUIKit` 0.3.0 or later
+  provides the hit-testing helpers on both platforms
 
 ## Installation
 
@@ -44,7 +45,7 @@ Add the package to your app and depend on the single product:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/chbo297/AppAgent.git", from: "0.1.0")
+    .package(url: "https://github.com/chbo297/AppAgent.git", from: "0.0.1")
 ],
 targets: [
     .target(
@@ -77,7 +78,7 @@ Scripts/Dependencies/use-released-bodragscroll.sh
 Add AppAgent to your `Podfile`:
 
 ```ruby
-pod 'AppAgent', '~> 0.1'
+pod 'AppAgent', '~> 0.0.1'
 ```
 
 Then run:

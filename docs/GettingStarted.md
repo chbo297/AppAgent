@@ -17,7 +17,7 @@ Add the package and depend on the `AppAgent` product:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/chbo297/AppAgent.git", from: "0.1.0")
+    .package(url: "https://github.com/chbo297/AppAgent.git", from: "0.0.1")
 ],
 targets: [
     .target(
@@ -38,7 +38,7 @@ import AppAgent
 ### CocoaPods
 
 ```ruby
-pod 'AppAgent', '~> 0.1'
+pod 'AppAgent', '~> 0.0.1'
 ```
 
 CocoaPods supports the native macOS Core and the UIKit implementation on iOS/Mac Catalyst. Swift Package Manager remains the recommended integration path for new projects.

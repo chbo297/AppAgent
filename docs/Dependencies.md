@@ -1,6 +1,21 @@
-# 兄弟仓库联合开发与发布（BODragScroll / BOUIKit）
+# 兄弟仓库联合开发与发布（BODragScroll / BOUIKit）+ AppAgent 自身发版
 
 > **什么时候读这份**：需要改 BODragScroll 或 BOUIKit、或准备发版时。
+
+## AppAgent 自己发版
+
+SwiftPM 的「发布」就是**打 tag 并推上去**，没有中心仓库要注册。顺序不能颠倒：
+
+1. 两个兄弟仓的 tag 必须**已经推到各自远端**（`git ls-remote --tags` 确认），否则消费者解析不到；
+   `Package.swift` 里不许有本地 path 依赖
+2. 最终树跑完 `swift test` + Catalyst 全量 + demo 构建
+3. **clean-room 验证**：`git clone --no-local <本仓> /tmp/x && cd /tmp/x && swift build`。
+   这一步专门抓「必需文件没提交 / 被 .gitignore 挡了」——工作区能编不代表消费者能编
+4. 同步三处版本号：`CHANGELOG.md` 新条目、`AppAgent.podspec` 的 `s.version`、
+   `README.md` 与 `docs/GettingStarted.md` 的 `from:` / `pod` 示例
+5. `git tag -a <version> -m ...` + `git push --tags`
+6. CocoaPods 侧另需 `pod lib lint`（podspec 的 `source_files` 必须含 `ObjCSupport/**/*.{h,m}`，
+   漏了会在链接期报找不到符号）
 
 ## BODragScroll 联合开发与发布
 
@@ -11,7 +26,7 @@
 
 ## BOUIKit（UIView hit-testing + 几何便利层）
 
-- 依赖 [`chbo297/BOUIKit`](https://github.com/chbo297/BOUIKit)（SwiftPM `from: "0.2.0"`，源码仓在同级 `../BOUIKit`），提供 `bo_hitAreaOutsets`、`bo_skipsSelfInHitTest`、`bo_pointInsideJudge`、`bo_hitTestHook`。同一个包也被 BWTimeGallery 使用。
+- 依赖 [`chbo297/BOUIKit`](https://github.com/chbo297/BOUIKit)（SwiftPM `from: "0.3.0"`，源码仓在同级 `../BOUIKit`），提供 `bo_hitAreaOutsets`、`bo_skipsSelfInHitTest`、`bo_pointInsideJudge`、`bo_hitTestHook`。同一个包也被 BWTimeGallery 使用。
 - **改 BOUIKit 必须先发版再升 AppAgent**：两仓分别提交，BOUIKit 打 tag 推上去之后才改 AppAgent 的 `Package.swift` 与 demo 工程的 `minimumVersion`（跑 `swift package update BOUIKit` 刷 `Package.resolved`）；**提交里不许出现本地 path 依赖**。
 - **联调期间可以先用本地源码**：`Scripts/Dependencies/use-local-bouikit.sh` 把根 `Package.swift` 的 BOUIKit 依赖临时换成 `../BOUIKit` 的 path（原版本号记在 `// BOUIKIT-LOCAL released: x.y.z` 注释里），改完发版后 `Scripts/Dependencies/use-released-bouikit.sh` 还原。不要用 `swift package edit`：xcodebuild（Catalyst 测试、demo 工程）不认 SwiftPM 的 `Packages/` editable checkout，只有命令行 `swift build` 认。demo 工程有自己的 remote package 引用，本地联调 demo 需要在 Xcode 里另加一次本地包，同样不提交。
 - 它通过 `method_exchangeImplementations` 换掉 `UIView.point(inside:with:)` 与 `hitTest(_:with:)`，首次设置有效配置时惰性安装，作用域是整个进程；集成文档需向宿主 app 说明这一点。
