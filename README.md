@@ -1,9 +1,8 @@
 # AppAgent
 
-[![Swift 5.10](https://img.shields.io/badge/Swift-5.10-orange.svg)](https://swift.org)
-[![Platforms](https://img.shields.io/badge/Platforms-iOS%2013%20%7C%20macOS%2012%20%7C%20Mac%20Catalyst%2013.1-blue.svg)](https://developer.apple.com)
+[![Swift 6](https://img.shields.io/badge/Swift-6.0-orange.svg)](https://swift.org)
+[![Platforms](https://img.shields.io/badge/Platforms-iOS%2015%20%7C%20macOS%2012%20%7C%20Mac%20Catalyst%2015-blue.svg)](https://developer.apple.com)
 [![SPM Compatible](https://img.shields.io/badge/SPM-Compatible-brightgreen.svg)](https://swift.org/package-manager/)
-[![CocoaPods Compatible](https://img.shields.io/badge/CocoaPods-Compatible-brightgreen.svg)](https://cocoapods.org)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 AppAgent is an iOS/macOS AI agent SDK for embedding conversational agents into an app. It includes a provider abstraction, Anthropic streaming provider, tool loop, memory, skills, session persistence, built-in tools, and an optional UIKit overlay UI. The Core implementation has no third-party dependencies; the UIKit ChatPanel uses `BODragScroll` for panel and nested-list interaction.
@@ -29,7 +28,6 @@ The repository keeps implementation files under `Sources/Core` and `Sources/UI` 
 | Integration | Minimum OS | Notes |
 |---|---:|---|
 | Swift Package Manager | iOS 15, macOS 12, Mac Catalyst 15 | Single `AppAgent` product |
-| CocoaPods | iOS 15, macOS 12 | Single `AppAgent` pod |
 | UIKit overlay UI | iOS 15, Mac Catalyst 15 | Shared UIKit implementation on mobile and desktop |
 
 - Swift tools version: 6.0 (Swift 6 language mode)
@@ -71,20 +69,6 @@ The default source path is `../BODragScroll`; set `BODRAGSCROLL_PATH` to use ano
 
 ```bash
 Scripts/Dependencies/use-released-bodragscroll.sh
-```
-
-### CocoaPods
-
-Add AppAgent to your `Podfile`:
-
-```ruby
-pod 'AppAgent', '~> 0.0.1'
-```
-
-Then run:
-
-```bash
-pod install
 ```
 
 ## Quick Start

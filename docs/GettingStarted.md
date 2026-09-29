@@ -35,14 +35,6 @@ Then import:
 import AppAgent
 ```
 
-### CocoaPods
-
-```ruby
-pod 'AppAgent', '~> 0.0.1'
-```
-
-CocoaPods supports the native macOS Core and the UIKit implementation on iOS/Mac Catalyst. Swift Package Manager remains the recommended integration path for new projects.
-
 ## Register a Provider
 
 `ModelProviderCentral` stores providers by name. Model references use the `"providerName/modelId"` format.

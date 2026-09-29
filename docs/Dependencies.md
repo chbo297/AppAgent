@@ -4,6 +4,9 @@
 
 ## AppAgent 自己发版
 
+只支持 SwiftPM。**CocoaPods 已移除**：BOUIKit 从没进过 CocoaPods trunk（连 podspec 都没有），
+BODragScroll trunk 也只到 2.0.0（我们需要 2.2.1），要补齐得跨三仓 `pod trunk push`，收益不抵成本。
+
 SwiftPM 的「发布」就是**打 tag 并推上去**，没有中心仓库要注册。顺序不能颠倒：
 
 1. 两个兄弟仓的 tag 必须**已经推到各自远端**（`git ls-remote --tags` 确认），否则消费者解析不到；
@@ -11,18 +14,17 @@ SwiftPM 的「发布」就是**打 tag 并推上去**，没有中心仓库要注
 2. 最终树跑完 `swift test` + Catalyst 全量 + demo 构建
 3. **clean-room 验证**：`git clone --no-local <本仓> /tmp/x && cd /tmp/x && swift build`。
    这一步专门抓「必需文件没提交 / 被 .gitignore 挡了」——工作区能编不代表消费者能编
-4. 同步三处版本号：`CHANGELOG.md` 新条目、`AppAgent.podspec` 的 `s.version`、
-   `README.md` 与 `docs/GettingStarted.md` 的 `from:` / `pod` 示例
+4. 同步两处版本号：`CHANGELOG.md` 新条目、`README.md` 与 `docs/GettingStarted.md` 的 `from:` 示例
 5. `git tag -a <version> -m ...` + `git push --tags`
-6. CocoaPods 侧另需 `pod lib lint`（podspec 的 `source_files` 必须含 `ObjCSupport/**/*.{h,m}`，
-   漏了会在链接期报找不到符号）
+6. 收尾验证：另建一个空工程 `.package(url:..., from: "<version>")` + `swift build`，
+   确认从 GitHub 真能解析到新 tag（比 clean-room 更进一步——它连依赖图一起验）
 
 ## BODragScroll 联合开发与发布
 
 - AppAgent 仓库位于当前目录；BODragScroll 是同级、独立的 Git 仓库 `../BODragScroll`。涉及面板拖拽或嵌套滚动时，可以直接修改该源码仓并与 AppAgent 联调。
 - Demo 工程直接引用 `../BODragScroll`；根 Swift Package 本地联调时运行 `Scripts/Dependencies/use-local-bodragscroll.sh` 进入 editable checkout，结束后可运行 `Scripts/Dependencies/use-released-bodragscroll.sh` 恢复正式依赖。
-- 两个仓库的改动、测试、提交和版本发布必须分别管理；不要把 BODragScroll 源码混入 AppAgent 提交。若 AppAgent 依赖尚未发布的 BODragScroll API，先提交并发布/打标 BODragScroll，再更新 AppAgent 的 SwiftPM/CocoaPods 版本声明并发布 AppAgent。
-- AppAgent 正式发布必须通过 SwiftPM/CocoaPods 引入 BODragScroll，不能依赖本机兄弟目录；禁止提交 `Packages/` 中的本地符号链接或其他机器相关路径。
+- 两个仓库的改动、测试、提交和版本发布必须分别管理；不要把 BODragScroll 源码混入 AppAgent 提交。若 AppAgent 依赖尚未发布的 BODragScroll API，先提交并发布/打标 BODragScroll，再更新 AppAgent 的 SwiftPM 版本声明并发布 AppAgent。
+- AppAgent 正式发布必须通过 SwiftPM 引入 BODragScroll，不能依赖本机兄弟目录；禁止提交 `Packages/` 中的本地符号链接或其他机器相关路径。
 
 ## BOUIKit（UIView hit-testing + 几何便利层）
 
