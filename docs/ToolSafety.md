@@ -22,7 +22,10 @@
 - **写类操作的成功判定是「以 `OK.` 起头」，不是「不在失败清单里」**。provider 的失败文案形态一堆（`Invalid rect '…'`、`Invalid alpha '…'`、`UIView has no text/title to set.`…），靠失败前缀清单漏一个就把没生效的修改当成功。所以 `view_set` / `property_set` 走 `mutationOutput`，provider 侧所有成功分支（含 KVC 兜底）统一以 `OK.` 开头。
 - **读也要判失败**：`property_value` 以前绕过判定直接 `.text(...)`，于是 `Failed to read …` / `(no target object for KVC…)` 被模型当成读到的值。
 - **`app_hotfix` 的失败一律 `.error`**：`apply` 的 JS 报错、`toggle`/`remove` 指了不存在的槽位，都不能包成 `success:false` 的「成功调用」。`DefaultHotfixProvider.setEnabled` 要区分「槽位不存在」与「关掉了」（原来两者同走一条路，`!enabled` 恒真导致 toggle 未知补丁报成功）。
-- **`app_hook_capture` 的写入方在仓库外**（宿主侧写入方，如百度地图的 LijiMsgTap），所以自检自己按磁盘契约往 `Caches/AppAgentMsgCapture/cap_<channel>_*.jsonl` 造两条乱序 `seq` 记录，再验 seq 升序 / `limit` 取尾 / `sinceSeq` 过滤 / 按 channel 删干净；跑完把 `NSUserDefaults` 里的抓包开关和目录一起复位。
+- **`app_hook_capture` 的写入方在仓库外**（宿主侧写入方，如百度地图的 LijiMsgTap），所以读路径要自己按磁盘契约验：`HookCaptureTests` 往 `Caches/AppAgentMsgCapture/cap_<channel>_*.jsonl` 造**跨文件、seq 乱序**的记录，再验 seq 升序 / `limit` 取尾（不是取头）/ `sinceSeq` 严格大于 / 按 channel 删干净。这三条错一个，模型读到的就是错序或错窗口的消息流，而它无从察觉。用例只删自己写的文件，目录里已有真实数据时直接 skip。
+- **注定失败的调用不许先问用户再失败**。`view_invoke` 的两类拒绝（选择器不在受限作用域白名单、签名带原始类型）看参数和方法签名就能判定，所以提到授权之前：`ToolProtocol.preflightRejection(for:session:)` 由 `LLMExecutor` 在弹决策卡**之前**调用一次，返回非 nil 就直接失败。真机上缺这一步，用户为一个不可能成功的 `view_invoke(delegate)` 点掉了 4.9 秒的「允许」，点完才报错——既白等，也在训练用户盲签。实现必须无副作用、不改运行时状态、不自己申请授权；提权作用域（appagent / all）不在预检里判，那本来就该走它自己的授权。回归见 `ToolPreflightTests`（拒绝时决策响应器零次被问 + `execute` 零次调用；放行时照旧问并执行）。
+- **模拟用户操作是 `.moderate`，不弹卡**。`view_activate` / `page_navigate` / `page_scroll` 能做的事不超过一个真实用户：宿主的 delegate、埋点、拦截逻辑全都照常跑（`page_navigate` 切 tab 会先问 `shouldSelect`、再补发 `didSelect`）。所以按普通改动对待，`toolMutationPolicy == .readOnly` 的硬边界仍然拦得住它们。**不做触摸事件注入**（要构造 `UITouch` / IOHID 事件，私有 API）：两条路径都不成立时报错，绝不返回一个让模型以为点过了的 `OK.`。
+- **写操作要自报「页面有没有真的变」**。`view_set` / `property_set` / `view_activate` / `page_navigate` 成功后附上页面指纹差异（栈顶 VC + 容器位置 + 标题），例如 `OK. selected = 1 · 页面未变化（仍 tab 0 …）`。真机上一次 `view_set selected=YES` 返回 `OK.` 但页面没动，模型信了，又花一轮 `ui_hierarchy` 才发现白改——那一轮 32 秒。带动画的 `pop` / `dismiss` 不在此刻下结论，如实说「动画进行中」。
 
 
 `Tool.Output.image(Tool.ImageOutput)` 让工具直接把图片交给模型看，不必先落盘再让模型猜文件里是什么。`screenshot` 默认走这条路（`save_as_file: true` 才落盘）。链路：

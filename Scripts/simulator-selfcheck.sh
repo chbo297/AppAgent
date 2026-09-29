@@ -24,11 +24,15 @@ REPORT_TIMEOUT="${REPORT_TIMEOUT:-60}"
 command -v gtimeout >/dev/null || { echo "need gtimeout (brew install coreutils)"; exit 1; }
 
 SIM="${1:-}"
+# UDID 用 grep 抓，不要用 awk 的三参数 match()：那是 gawk 扩展，macOS 自带的 BSD awk 会
+# 直接报 syntax error，脚本就会一路走到「no iPhone simulator found」——看起来像没装模拟器。
 if [ -z "$SIM" ]; then
-    SIM=$(xcrun simctl list devices available | awk '/\(Booted\)/ && /iPhone/ {match($0, /\(([0-9A-F-]{36})\)/, m); print m[1]; exit}')
+    SIM=$(xcrun simctl list devices available | grep '(Booted)' | grep iPhone | head -1 \
+        | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
 fi
 if [ -z "$SIM" ]; then
-    SIM=$(xcrun simctl list devices available | awk '/^ *iPhone/ {match($0, /\(([0-9A-F-]{36})\)/, m); print m[1]; exit}')
+    SIM=$(xcrun simctl list devices available | grep -E '^ *iPhone' | head -1 \
+        | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}')
 fi
 [ -n "$SIM" ] || { echo "no iPhone simulator found"; exit 1; }
 echo "==> simulator $SIM"

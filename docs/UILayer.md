@@ -8,8 +8,8 @@
 宿主接 UI 的唯一入口是 `AppAgentOverlay`：它建一个 `AppAgentWindow`（`windowLevel = .normal + 1`、
 命中自己返回 nil 所以空白处穿透），并把 `AppAgentViewController` 装成这个 window 的 rootViewController。
 窗内没有独立的「悬浮球」视图——那颗球就是**收起态的输入栏**（`AppAgentInputBar.isCollapsed`，宽度收到
-`collapsedMinWidth` = 56 时圆角变成整圆，靠 `.collapsedMove` 手势拖动）；拉开后依次是输入栏、对话面板、
-会话切换列表。
+`AppAgentInputBarMetrics.collapsedMinWidth` = 56 时圆角变成整圆，靠 `.collapsedMove` 手势拖动）；拉开后依次是
+输入栏、对话面板、会话切换列表。
 
 **不支持宿主把 `AppAgentViewController` 塞进自己的 VC 层级**（push/present/`addChild`/SwiftUI 包一层都不行），
 所以它是 `public` 而非 `open`，也不再留 `inputBarFrameDidChange` 这类子类 override 钩子（要观察就用
@@ -136,6 +136,13 @@ AppAgent 自己的调试页，跑在 AppAgent 自己的窗口里，不是宿主�
 - **发送即打断**：运行中发新内容（打字发送或语音转文字）默认先取消上一轮。`LLMExecutor.run` 自己也会取消上一个
   任务，但 UI 侧显式 `session.cancel()` 一次，上一轮才会明确记成 `.cancelled`（界面「（已停止）」），
   而不是等兜底补一个 `runEndedWithoutResult`。同一会话重跑不占新并发额度（`RunGovernor.canAdmit` 的 `isAlreadyRunning`）。
+- **撞并行上限要弹窗，不许静默 return**：上限 9（`RunGovernor(limit: 9)`，只算 `delegationDepth == 0`
+  的顶层会话；`delegate_task` 派出去的子会话完全豁免）。撞线时 `sendMessage` 在任何乐观 UI 之前就阻断，
+  弹 `makeConcurrencyLimitAlert(runningCount:)` 告诉用户「已经有几个在运行」，**草稿留在输入栏**
+  （`finishInputBarAfterSend()` 排在这道闸之后）。曾经这里只写一行日志就 `return`，用户的感受是
+  「点了发送没反应」。Core 侧 `AISession.sendMessage` 仍是权威闸门，并通过
+  `AIAgentDelegate.aiAgent(_:session:didRejectRun:)` 把 `AIAgentError.concurrencyLimitReached` 交给宿主，
+  宿主自己那套 UI 要不要提示由它决定。上限是产品策略可调，但「撞线必须可见」这条不许退回去。
 - **圆比加号里的圆再大一圈，但不铺满整格**：`trailingActionCircleSide = 24 + 8`（`plus.circle` 的符号尺寸
   再加半径 4pt——实心圆得压得住这一格），居中摆在加号那 40pt 的格子里；图标按这个圆的比例给
   （`arrow.up` 16pt、`stop.fill` 12pt，均 semibold）。圆比整格小但点按范围不许缩：`bo_hitAreaOutsets`
@@ -158,6 +165,19 @@ AppAgent 自己的调试页，跑在 AppAgent 自己的窗口里，不是宿主�
   「0.31s 照常进收尾」。
 
 ## 面板几何与写入判等
+
+### 几何常量归 nonisolated 的 metrics 命名空间
+
+输入栏与面板的几何常量都住在 `Sources/UI/AppAgentGeometry.swift` 的
+`AppAgentInputBarMetrics`（`barHeight` / `innerPadding` / `buttonSize` / `minimumInputAreaWidth` /
+`collapsedMinWidth` / `minimumExpandedWidth` / `expandedCornerRadius`）和
+`AppAgentChatPanelMetrics`（`navigationBarHeight`）里，**不要再挂回视图类的 static 上**。
+`AppAgentInputBar` / `AppAgentChatPanelNavigationBar` 是 UIView，Swift 6 下整类都是 `@MainActor`
+隔离的，挂在它们身上的 static 也随之被视为主 actor 隔离；而 `AppAgentInputBarFramePolicy` /
+`AppAgentChatPanelGeometry` 是刻意不带隔离的纯函数几何层（好让布局推导能在单测里直接调），
+于是每个 nonisolated 读点都会被 Swift 6 点名一次
+（`main actor-isolated static property 'X' can not be referenced from a nonisolated context`，
+实测 40 处）。这些数没有主线程语义，一份真相放在 nonisolated 的命名空间里，两边都读得到。
 
 ### 写之前先判等（`bo_setFrame` / `bo_isScrolledToBottom`）
 

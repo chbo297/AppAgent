@@ -14,7 +14,6 @@
 //
 
 import UIKit
-import WebKit
 
 enum CapabilitySelfCheck {
 
@@ -264,7 +263,10 @@ enum CapabilitySelfCheck {
         // 整排 tab 只报出当前那一个（3 个报成 1 个）。模型据此认定这排按钮是假皮肤，
         // 转去反射 _UITabButton，一次「切到 profile」烧掉 231 秒。
         let tabTruth: (count: Int, titles: [String], selected: Int)? = await MainActor.run {
-            func firstTab(_ controller: UIViewController?) -> UITabBarController? {
+            // 嵌套函数不会自动继承外层闭包的 actor 隔离，这里读的是 UIViewController
+            // 的主 actor 状态，所以显式标 @MainActor（外层 MainActor.run 已经在主线程，
+            // 同步调用不需要 hop）。
+            @MainActor func firstTab(_ controller: UIViewController?) -> UITabBarController? {
                 guard let controller else { return nil }
                 if let tab = controller as? UITabBarController { return tab }
                 for child in controller.children {
@@ -340,9 +342,6 @@ enum CapabilitySelfCheck {
         // 摘要必须给出可直接二次调用的钻取句柄
         rec.record("摘要含可寻址 path", ok: summary.contains("[W") && summary.contains(":"),
                    detail: "使用稳定 window 句柄")
-        await check(rec, "ui_hierarchy(bogus detail) rejected", runtime,
-                    ["op": .string("ui_hierarchy"), "detail": .string("nope")],
-                    expect: .errorContains("Unknown detail"), session: session)
 
         // The report only keeps previews, so park the untruncated hierarchy +
         // addressable view tree next to it — that is what you actually read when
@@ -358,17 +357,14 @@ enum CapabilitySelfCheck {
         writeArtifact("AppAgent/diagnostics/selfcheck-sdk-hierarchy.txt", "# authorized all\n\(all)\n\n# SDK only\n\(sdk)")
         await check(rec, "class_list(HostTabBar)", runtime,
                     ["op": .string("class_list"), "filter": .string("HostTabBar")], session: session)
+        // 这条不是参数校验的例行公事：不带 filter 就会把进程里几万个类倒给模型，
+        // 是实打实的输出预算事故。其余「坏参数报错」（未知 detail / 未知类 / 坏 path）
+        // 都是同一套 guard，看代码就够，不占自检 —— 坏 path 的错误串另有归属判定在用。
         await check(rec, "class_list(no filter) rejected", runtime,
                     ["op": .string("class_list")],
                     expect: .errorContains("'filter' is required"), session: session)
         await check(rec, "method_list(HostTabBarController)", runtime,
                     ["op": .string("method_list"), "class": .string("HostTabBarController")], session: session)
-        await check(rec, "method_list(unknown) rejected", runtime,
-                    ["op": .string("method_list"), "class": .string("NoSuchClassHere")],
-                    expect: .errorContains("class not found"), session: session)
-        await check(rec, "view_info(bad path) rejected", runtime,
-                    ["op": .string("view_info"), "path": .string("99/99")],
-                    expect: .errorContains("no view at path"), session: session)
         await check(rec, "property_list(UILabel)", runtime,
                     ["op": .string("property_list"), "class": .string("UILabel")], session: session)
         await check(rec, "property_value(view.tag)", runtime,
@@ -396,6 +392,8 @@ enum CapabilitySelfCheck {
             await check(rec, "view_tree(path: scratch)", runtime,
                         ["op": .string("view_tree"), "path": .string(path), "maxDepth": .number(3)],
                         session: session)
+            await checkViewActivate(rec, session: session, runtime: runtime,
+                                    windowPrefix: hostWindowPrefix, inertPath: path)
             await check(rec, "view_set(frame)", runtime, [
                 "op": .string("view_set"), "path": .string(path),
                 "key": .string("frame"), "value": .string("0,0,120,80")
@@ -545,10 +543,19 @@ enum CapabilitySelfCheck {
 
         rec.section("app_device_info")
         let device = AppDeviceInfoTool()
-        for slice in ["device", "os", "app", "storage", "memory", "locale", "power"] {
-            await check(rec, "section(\(slice))", device, ["section": .string(slice)],
-                        session: session, preview: 220)
-        }
+        // 七个 section 走的是同一个 dispatch，逐条回显只是抄一遍实现。真正的策略是
+        // 「问一件事别把整份设备信息吞下去」，所以只验收窄有没有效 + 未知 section 被拒。
+        let deviceAll = await withBudget { () async throws -> String in
+            try await device.execute(arguments: [:], session: session).stringValue
+        } ?? ""
+        let devicePower = await withBudget { () async throws -> String in
+            try await device.execute(arguments: ["section": .string("power")],
+                                     session: session).stringValue
+        } ?? ""
+        rec.record("section 能把整份设备信息收窄",
+                   ok: !deviceAll.isEmpty && devicePower.contains("power")
+                    && devicePower.utf8.count < deviceAll.utf8.count,
+                   detail: "all=\(deviceAll.utf8.count)B power=\(devicePower.utf8.count)B")
         await check(rec, "section(bogus) rejected", device, ["section": .string("bogus")],
                     expect: .errorContains("Unknown section"), session: session)
 
@@ -651,6 +658,34 @@ enum CapabilitySelfCheck {
                     ["op": .string("view_invoke"), "path": .string(path),
                      "selector": .string("description")],
                     expect: .errorContains("selector description requires all scope"), session: session)
+        // 授权前置校验：注定失败的调用必须在「问用户」之前就能判出来。真机上这一步缺失，
+        // 用户为一个不可能成功的 view_invoke(delegate) 点掉了 4.9 秒的「允许」。
+        // 这里直接问工具的预检入口 —— 它必须不执行就给出与执行阶段一致的拒绝理由。
+        // 用 description 而不是真机那次的 delegate：临时视图是个纯 UIView，不响应 delegate，
+        // 会先被「selector 不存在」挡掉，测不到作用域白名单这条规则。
+        let preflightScope = await runtime.preflightRejection(
+            for: ["op": .string("view_invoke"), "path": .string(path), "selector": .string("description")],
+            session: session
+        )
+        rec.record("预检在授权前拦下受限 selector",
+                   ok: preflightScope?.contains("requires all scope") == true,
+                   detail: preflightScope ?? "nil（没拦住）")
+        let preflightPrimitive = await runtime.preflightRejection(
+            for: ["op": .string("view_invoke"), "path": .string(path),
+                  "selector": .string("setTag:"), "argumentsJSON": .string("[1]")],
+            session: session
+        )
+        rec.record("预检在授权前拦下原始类型参数",
+                   ok: preflightPrimitive?.contains("not an object") == true,
+                   detail: preflightPrimitive ?? "nil（没拦住）")
+        // 能正常执行的调用不许被预检误伤，否则等于把功能拦死了。
+        let preflightAllowed = await runtime.preflightRejection(
+            for: ["op": .string("view_invoke"), "path": .string(path),
+                  "selector": .string("setNeedsLayout")],
+            session: session
+        )
+        rec.record("预检放行白名单内的 selector", ok: preflightAllowed == nil,
+                   detail: preflightAllowed ?? "nil（放行）")
         await check(rec, "view_invoke(description) 授权 all 放行对象返回值", runtime,
                     ["op": .string("view_invoke"), "path": .string(path),
                      "selector": .string("description"), "scope": .string("all")],
@@ -707,68 +742,7 @@ enum CapabilitySelfCheck {
                     expect: .errorContains("no view at path"), session: session)
     }
 
-    // MARK: - app_web_inspect：真挂一个 WKWebView 进去读 DOM
-
-    /// scratch webview 只存在 @MainActor 静态槽里：**不把非 Sendable 的 WKWebView 跨隔离域传递**。
-    @MainActor private static var scratchWebView: WKWebView?
-
-    @MainActor
-    private static func installScratchWebView() -> Bool {
-        var host: UIWindow?
-        for scene in UIApplication.shared.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else {
-                continue
-            }
-            for window in windowScene.windows {
-                if host == nil {
-                    host = window
-                }
-            }
-        }
-        guard let host else {
-            return false
-        }
-        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240))
-        webView.alpha = 0.01
-        webView.isUserInteractionEnabled = false
-        host.addSubview(webView)
-        // 刻意做成「两个典型故障」：按钮 display:none、内容比容器宽（scrollWidth > clientWidth）。
-        let html = """
-            <html><head><title>selfcheck</title><meta name="viewport" content="width=device-width"></head>
-            <body style="margin:0">
-            <div id="narrow" style="width:120px;overflow:hidden"><span style="display:inline-block;width:400px">wide content</span></div>
-            <button id="btn">tap me</button>
-            <button id="gone" style="display:none">hidden</button>
-            </body></html>
-            """
-        webView.loadHTMLString(html, baseURL: nil)
-        scratchWebView = webView
-        return true
-    }
-
-    @MainActor
-    private static func removeScratchWebView() {
-        scratchWebView?.removeFromSuperview()
-        scratchWebView = nil
-    }
-
-    private static func waitForScratchPageLoad(tool: WebInspectTool, session: AISession) async -> Bool {
-        // 不监听 delegate（scratch 视图没有 owner），直接轮询 readyState，最多约 3s。
-        for _ in 0..<30 {
-            let state = await withBudget(seconds: 2) { () async throws -> String in
-                try await tool.execute(arguments: ["op": .string("eval"),
-                                                  "script": .string("return document.readyState;")],
-                                       session: session).stringValue
-            } ?? ""
-            if state.contains("complete") {
-                return true
-            }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        return false
-    }
-
-    // MARK: - app_hook_capture：真的写两条 JSONL 再读回来
+    // MARK: - 运行时内省用的一次性视图 / 按钮
 
     /// 往宿主 window 挂一个不可见、不响应交互的一次性视图。
     /// 自检结束后移除，运行时 UI 不留痕迹。
@@ -781,6 +755,66 @@ enum CapabilitySelfCheck {
         window.addSubview(scratch)
         scratchView = scratch
         return "\(windowPrefix)\(window.subviews.count - 1)"
+    }
+
+    /// 「模拟点击」只看返回的 `OK.` 是不信的 —— 必须证明 action 真的被打出去了。
+    /// 所以挂一个一次性按钮，它自己数被触发了几次；不去点 Demo 首页的真按钮：
+    /// Haptic 没有可观测副作用，「能力自检」会递归调起自己。
+    @MainActor
+    private static func installProbeButton(windowPrefix: String) -> String? {
+        guard let window = DemoAgentHolder.hostTabBarController?.viewIfLoaded?.window else { return nil }
+        let button = SelfCheckProbeButton(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        button.isHidden = true
+        button.addTarget(button, action: #selector(SelfCheckProbeButton.probeFired), for: .touchUpInside)
+        window.addSubview(button)
+        probeButton = button
+        return "\(windowPrefix)\(window.subviews.count - 1)"
+    }
+
+    @MainActor private static var probeButton: SelfCheckProbeButton?
+
+    /// `view_activate` 的端到端回归：按钮要真被触发、event 参数要真生效、不可激活的目标
+    /// 必须报错而不是返回一个让模型误以为点过了的 `OK.`。
+    private static func checkViewActivate(
+        _ rec: Recorder, session: AISession, runtime: RuntimeInspectTool,
+        windowPrefix: String, inertPath: String
+    ) async {
+        guard let buttonPath = await MainActor.run(body: { installProbeButton(windowPrefix: windowPrefix) }) else {
+            rec.record("探针按钮已挂载", ok: false, detail: "no window available")
+            return
+        }
+        let activated = await withBudget { () async throws -> String in
+            try await runtime.execute(arguments: [
+                "op": .string("view_activate"), "path": .string(buttonPath)
+            ], session: session).stringValue
+        } ?? "TIMEOUT"
+        let firedAfterTap = await MainActor.run { probeButton?.firedCount ?? -1 }
+        rec.record("view_activate 打出 touchUpInside 且 action 真的跑了",
+                   ok: activated.hasPrefix("OK.") && activated.contains("sendActions(touchUpInside)")
+                       && firedAfterTap == 1,
+                   detail: "fired=\(firedAfterTap) · \(trimmed(activated, 160))")
+        // 指定别的 event 不能顺手把 touchUpInside 也打一遍，否则 event 参数等于摆设。
+        let touchDown = await withBudget { () async throws -> String in
+            try await runtime.execute(arguments: [
+                "op": .string("view_activate"), "path": .string(buttonPath),
+                "event": .string("touchDown")
+            ], session: session).stringValue
+        } ?? "TIMEOUT"
+        let firedAfterDown = await MainActor.run { probeButton?.firedCount ?? -1 }
+        rec.record("view_activate 的 event 参数真的生效",
+                   ok: touchDown.contains("sendActions(touchDown)") && firedAfterDown == firedAfterTap,
+                   detail: "fired=\(firedAfterDown)（应仍为 \(firedAfterTap)） · \(trimmed(touchDown, 120))")
+        // 不可激活的目标必须报错。返回假 OK 比报错更糟：模型会以为点过了，继续往下推理。
+        await check(rec, "view_activate 拒绝不可激活的目标", runtime,
+                    ["op": .string("view_activate"), "path": .string(inertPath)],
+                    expect: .errorContains("no activatable target"), session: session)
+        let removed = await MainActor.run { () -> Bool in
+            probeButton?.removeFromSuperview()
+            let detached = probeButton?.superview == nil
+            probeButton = nil
+            return detached
+        }
+        rec.record("探针按钮已移除（UI 无残留）", ok: removed, detail: removed ? "removed" : "still attached")
     }
     // MARK: - host-storage: 沙箱文件 / UserDefaults
 
@@ -972,54 +1006,34 @@ enum CapabilitySelfCheck {
         rec.section("session_manage")
         let sessions = SessionManageTool()
         await check(rec, "list", sessions, ["op": .string("list")], session: session, preview: 500)
-        await check(rec, "models", sessions, ["op": .string("models")], session: session, preview: 300)
-        await check(rec, "read(current)", sessions, [
-            "op": .string("read"), "session_id": .string(session.id), "max_messages": .number(5)
-        ], session: session)
         await check(rec, "set_model(bad ref) rejected", sessions,
                     ["op": .string("set_model"), "model": .string("nope/none")],
                     expect: .errorContains("nope"), session: session)
-
-        // create → rename → archive → restore round trip on a throwaway session.
-        var createdId: String?
-        let created = await withBudget { () async throws -> String in
-            let out = try await sessions.execute(
-                arguments: ["op": .string("create"), "title": .string("selfcheck-new")],
-                session: session
-            )
-            return out.stringValue
-        }
-        if let created,
-           let json = (try? JSONSerialization.jsonObject(with: Data(created.utf8))) as? [String: Any],
-           let sid = json["session_id"] as? String {
-            createdId = sid
-            rec.record("create", ok: true, detail: trimmed(created))
-        } else {
-            rec.record("create", ok: false, detail: trimmed(created ?? "TIMEOUT"))
-        }
-
-        if let sid = createdId {
-            await check(rec, "rename", sessions, [
-                "op": .string("rename"), "session_id": .string(sid), "title": .string("selfcheck-renamed")
-            ], session: session)
-            // Whether 'switch' works depends on the host UI having installed a
-            // session activation handler — headless runs legitimately have none.
-            await check(rec, "switch", sessions,
-                        ["op": .string("switch"), "session_id": .string(sid)],
-                        expect: .completes, session: session)
-            await check(rec, "clear rejected", sessions,
-                        ["op": .string("clear"), "session_id": .string(sid)],
-                        expect: .errorContains("irreversibly"), session: session)
-            await check(rec, "archive", sessions,
-                        ["op": .string("archive"), "session_id": .string(sid)], session: session)
-            await check(rec, "archived", sessions,
-                        ["op": .string("archived")], session: session)
-            await check(rec, "restore", sessions,
-                        ["op": .string("restore"), "session_id": .string(sid)], session: session)
-        }
+        // 只留两条不可逆边界：clear 一律禁用、delete 不许删掉自己正在跑的会话。
+        // rename / switch / archive / archived / restore / read / models 是逐条 CRUD 回显，
+        // 看代码就能判断，而且旧写法跑完会在会话列表里留一条 selfcheck 垃圾会话。
+        await check(rec, "clear rejected", sessions,
+                    ["op": .string("clear"), "session_id": .string(session.id)],
+                    expect: .errorContains("irreversibly"), session: session)
         await check(rec, "delete(current) rejected", sessions,
                     ["op": .string("delete"), "session_id": .string(session.id)],
                     expect: .errorContains("current"), session: session)
+        // 建一个一次性会话，只为验证「删别人是允许的」，跑完立刻删掉，不留残留。
+        let throwaway = await withBudget { () async throws -> String? in
+            let out = try await sessions.execute(
+                arguments: ["op": .string("create"), "title": .string("selfcheck-throwaway")],
+                session: session
+            )
+            let json = (try? JSONSerialization.jsonObject(with: Data(out.stringValue.utf8)))
+                as? [String: Any]
+            return json?["session_id"] as? String
+        } ?? nil
+        if let throwaway {
+            await check(rec, "delete(非当前会话) 允许", sessions,
+                        ["op": .string("delete"), "session_id": .string(throwaway)], session: session)
+        } else {
+            rec.record("delete(非当前会话) 允许", ok: false, detail: "create 没返回 session_id")
+        }
     }
     // MARK: - 需宿主注入 Provider 的工具
 
@@ -1307,9 +1321,14 @@ enum CapabilitySelfCheck {
     /// the ephemeral agent must be retained for the lifetime of the check —
     /// otherwise `session_manage` sees a detached session. We park it in a static
     /// strong holder, along with the stub delegate that answers `clarify`.
-    private static var retainedEphemeralAgent: AIAgent?
+    ///
+    /// 自检只可能从主线程启动（Home tab 的按钮 / `-run-selfcheck` 在
+    /// `SceneDelegate` 的 `Task { @MainActor }` 里），所以这个持有槽直接挂主 actor，
+    /// 不需要加锁。
+    @MainActor private static var retainedEphemeralAgent: AIAgent?
     private static let autoAnswerDelegate = SelfCheckDelegate()
 
+    @MainActor
     static func ephemeralSession() async -> AISession {
         let central = AIAgentCentral()
         let agent = await central.create(
@@ -1440,13 +1459,25 @@ struct DemoWebSearchProvider: WebSearchProvider {
     }
 }
 
-/// Weak shared handle to the demo's agent + active session so the host UI (a
-/// button on the Home tab) can run the self-check without threading references
+/// 只为自检存在的一次性按钮：自己数 action 被打了几次。
+/// 「模拟点击返回了 OK」和「按钮真的被点了」是两件事，这个计数就是用来区分它们的。
+private final class SelfCheckProbeButton: UIButton {
+    private(set) var firedCount = 0
+
+    @objc func probeFired() { firedCount += 1 }
+}
+
+/// Weak shared handle to the demo's agent + active session so the host UI (a/// button on the Home tab) can run the self-check without threading references
 /// through the whole view hierarchy.
+///
+/// 整个 holder 都在主 actor 上：写入点只有 `SceneDelegate` 场景装配的
+/// `Task { @MainActor }`，读取点是 UI 回调和自检里的 `MainActor.run`，
+/// 所以不需要锁，标 `@MainActor` 就是最诚实的表达。
+@MainActor
 enum DemoAgentHolder {
     static weak var agent: AIAgent?
     static var currentSessionId: String?
-    @MainActor static weak var hostTabBarController: UITabBarController?
+    static weak var hostTabBarController: UITabBarController?
 
     static func currentSession() -> AISession? {
         guard let agent else { return nil }

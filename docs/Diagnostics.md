@@ -27,7 +27,20 @@ SKIP_BUILD=1 Scripts/simulator-selfcheck.sh    # 复用上次构建
 - 脚本每一步都套了 `gtimeout`（需 `brew install coreutils`）：卡住会直接失败并打印最近日志，不会挂住终端。app 内部每个检查项另有 8s 预算，超时记为失败后继续跑完剩余项。
 - 产物：`Documents/AppAgent/diagnostics/selfcheck-report.txt`（含授权 SDK 预览，逐项 ✓/✗ + `total=/ok=/fail=` 汇总，脚本拷到 `/tmp/selfcheck-report.txt`）、`Documents/selfcheck-ui-hierarchy.txt`（未截断的宿主 `ui_hierarchy` + `view_tree`）。授权 SDK/all 的层级另存 `Documents/AppAgent/diagnostics/selfcheck-sdk-hierarchy.txt`，不混入宿主产物。脚本以 `fail=0` 决定退出码。
 - 自检在 overlay 挂载**之后**才跑；默认 host 摘要和 full 都必须排除 SDK 窗口，显式授权 `appagent/all` 才包含 SDK。`-run-selfcheck` 同时抑制「尚未配置 API Key」弹窗，避免污染 dump。
+- **自检必须把当前 scene 绑到 session 上**（`run(session:)` 开头设 `inspectionSceneIdentifier`）。真机上 overlay 一定会绑（`AppAgentOverlay.bind`），自检以前不绑，于是 `HostInspectionUIKit.includes` 在 `context.sceneIdentifier == nil` 处就短路返回，**整条场景过滤路径从未被执行过**。懒加载 tab 被误判成「不在本场景」（3 个 tab 报成 1 个）就藏在这个盲区里，活了 4 天没被发现。改这里之前先想清楚：不绑 = 自检跑在一个生产上不存在的配置下。
 - 首页「能力自检」按钮在 app 内弹出同一份报告。
 - 加新工具时**一并在 `CapabilitySelfCheck` 加一条检查**，用三种期望之一：`.ok`（必须成功）、`.errorContains(...)`（必须以某个错误拒绝）、`.completes`（只要求不挂死，用于依赖真实模型或宿主 UI 的项）。
-- **自检必须跑完不留痕**：变更类内省（`view_set` / `view_invoke` / JS `uiSet`）只打在 `installScratchView()` 挂上去的一次性隐藏视图上，绝不改真实 UIKit 视图；改了全局观感的（深浅色、当前 tab）要复位；剪贴板只清掉自己写的内容。报告里有「临时视图已移除 / 深浅色已复位 / tab 已复位 / 剪贴板已清理」几条守着这个约定。
+- **自检必须跑完不留痕**：变更类内省（`view_set` / `view_invoke` / JS `uiSet`）只打在 `installScratchView()` 挂上去的一次性隐藏视图上，绝不改真实 UIKit 视图；改了全局观感的（深浅色、当前 tab）要复位；剪贴板只清掉自己写的内容；`session_manage` 建的一次性会话跑完要删掉（旧版 create → rename → archive → restore 每跑一次就在会话列表里多留一条）。报告里有「临时视图已移除 / 深浅色已复位 / tab 已复位 / 剪贴板已清理」几条守着这个约定。
 - **别在 `withBudget` 之外写可能阻塞的调用**。踩过：直接 `UIPasteboard.general.string` 读别的来源写入的剪贴板会触发系统粘贴授权，无人确认时整轮自检卡死（脚本 60s 超时才发现）。所以不去「读旧值再还原」剪贴板，且所有清理动作也一律包在 `withBudget` 里。
+
+## 真机测试待办
+
+放**只能靠手点确认、单测和自检脚本都覆盖不到**的验收项：视觉外观、系统级行为（后台挂起、麦克风、popover 关闭）、以及需要构造特殊运行态才能触发的交互。每条写清「怎么造条件 / 期望看到什么」，**验过就从这里删掉**，否则这份清单会变成没人信的许愿池。
+
+- **撞并行上限的弹窗真的会弹**。把 `RunGovernor(limit: 9)`（`Sources/Core/Session/AISessionManager.swift:28`）临时改成 1，demo 里在会话 A 发一条**不等回复**，切到会话 B 再发。期望：B 这条被拦下，弹出「暂时无法执行更多 / 已经有 1 个会话在运行」，**输入栏里的草稿不丢**，对话里不出现用户气泡。验完把 limit 改回 9。
+  用例只锁了弹窗文案（`AppAgentUITests.testConcurrencyLimitAlertNamesRunningCount`）与准入口径（`SessionManageTests.testConcurrencyAdmissionAtLimitNine`），**「撞线 → 真的 present」这条接线没有用例覆盖**，只能手点。
+- **发送 / 停止按钮按下不变暗**。图标改成了按钮的 image view 子视图（不再用 Catalyst 15 已废弃的 `adjustsImageWhenHighlighted`）。期望：长按住发送键，蓝色实心圆和白色箭头都不变暗；图标仍居中，点按范围仍是整格 40pt。
+- **demo 首页两个胶囊按钮的外观**（Haptic / 能力自检）。已从 `contentEdgeInsets` / `imageEdgeInsets` 迁到 `UIButton.Configuration`，算出来的差异只有「宽度 +4pt、左内距 12→16」。期望：背景色、圆角、描边、图标字号与标题间距肉眼无变化。
+- **切后台再回来能把一轮跑完**。`BackgroundActivity` 的后台执行断言改成了「异步在主线程申请 token + 四态状态盒」。期望：发一条会跑较久的消息，切出去看一眼消息再回来，这一轮继续跑完而不是从头重试；日志里不应出现后台额度被占住不放的迹象。仓库里没有覆盖这条的用例。
+- **语音波形跟着音量起伏**。音量事件的 12Hz 节流计数改成了 tap 闭包私有的 `Locked` 盒子。期望：按住说话时波形随声音大小变化、不卡顿；松手再按（重装 tap）第一帧不迟到。
+- **iPad 上点 popover 外面关掉废纸篓的操作菜单**。已删掉废弃的 `popoverPresentationControllerDidDismissPopover`，只留 `presentationControllerDidDismiss(_:)`。期望：菜单关掉后表格和右上角按钮立刻恢复可交互（不是一直锁着）。

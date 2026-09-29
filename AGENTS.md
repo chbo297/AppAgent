@@ -98,8 +98,12 @@ app_runtime_inspect, screenshot（最后两个仅在 `canImport(UIKit)` 时注�
 **需宿主注入 Provider / 自行注册**：app_action, app_navigate, app_state, web_search。
 
 **宿主能力工具（`Core/HostCapability/HostToolset.swift` 按可用 provider 装配，4 个）**：
-`app_runtime_inspect`（view_tree / view_info / view_set / view_invoke）、`app_hotfix`、
+`app_runtime_inspect`（看：view_tree / view_info；改：view_set；模拟用户操作：view_activate /
+page_navigate / page_scroll；反射：view_invoke）、`app_hotfix`、
 `app_hook_capture`、`app_web_inspect`。协议与默认实现都在 `Core/HostCapability/`。
+
+「让界面动起来」优先用 `page_navigate` / `view_activate`，不要用反射硬凑：真机上一次
+「切到 profile 页」因为没有这两个 op，模型绕着 `view_invoke` 试了 9 轮、烧掉 231 秒。
 
 通过 `AIAgentProfile.disabledBuiltInTools` 禁用指定工具；工具按 `group` 归类
 （core / session / host-storage / host-runtime），可用 `ToolPolicy` 的 allowedGroups / excludedGroups
@@ -125,6 +129,15 @@ app_runtime_inspect, screenshot（最后两个仅在 `canImport(UIKit)` 时注�
 ### UI
 - `ChatViewController` (UIKit): 即插即用聊天界面，通过 `session.uiState.onChange` 响应式更新
 - `ChatMessage` / `ChatMessageCell`: 气泡样式消息
+
+## 怎么汇报
+
+- **先讲人话，再讲细节。** 任何清单、排查结论、方案选项，开头先用「没碰过这块代码的人也能看懂」的话
+  说清**是什么问题、影响什么、需要谁做什么决定**；类名、行号、参数、时序一律往后放。
+- 自检标准：把开头那段单独拿给一个没读过这段代码的人看，他应该能判断「这事要不要做、该谁做」。
+  凡是必须翻代码才能看懂的内容，都不属于开头。
+- 每条结论要能追到证据（日志行、实测数字、`文件:行号`）。**没验证过的明确写「未验证」**，
+  不要和已验证的结论混在一起说 —— 「编译过了」不等于「跑通了」。
 
 ## 代码规范
 
