@@ -154,6 +154,16 @@ public protocol ToolProtocol: Sendable {
     /// `nil` uses the agent-wide budget (`AIAgentProfile.toolOutputMaxBytes`).
     /// Override only for tools whose value genuinely lies in bulk output.
     var outputMaxBytes: Int? { get }
+
+    /// 申请授权之前的纯静态校验；返回非 nil 即拒绝，授权与执行都不再发生。
+    ///
+    /// **注定失败的调用不该先弹卡片问人、点完再报错。** 真机上一次 `view_invoke` 因为选择器
+    /// 不在受限作用域的白名单里必然被拒，却先占掉用户 4.9 秒去点「允许」——既白等，也在
+    /// 训练用户盲签：卡片老问不可能成功的事，真危险的那次也会被顺手放过。
+    ///
+    /// 实现必须**无副作用**、不改运行时状态、不自己发起授权；只做「看参数和签名就能下结论」
+    /// 的判断。需要提权作用域才能判定的情形留给原本的授权流程。
+    func preflightRejection(for arguments: [String: JSONValue], session: AISession) async -> String?
 }
 
 extension ToolProtocol {
@@ -165,5 +175,10 @@ extension ToolProtocol {
     /// Single-purpose tools keep one level for every call.
     public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
         safetyLevel
+    }
+
+    /// 绝大多数工具没有「不执行就能判定必失败」的情形，默认不拦。
+    public func preflightRejection(for arguments: [String: JSONValue], session: AISession) async -> String? {
+        nil
     }
 }

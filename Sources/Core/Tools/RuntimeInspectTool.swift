@@ -118,6 +118,27 @@ public struct RuntimeInspectTool: ToolProtocol {
         self.provider = provider
     }
 
+    /// `view_invoke` 里有两类拒绝理由不需要执行就能判定：选择器不在受限作用域的白名单里，
+    /// 以及签名带原始类型（反射只能传对象）。把它们提到授权之前，用户就不用再为一个
+    /// 注定失败的调用点「允许」——真机实测那一次点掉了 4.9 秒，点完才报错。
+    ///
+    /// 提权作用域（appagent / all）不在这里判：它本身要走一次授权，那是它应有的流程。
+    public func preflightRejection(for arguments: [String: JSONValue], session: AISession) async -> String? {
+        guard arguments["op"]?.stringValue == "view_invoke" else { return nil }
+        guard (arguments["scope"]?.stringValue ?? "host") == "host" else { return nil }
+        guard let path = arguments["path"]?.stringValue, !path.isEmpty else { return nil }
+        guard let selector = arguments["selector"]?.stringValue, !selector.isEmpty else {
+            return "'selector' is required for view_invoke"
+        }
+        let argsJSON = arguments["argumentsJSON"]?.stringValue ?? "[]"
+        let argCount = ((try? JSONSerialization.jsonObject(with: Data(argsJSON.utf8))) as? [Any])?.count ?? 0
+        // 预检本身不申请授权，所以直接用默认的 host 作用域上下文。
+        return await provider.invocationRejection(
+            path: path, className: nil, selector: selector,
+            argumentCount: argCount, context: HostInspectionContext()
+        )
+    }
+
     /// The provider reports failures as sentinel strings. Surface those as tool
     /// errors so the model cannot mistake "(class not found: X)" for an answer.
     private func output(_ text: String) -> Tool.Output {

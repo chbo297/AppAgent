@@ -57,6 +57,11 @@ public protocol RuntimeInspectProvider: Sendable {
     /// 滚动：`path` 指向（或其祖先是）UIScrollView 时改 contentOffset，否则走无障碍滚动。
     /// `direction` 取 up / down / left / right，`amount` 为屏数（默认 1）。
     func scrollPage(path: String?, direction: String, amount: Double?, context: HostInspectionContext) async -> String
+
+    /// 纯静态判定一次反射调用会不会被拒（选择器签名 + 受限作用域白名单），**不执行、无副作用**。
+    /// 返回非 nil 即拒绝理由。给授权前置校验用，避免让用户为注定失败的调用点「允许」。
+    func invocationRejection(path: String?, className: String?, selector: String,
+                             argumentCount: Int, context: HostInspectionContext) async -> String?
 }
 
 public extension RuntimeInspectProvider {
@@ -103,5 +108,11 @@ public extension RuntimeInspectProvider {
 
     func scrollPage(path: String?, direction: String, amount: Double?, context: HostInspectionContext) async -> String {
         "Inspection denied: scrollPage is not supported by this runtime provider."
+    }
+
+    /// 判不出来就不拦 —— 前置校验只负责挡住「确定失败」的，不负责猜。
+    func invocationRejection(path: String?, className: String?, selector: String,
+                             argumentCount: Int, context: HostInspectionContext) async -> String? {
+        nil
     }
 }

@@ -1249,6 +1249,20 @@ public final class LLMExecutor: @unchecked Sendable {
             let toolArguments = Self.executableArguments(call.arguments)
             let justification = call.arguments["_why"]?.stringValue
 
+            // 静态判定就能确定失败的调用，在弹授权卡之前拒掉。放在授权之前而不是执行之前是
+            // 关键：否则用户会为一个不可能成功的操作点「允许」（真机实测一次 4.9 秒），
+            // 而且会逐渐养成盲签的习惯。
+            if let rejection = await tool.preflightRejection(for: toolArguments, session: session) {
+                Logger.info("LLMExecutor",
+                            "toolPreflightRejected: name=\(call.name), id=\(call.id), reason=\(rejection)")
+                let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
+                    toolCallId: call.id, content: "Error: \(rejection)", isError: true
+                ))
+                let err = AIAgentError.toolExecutionFailed(toolName: call.name,
+                                                           underlying: AIAgentError.toolExecutionDenied(rejection))
+                return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
+            }
+
             // Safety level check：统一走 session 的决策中心，由 AppAgent 自己的面板
             // 呈现（宿主策略可先行定夺），没人能回答时兜底拒绝。
             if level == .sensitive || level == .dangerous {

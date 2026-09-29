@@ -13,7 +13,10 @@ import Foundation
 import UIKit
 import ObjectiveC.runtime
 
-public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unchecked Sendable {
+/// 无实例存储属性：唯一类型级存储是不可变的 `chromePrefixes`，所有摸 UIKit 的入口都在
+/// `MainActor.run` / `@MainActor` 里执行。所以这里是真 `Sendable`，不需要 `@unchecked` 豁免；
+/// 以后要加实例可变状态，先决定谁来串行化，别把标注放宽回去。
+public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendable {
 
     public init() {}
 
@@ -224,6 +227,26 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
 
     public func scrollPage(path: String?, direction: String, amount: Double?, context: HostInspectionContext) async -> String {
         await MainActor.run { Self.scroll(path: path, direction: direction, amount: amount, context: context) }
+    }
+
+    /// 只做「按 path 找到视图 + 查方法签名 + 对作用域白名单」，一行运行时状态都不改 ——
+    /// `selectorRejection` 本来就是这三件事，这里只是把它提到授权之前调一次。
+    ///
+    /// 只覆盖 `view_invoke`（真机那次浪费掉的 4 次调用全是它）。类方法版 `invoke` 的目标解析
+    /// 牵涉元类与单例，判定条件不止签名，留给执行阶段报准确的错。
+    public func invocationRejection(path: String?, className: String?, selector: String,
+                                    argumentCount: Int, context: HostInspectionContext) async -> String? {
+        guard let path, !path.isEmpty, className == nil else { return nil }
+        return await MainActor.run {
+            // 找不到视图就不在这里下结论：让执行阶段去报 "(no view at path …)"，
+            // 免得前置校验把「路径写错」和「选择器不让调」两种错误混成一种。
+            guard let view = Self.view(atPath: path, context: context) else { return nil }
+            let sel = NSSelectorFromString(selector)
+            guard view.responds(to: sel) else {
+                return "(selector \(selector) not found on \(type(of: view)))"
+            }
+            return Self.selectorRejection(sel, on: view, argCount: argumentCount, context: context)
+        }
     }
 
     // MARK: - 分层摘要：先给地图，细节按需二次调用
@@ -1132,7 +1155,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, @unche
         for i in 0..<declared {
             var buffer = [CChar](repeating: 0, count: 64)
             method_getArgumentType(method, UInt32(i + 2), &buffer, 64)
-            let type = String(cString: buffer)
+            // 运行时写进来的是 NUL 结尾的类型编码，64 字节缓冲区尾部全是填充的 0；
+            // 必须先截到第一个 NUL 再解码，否则 `type` 会拖着一串 `\0`，跟 "@" 这类编码比不上。
+            // （`method_getArgumentType` 只收 `CChar` 缓冲区，所以这里按位重解释成 UTF-8 字节。）
+            let type = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
             guard isObjectEncoding(type) else {
                 return "(selector \(name) argument #\(i + 1) is ObjC type '\(type)', not an object — "
                     + "reflection can only pass objects. Use view_set / property_set for primitives.)"
