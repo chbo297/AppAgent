@@ -141,10 +141,13 @@ page_navigate / page_scroll；反射：view_invoke）、`app_hotfix`、
 
 ## 代码规范
 
-- 已发 tag，但停在 **0.0.x：API 未稳定**。不需要为了兼容旧 API 而保守：若重构能显著提升结构清晰度、
-  命名一致性或长期可维护性，可以直接调整 public/internal API，并同步更新本仓库调用点 ——
-  破坏性改动递增次版本号即可（`0.0.x` → `0.1.0`），不必留废弃期。改完记得同步 `CHANGELOG.md`
-  的版本；**只支持 SwiftPM**（CocoaPods 已移除，原因见 `docs/Dependencies.md`）。发版顺序见 `docs/Dependencies.md`。
+- **初期开发，不背历史包袱。** 随时可以为「效果最好、结构最合理、长期最易维护」做重构和结构调整；
+  停在 **0.0.x：API 未稳定**，不必为兼容旧 API 保守——重构能提升结构清晰度 / 命名一致性 / 可维护性，
+  就直接改 public/internal API 并同步调用点，破坏性改动递增次版本号（`0.0.x` → `0.1.0`），不留废弃期。
+  改完同步 `CHANGELOG.md`；**只支持 SwiftPM**（CocoaPods 已移除，原因见 `docs/Dependencies.md`）。发版顺序见 `docs/Dependencies.md`。
+- **单测与文档只保留核心，不堆冗余。** 效率优先：单测只写**能抓真回归、体现核心思路与结构**的那几条，
+  不为覆盖率堆重复 / 低价值用例拖慢迭代；文档只记**核心思路、结构、进行中的进度与待办**，不铺陈细枝末节。
+  结构一变就顺手删掉过时的测试与文档，别让它们变成新的历史包袱。
 - 最低支持 iOS 15，不使用 iOS 16+ only API（除非有 `#available` 守卫）。升到 15 是为了 agent 回复的 markdown 渲染直接用系统 `AttributedString(markdown:)`，不必自研解析器或引入第三方依赖。
 - Sendable 严格，actor 隔离所有并发状态
 - 所有 provider/storage 通过协议抽象，可替换
