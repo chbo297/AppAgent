@@ -43,7 +43,7 @@ Add the package to your app and depend on the single product:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/chbo297/AppAgent.git", from: "0.0.1")
+    .package(url: "https://github.com/chbo297/AppAgent.git", from: "0.0.2")
 ],
 targets: [
     .target(
