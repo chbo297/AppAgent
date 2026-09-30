@@ -34,13 +34,18 @@ public final class AppAgentOverlay {
     }
 
     /// Create the overlay window, create a fresh session on `agent`, bind it, return.
+    ///
+    /// `startCollapsed` 为 true 时，输入栏首帧以收起态胶囊落位——宿主把 overlay 当作
+    /// 常驻悬浮入口（那颗球即收起态输入栏）时用。
     @discardableResult
     public static func start(
         in windowScene: UIWindowScene,
         agent: AIAgent,
-        sessionTitle: String = "Chat"
+        sessionTitle: String = "Chat",
+        startCollapsed: Bool = false
     ) async -> AppAgentOverlay {
         let overlay = AppAgentOverlay(windowScene: windowScene)
+        overlay.viewController.startsInputBarCollapsed = startCollapsed
         let session = await agent.createSession(title: sessionTitle)
         overlay.bind(agent: agent, sessionId: session.id)
         return overlay

@@ -99,6 +99,22 @@ public class AppAgentViewController: UIViewController {
         presentationDelegate?.appAgent(didSwitchSessionFrom: old, to: sessionId)
     }
 
+    /// 宿主主动展开 / 收起输入栏（收起态即那颗悬浮球胶囊）。
+    ///
+    /// 视图尚未加载时先记到 `startsInputBarCollapsed`，等首帧布局时落位；已加载则即时切换。
+    /// 供「常驻悬浮入口」形态下从收起态显式展开成完整面板（如分享回流唤起）用。
+    public func setInputBarCollapsed(_ collapsed: Bool, animated: Bool) {
+        guard isViewLoaded else {
+            startsInputBarCollapsed = collapsed
+            return
+        }
+        if collapsed {
+            collapseInputBar(animated: animated)
+        } else {
+            expandInputBar(animated: animated)
+        }
+    }
+
     // MARK: - Subviews
 
     public let inputBar = AppAgentInputBar()
@@ -160,6 +176,13 @@ public class AppAgentViewController: UIViewController {
     /// 生产默认 false：走真实 session → agent → 模型，保证配置 key 后能真正收发消息。
     /// 需要脱离模型联调 UI 时，宿主可将其显式置为 true（`agent` 绑定时仍会按是否有 agent 自动纠正）。
     public var usesFixedDebugReply = false
+
+    /// 首帧是否以**收起态**（那颗悬浮球胶囊）落位，而不是默认的展开态。
+    ///
+    /// 宿主把 overlay 当作「常驻悬浮入口」时置 true：窗口一挂上就是一颗可拖拽的收起胶囊，
+    /// 点它或点 menu 才展开成完整输入栏 + 面板。只在**第一次布局**时被读；之后收/展由手势与
+    /// delegate 决定，改这个值不会二次生效。
+    public var startsInputBarCollapsed = false
 
     /// inputBar 布局偏好的持久化存储；frame 策略本身在 AppAgentInputBarFramePolicy。
     let inputBarLayoutStore: AppAgentInputBarLayoutStoring = AppAgentUserDefaultsInputBarLayoutStore()

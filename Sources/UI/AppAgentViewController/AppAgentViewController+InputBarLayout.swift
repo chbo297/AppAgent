@@ -103,8 +103,11 @@ extension AppAgentViewController {
         let context = inputBarLayoutContext
         let targetFrame: CGRect
         if !hasLaidOutInputBar {
-            // 第一次布局：没有任何历史状态，一律以展开态首帧落位（之后置位，不再走这支）。
-            targetFrame = AppAgentInputBarFramePolicy.preferredExpandedFrame(context)
+            // 第一次布局：没有任何历史状态，按宿主意图落首帧——默认展开态，
+            // 宿主把 overlay 当常驻悬浮入口时（startsInputBarCollapsed）以收起态胶囊落位。
+            targetFrame = startsInputBarCollapsed
+                ? AppAgentInputBarFramePolicy.preferredCollapsedFrame(context)
+                : AppAgentInputBarFramePolicy.preferredExpandedFrame(context)
             hasLaidOutInputBar = true
         } else if isDraggingExpandedInputBar {
             // 展开态正在被左右拖拽改宽度：用「最近一次手指原始位置」重算约束后的 frame，
