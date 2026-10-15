@@ -76,6 +76,10 @@ public struct DelegateTaskTool: ToolProtocol {
         Self.inheritBoundaries(from: session, into: subSession)
         await subSession.reinstallTools()
 
+        // The immutable parent mask carries the same runtime gate into the child.
+        // Bind its permission ceiling before the generated goal becomes a user turn.
+        await session.agentMask?.profile.toolExecutionGate?.prepareDelegation(from: session, to: subSession)
+
         // Send the message and collect the final response
         try Task.checkCancellation()
         let stream = subSession.sendMessage(userMessage)

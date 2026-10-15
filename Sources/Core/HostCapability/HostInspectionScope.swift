@@ -78,6 +78,16 @@ enum HostInspectionAccess {
         }
         try checkBoundaries(scope: scope, isMutation: isMutation, chain: chain)
 
+        // Direct session-aware runtime calls must obey the same host gate as the executor.
+        // Resolve the installed tool rather than inventing a less restricted bridge identity.
+        if isMutation {
+            try await checkExecutionGate(tool: tool, arguments: arguments, session: session)
+            guard session.matchesDecisionPolicyChain(chain) else {
+                throw HostInspectionError.denied
+            }
+            try checkBoundaries(scope: scope, isMutation: isMutation, chain: chain)
+        }
+
         let inherited = authorization.flatMap { $0.accepts(session) ? $0 : nil }
         // Ordinary host reads never invoke a policy callback or ask for SDK approval.
         if scope == .host {
@@ -98,7 +108,31 @@ enum HostInspectionAccess {
             Logger.info("HostInspection", "\(tool): scope=\(scope.rawValue) denied")
             throw HostInspectionError.denied
         }
+        if isMutation {
+            try await checkExecutionGate(tool: tool, arguments: arguments, session: session)
+            guard !Task.isCancelled, grant.isValid, session.matchesDecisionPolicyChain(chain) else {
+                throw HostInspectionError.denied
+            }
+            try checkBoundaries(scope: scope, isMutation: isMutation, chain: chain)
+        }
         return HostInspectionContext(scope: scope, sceneIdentifier: grant.sceneIdentifier)
+    }
+
+    private static func checkExecutionGate(
+        tool name: String, arguments: [String: JSONValue], session: AISession
+    ) async throws {
+        guard session.agentMask?.profile.toolExecutionGate != nil else {
+            return
+        }
+        guard let tool = session.tool(named: name), tool.enabled else {
+            throw ToolExecutionAccess.Rejection(reason: "Tool '\(name)' is unavailable for this runtime mutation.")
+        }
+        try await ToolExecutionAccess.requireAllowed(
+            tool, arguments: LLMExecutor.executableArguments(arguments), session: session
+        )
+        guard tool.enabled, session.tool(named: name) != nil else {
+            throw ToolExecutionAccess.Rejection(reason: "Tool '\(name)' is unavailable for this runtime mutation.")
+        }
     }
 
     /// Both frozen configuration and live host restrictions apply. Evaluate the whole

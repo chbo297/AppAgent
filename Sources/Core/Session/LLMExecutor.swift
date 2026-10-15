@@ -1266,7 +1266,11 @@ public final class LLMExecutor: @unchecked Sendable {
                 return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
             }
 
-            // Preflight can suspend too. A disabled tool must not prompt for authorization.
+            // Host policy is independent of remembered approvals and tool safety.
+            // Pass every executable argument so multi-op tools retain their full meaning.
+            try await ToolExecutionAccess.requireAllowed(tool, arguments: toolArguments, session: session)
+
+            // Preflight and the gate can suspend. Disabled tools must not prompt.
             try requireEnabled(tool)
 
             // Safety level check：统一走 session 的决策中心，由 AppAgent 自己的面板
@@ -1315,6 +1319,7 @@ public final class LLMExecutor: @unchecked Sendable {
             let result = try await withThrowingTaskGroup(of: Tool.Output.self) { group in
                 group.addTask {
                     // Recheck after authorization and task scheduling, immediately before execution.
+                    try await ToolExecutionAccess.requireAllowed(tool, arguments: toolArguments, session: session)
                     try requireEnabled(tool)
                     return try await tool.execute(arguments: toolArguments, session: session)
                 }

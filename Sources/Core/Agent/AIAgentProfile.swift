@@ -48,6 +48,10 @@ public struct AIAgentProfile: Sendable {
     /// Execution and safety settings copied into each newly created session.
     public var executionPolicy: AIAgentExecutionPolicy
 
+    /// Optional host execution boundary. Captured in the session's profile snapshot,
+    /// inherited by delegated sessions, and never serialized into session storage.
+    public var toolExecutionGate: (any ToolExecutionGate)?
+
     /// Publicly discoverable default loop budget.
     public static let defaultMaxIterations = AIAgentExecutionPolicy.defaultMaxIterations
 
@@ -182,6 +186,7 @@ public struct AIAgentProfile: Sendable {
         autoPersist: Bool = AIAgentExecutionPolicy.defaultAutoPersist,
         toolOutputMaxBytes: Int = AIAgentExecutionPolicy.defaultToolOutputMaxBytes,
         toolMutationPolicy: Tool.MutationPolicy = AIAgentExecutionPolicy.defaultToolMutationPolicy,
+        toolExecutionGate: (any ToolExecutionGate)? = nil,
         memoryConfig: MemoryConfig = MemoryConfig(),
         registerBuiltInTools: Bool = true,
         disabledBuiltInTools: Set<String> = [],
@@ -191,6 +196,7 @@ public struct AIAgentProfile: Sendable {
         self.identity = ""
         self.toolPrompts = toolPrompts
         self.messageContextProviders = messageContextProviders
+        self.toolExecutionGate = toolExecutionGate
         self.executionPolicy = AIAgentExecutionPolicy(
             maxIterations: maxIterations,
             toolTimeout: toolTimeout,
@@ -230,6 +236,7 @@ public struct AIAgentProfile: Sendable {
         autoPersist: Bool = AIAgentExecutionPolicy.defaultAutoPersist,
         toolOutputMaxBytes: Int = AIAgentExecutionPolicy.defaultToolOutputMaxBytes,
         toolMutationPolicy: Tool.MutationPolicy = AIAgentExecutionPolicy.defaultToolMutationPolicy,
+        toolExecutionGate: (any ToolExecutionGate)? = nil,
         memoryConfig: MemoryConfig = MemoryConfig(),
         registerBuiltInTools: Bool = true,
         disabledBuiltInTools: Set<String> = [],
@@ -250,6 +257,7 @@ public struct AIAgentProfile: Sendable {
             autoPersist: autoPersist,
             toolOutputMaxBytes: toolOutputMaxBytes,
             toolMutationPolicy: toolMutationPolicy,
+            toolExecutionGate: toolExecutionGate,
             memoryConfig: memoryConfig,
             registerBuiltInTools: registerBuiltInTools,
             disabledBuiltInTools: disabledBuiltInTools,

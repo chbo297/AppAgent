@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - Unreleased
 
+### Added
+- 通用 `ToolExecutionGate` 与 `AIAgentProfile.toolExecutionGate`（默认 nil，运行时依赖、不持久化）：
+  授权前和执行前检查完整工具参数；拒绝作为工具错误，不申请授权、不执行。
+  子任务继承父 gate，发送任务前调用 `prepareDelegation`，供宿主固定子任务权限上限。
+
 ### Changed
+- 会话内直接调用宿主能力的写操作也检查 gate，缺少已安装工具时拒绝；作用域授权后重新检查。
+- UI 语义激活拒绝隐藏、透明、禁用的目标及祖先；检查视图的读取路径仍可访问这些目标。
+- 属性观察改为按运行时声明直接读取 getter/ivar，保留明确允许的 UIKit 只读 getter；
+  所有 scope 拒绝把普通方法或 KVC 的 `get<Key>` 猜测当成属性，堵住 `.safe` 读取的副作用入口。
 - `AppNavigationProvider.navigate` 保留 Void API，正常返回仅承诺请求已受理/提交；
   `app_navigate` 返回 `submitted: true`、`completion: "unconfirmed"` 与明确的提交文案，
   `success` 仅表示提交成功，不再声称页面已呈现。提交后不得仅因呈现未确认而抛错，避免诱导重复请求。

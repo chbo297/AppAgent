@@ -12,6 +12,9 @@
 import Foundation
 import UIKit
 import ObjectiveC.runtime
+#if canImport(AppAgentObjCSupport)
+import AppAgentObjCSupport
+#endif
 
 /// 无实例存储属性：唯一类型级存储是不可变的 `chromePrefixes`，所有摸 UIKit 的入口都在
 /// `MainActor.run` / `@MainActor` 里执行。所以这里是真 `Sendable`，不需要 `@unchecked` 豁免；
@@ -349,6 +352,9 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
     @MainActor
     static func activate(path: String, event: String?, context: HostInspectionContext) -> String {
         guard let hit = view(atPath: path, context: context) else { return "(no view at path '\(path)')" }
+        if let rejection = activationRejection(for: hit, requiresInteraction: false) {
+            return rejection
+        }
         guard let controlEvent = controlEvent(named: event) else {
             return "(unknown event '\(event ?? "")'; use touchUpInside / touchDown / touchUpOutside "
                 + "/ valueChanged / primaryActionTriggered)"
@@ -356,8 +362,8 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         let before = pageFingerprint(context: context)
         // 1) 最近的 UIControl 祖先。点中的往往是 label / icon 这种叶子，用户真正点的是它的按钮祖先。
         if let found = nearestControl(from: hit, context: context) {
-            guard found.control.isEnabled else {
-                return "(control \(type(of: found.control)) at '\(path)' is disabled)"
+            if let rejection = activationRejection(for: found.control) {
+                return rejection
             }
             found.control.sendActions(for: controlEvent)
             return "OK. 已激活 \(location(path: path, hops: found.hops, object: found.control)) "
@@ -373,6 +379,28 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         }
         return "(no activatable target at or above '\(path)': 没有 UIControl 祖先，accessibilityActivate() 也不接受。"
             + "只挂手势识别器的视图无法可靠触发——页面跳转请用 page_navigate，其它状态改动用 view_set / property_set)"
+    }
+
+    /// Addressable readers may inspect hidden views; user-equivalent activation may not.
+    /// Check the entire ancestor chain, including cumulative opacity and disabled containers.
+    /// A passive label/icon can still resolve to its interactive control ancestor.
+    @MainActor
+    static func activationRejection(for view: UIView, requiresInteraction: Bool = true) -> String? {
+        var node: UIView? = view
+        var opacity: CGFloat = 1
+        while let current = node {
+            opacity *= current.alpha
+            if current.isHidden || opacity <= 0.01 {
+                return "(activation denied: target or ancestor is hidden or transparent)"
+            }
+            if (current as? UIControl)?.isEnabled == false
+                || current.accessibilityTraits.contains(.notEnabled)
+                || (requiresInteraction && !current.isUserInteractionEnabled) {
+                return "(activation denied: target or ancestor is disabled)"
+            }
+            node = current.superview
+        }
+        return nil
     }
 
     @MainActor
@@ -399,7 +427,8 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         var node: UIView? = view
         var hops = 0
         while let current = node, hops <= 6 {
-            if HostInspectionUIKit.includes(current, context: context), current.accessibilityActivate() {
+            if HostInspectionUIKit.includes(current, context: context),
+               activationRejection(for: current) == nil, current.accessibilityActivate() {
                 return (current, hops)
             }
             node = current.superview
@@ -707,10 +736,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         return context.scope == .all ? cls as AnyObject : nil
     }
 
-    // MARK: - Scoped KVC
+    // MARK: - Scoped property access
 
-    /// Walk one key at a time. value(forKeyPath:) would execute the whole chain, including
-    /// getters on excluded objects and collection operators, before we could check ownership.
+    /// Walk one declared member at a time, checking ownership before every read.
+    /// KVC also dispatches ordinary methods, so it cannot implement a safe observation.
     @MainActor
     private static func propertyTarget(
         _ target: NSObject, keyPath: String, context: HostInspectionContext
@@ -733,12 +762,43 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
                 }
             }
             if index == keys.count - 1 { return (current, key) }
-            let next = try ObjCExceptionCatcher.performReturning { current.value(forKey: key) }
+            let next = try declaredPropertyValue(from: current, key: key)
             guard let object = next as? NSObject else { throw UIKitInspectionError.unsafeObjectChain }
             try validatePropertyTarget(object, context: context)
             current = object
         }
         throw UIKitInspectionError.unsafeObjectChain
+    }
+
+    @MainActor
+    private static func declaredPropertyValue(from object: NSObject, key: String) throws -> Any? {
+        // Some UIKit observations are methods rather than runtime properties.
+        // Keep this positive, receiver-specific list small; a getter-shaped name is not evidence.
+        let allowedGetter: String?
+        switch key {
+        case "hidden" where object is UIView, "isHidden" where object is UIView:
+            allowedGetter = "isHidden"
+        case "userInteractionEnabled" where object is UIView, "isUserInteractionEnabled" where object is UIView:
+            allowedGetter = "isUserInteractionEnabled"
+        case "enabled" where object is UIControl, "isEnabled" where object is UIControl:
+            allowedGetter = "isEnabled"
+        case "isFirstResponder" where object is UIResponder:
+            allowedGetter = key
+        case "isViewLoaded" where object is UIViewController:
+            allowedGetter = key
+        default:
+            allowedGetter = nil
+        }
+        do {
+            return try ObjCExceptionCatcher.performReturning {
+                AppAgentObjCExceptionCatcher.readDeclaredValue(
+                    from: object, key: allowedGetter ?? key, allowGetter: allowedGetter != nil
+                )
+            }
+        } catch {
+            // Neither exception reasons nor arbitrary method return values may escape as observations.
+            throw UIKitInspectionError.unsafeObjectChain
+        }
     }
 
     @MainActor
@@ -792,7 +852,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
     ) -> String {
         do {
             let (object, key) = try propertyTarget(target, keyPath: keyPath, context: context)
-            let value = try ObjCExceptionCatcher.performReturning { object.value(forKey: key) }
+            let value = try declaredPropertyValue(from: object, key: key)
             return try inspectedDescription(of: value, context: context)
         } catch let error as UIKitInspectionError {
             return error.localizedDescription
@@ -831,12 +891,12 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
                 if let view, containsExcludedView(view, context: context) {
                     throw UIKitInspectionError.outsideScope
                 }
-                let old = try ObjCExceptionCatcher.performReturning { object.value(forKey: key) }
+                let old = try declaredPropertyValue(from: object, key: key)
                 _ = try inspectedDescription(of: old, context: context)
                 if old is UIView || old is UIViewController { throw UIKitInspectionError.unsafeObjectChain }
             }
             try ObjCExceptionCatcher.perform { object.setValue(boxedValue(from: value), forKey: key) }
-            let updated = try ObjCExceptionCatcher.performReturning { object.value(forKey: key) }
+            let updated = try declaredPropertyValue(from: object, key: key)
             return "OK. \(keyPath) = \(try inspectedDescription(of: updated, context: context))"
         } catch let error as UIKitInspectionError {
             return error.localizedDescription

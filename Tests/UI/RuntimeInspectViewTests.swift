@@ -1,11 +1,158 @@
 #if canImport(UIKit)
 import XCTest
 import UIKit
+import ObjectiveC.runtime
 @testable import AppAgent
 
 /// 运行时视图寻址与取值解析（app_runtime_inspect 的 view_* 系列依赖它们）。
 @MainActor
 final class RuntimeInspectViewTests: XCTestCase {
+
+    func testRawKVCInvokesUndeclaredMethodButPropertyReaderMustNot() throws {
+        let container = UIView()
+        let probe = PropertyReadProbe()
+        container.addSubview(probe)
+        _ = try ObjCExceptionCatcher.performReturning {
+            probe.value(forKey: "detachAndReturn")
+        }
+        XCTAssertNil(probe.superview, "Raw KVC executes an ordinary method before validating its result")
+        XCTAssertEqual(probe.effects, 1)
+
+        for context in [HostInspectionContext(), HostInspectionContext(scope: .all)] {
+            container.addSubview(probe)
+            let result = DefaultRuntimeInspectProvider.readProperty(
+                from: probe, keyPath: "detachAndReturn", context: context
+            )
+            XCTAssertTrue(result.hasPrefix("Inspection denied:"), result)
+            XCTAssertTrue(probe.superview === container)
+            XCTAssertEqual(probe.effects, 1)
+            let removal = DefaultRuntimeInspectProvider.readProperty(
+                from: probe, keyPath: "removeFromSuperview", context: context
+            )
+            XCTAssertTrue(removal.hasPrefix("Inspection denied:"), removal)
+            XCTAssertTrue(probe.superview === container)
+        }
+    }
+
+    func testPropertyTraversalAndKVCPrefixCannotInvokeOrdinaryMethods() {
+        let probe = PropertyReadProbe()
+        let read = DefaultRuntimeInspectProvider.readProperty(from: probe, keyPath: "detachAndReturn.tag")
+        XCTAssertTrue(read.hasPrefix("Inspection denied:"), read)
+        let write = DefaultRuntimeInspectProvider.writeProperty(
+            on: probe, keyPath: "detachAndReturn.tag", value: "9"
+        )
+        XCTAssertTrue(write.hasPrefix("Inspection denied:"), write)
+        XCTAssertEqual(probe.tag, 0)
+        XCTAssertEqual(probe.effects, 0)
+
+        // KVC tries getTitle before title, even though title is a declared property.
+        let title = DefaultRuntimeInspectProvider.readProperty(from: probe, keyPath: "title")
+        XCTAssertEqual(title, "observed")
+        XCTAssertEqual(probe.effects, 0)
+    }
+
+    func testDeclaredPropertiesGetterAliasesAndIvarsRemainReadable() throws {
+        let label = UILabel(frame: CGRect(x: 1, y: 2, width: 30, height: 40))
+        label.text = "visible value"
+        label.tag = 7
+        label.isHidden = true
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: label, keyPath: "text"), "visible value")
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: label, keyPath: "tag"), "7")
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: label, keyPath: "hidden"), "1")
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: label, keyPath: "isHidden"), "1")
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: label, keyPath: "userInteractionEnabled"), "0")
+        let button = UIButton()
+        button.isEnabled = false
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: button, keyPath: "enabled"), "0")
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: label, keyPath: "isFirstResponder"), "0")
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: label, keyPath: "frame"),
+                       NSValue(cgRect: label.frame).description)
+        let controller = UIViewController()
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: controller, keyPath: "isViewLoaded"), "0")
+        XCTAssertFalse(controller.isViewLoaded)
+
+        // A real Objective-C ivar with a colliding ordinary method must be read as storage.
+        let cls = try XCTUnwrap(objc_allocateClassPair(NSObject.self, "PropertyIvarProbe_\(UUID().uuidString)", 0))
+        XCTAssertTrue(class_addIvar(cls, "_value", MemoryLayout<Int64>.size, 3, "q"))
+        let method: @convention(block) (NSObject) -> Int64 = { _ in
+            999
+        }
+        let implementation = imp_implementationWithBlock(method)
+        XCTAssertTrue(class_addMethod(cls, NSSelectorFromString("value"), implementation, "q@:"))
+        objc_registerClassPair(cls)
+        defer {
+            imp_removeBlock(implementation)
+        }
+        let object = try XCTUnwrap(class_createInstance(cls, 0) as? NSObject)
+        let ivar = try XCTUnwrap(class_getInstanceVariable(cls, "_value"))
+        let address = Unmanaged.passUnretained(object).toOpaque().advanced(by: ivar_getOffset(ivar))
+        address.storeBytes(of: Int64(42), as: Int64.self)
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(
+            from: object, keyPath: "value", context: .init(scope: .all)
+        ), "42")
+    }
+
+    func testSafePropertyToolCannotMutateInReadOnlySession() async throws {
+        let container = UIView()
+        let probe = PropertyReadProbe()
+        container.addSubview(probe)
+        let tool = RuntimeInspectTool(provider: RecordingRuntimeProvider(propertyTarget: probe))
+        let session = AISession(id: UUID().uuidString, agentMask: AIAgentMask(
+            profile: AIAgentProfile(autoPersist: false, toolMutationPolicy: .readOnly),
+            toolCentral: ToolCentral()
+        ))
+        session.decisionResponders = DecisionResponderCentral()
+        for key in ["removeFromSuperview", "detachAndReturn.tag", "getTitle"] {
+            let arguments: [String: JSONValue] = ["op": .string("property_value"), "keyPath": .string(key)]
+            XCTAssertEqual(tool.safetyLevel(for: arguments), .safe)
+            let output = try await tool.execute(arguments: arguments, session: session)
+            guard case .error(let reason) = output else {
+                XCTFail("Expected rejected property read for \(key)")
+                continue
+            }
+            XCTAssertTrue(reason.hasPrefix("Inspection denied:"), reason)
+        }
+        XCTAssertTrue(probe.superview === container)
+        XCTAssertEqual(probe.effects, 0)
+        let output = try await tool.execute(
+            arguments: ["op": .string("property_value"), "keyPath": .string("title")], session: session
+        )
+        guard case .text(let text) = output else {
+            return XCTFail("Declared properties must remain available in read-only sessions")
+        }
+        XCTAssertEqual(text, "observed")
+    }
+
+    func testActivationRejectsHiddenAndDisabledAncestorsWithoutHidingReaders() {
+        let container = UIView()
+        let button = UIButton()
+        let label = UILabel()
+        container.addSubview(button)
+        button.addSubview(label)
+        XCTAssertNil(DefaultRuntimeInspectProvider.activationRejection(for: button))
+        XCTAssertNil(DefaultRuntimeInspectProvider.activationRejection(for: label, requiresInteraction: false))
+
+        container.isHidden = true
+        XCTAssertNotNil(DefaultRuntimeInspectProvider.activationRejection(for: label, requiresInteraction: false))
+        XCTAssertTrue(DefaultRuntimeInspectProvider.view(atPath: "0", root: container) === button,
+                      "Inspection must still be able to read hidden targets")
+        container.isHidden = false
+        container.alpha = 0.05
+        button.alpha = 0.05
+        XCTAssertNotNil(DefaultRuntimeInspectProvider.activationRejection(for: button))
+        container.alpha = 1
+        button.alpha = 1
+        container.isUserInteractionEnabled = false
+        XCTAssertNotNil(DefaultRuntimeInspectProvider.activationRejection(for: button))
+        container.isUserInteractionEnabled = true
+        button.isEnabled = false
+        XCTAssertNotNil(DefaultRuntimeInspectProvider.activationRejection(for: label, requiresInteraction: false))
+        button.isEnabled = true
+        container.accessibilityTraits.insert(.notEnabled)
+        XCTAssertNotNil(DefaultRuntimeInspectProvider.activationRejection(for: button))
+        container.accessibilityTraits.remove(.notEnabled)
+        XCTAssertNil(DefaultRuntimeInspectProvider.activationRejection(for: button))
+    }
 
     /// root / 0 / 1/0 三种路径都能落到正确的视图，越界返回 nil。
     func testViewPathResolution() {
@@ -165,13 +312,36 @@ final class RuntimeInspectViewTests: XCTestCase {
     }
 }
 
+private final class PropertyReadProbe: UIView {
+    var effects = 0
+    @objc var title: String = "observed"
+
+    @objc func detachAndReturn() -> UIView {
+        effects += 1
+        removeFromSuperview()
+        return self
+    }
+
+    @objc func getTitle() -> String {
+        effects += 1
+        return "unexpected"
+    }
+}
+
 /// 只记录调用的桩 provider，用于验证工具的分发与参数校验。
 private struct RecordingRuntimeProvider: RuntimeInspectProvider {
+    var propertyTarget: UIView?
+
     func uiHierarchy(context: HostInspectionContext) async -> String { "hierarchy" }
     func classList(matching filter: String?, context: HostInspectionContext) async -> [String] { ["A"] }
     func methodList(ofClass className: String, context: HostInspectionContext) async -> [String] { ["- m"] }
     func propertyList(ofClass className: String, context: HostInspectionContext) async -> [String] { ["@property p"] }
-    func propertyValue(keyPath: String, ofClass className: String?, context: HostInspectionContext) async -> String? { "value" }
+    func propertyValue(keyPath: String, ofClass className: String?, context: HostInspectionContext) async -> String? {
+        guard let propertyTarget else {
+            return "value"
+        }
+        return await DefaultRuntimeInspectProvider.readProperty(from: propertyTarget, keyPath: keyPath, context: context)
+    }
     func invoke(className: String, selector: String, argumentsJSON: String, context: HostInspectionContext) async -> String { "invoked" }
     func viewTree(maxDepth: Int, context: HostInspectionContext) async -> String { "tree depth=\(maxDepth)" }
     func viewInfo(path: String, context: HostInspectionContext) async -> String { "info \(path)" }
