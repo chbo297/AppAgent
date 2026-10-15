@@ -1226,6 +1226,9 @@ public final class LLMExecutor: @unchecked Sendable {
                 return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
             }
 
+            // The offered list is a snapshot; a tool may have been disabled while the model ran.
+            try requireEnabled(tool)
+
             // Per-call safety level: a multi-op tool reports `list` and `delete` differently.
             let level = tool.safetyLevel(for: call.arguments)
 
@@ -1262,6 +1265,9 @@ public final class LLMExecutor: @unchecked Sendable {
                                                            underlying: AIAgentError.toolExecutionDenied(rejection))
                 return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
             }
+
+            // Preflight can suspend too. A disabled tool must not prompt for authorization.
+            try requireEnabled(tool)
 
             // Safety level check：统一走 session 的决策中心，由 AppAgent 自己的面板
             // 呈现（宿主策略可先行定夺），没人能回答时兜底拒绝。
@@ -1308,7 +1314,9 @@ public final class LLMExecutor: @unchecked Sendable {
             let startTime = CFAbsoluteTimeGetCurrent()
             let result = try await withThrowingTaskGroup(of: Tool.Output.self) { group in
                 group.addTask {
-                    try await tool.execute(arguments: toolArguments, session: session)
+                    // Recheck after authorization and task scheduling, immediately before execution.
+                    try requireEnabled(tool)
+                    return try await tool.execute(arguments: toolArguments, session: session)
                 }
                 group.addTask {
                     try await Task.sleep(nanoseconds: UInt64(toolTimeout * 1_000_000_000))
@@ -1345,6 +1353,20 @@ public final class LLMExecutor: @unchecked Sendable {
                 isError: true
             ))
             return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: error))
+        }
+    }
+
+    private struct DisabledToolError: LocalizedError {
+        let name: String
+
+        var errorDescription: String? {
+            "Tool '\(name)' is disabled. Do not retry it unless it is enabled again."
+        }
+    }
+
+    private static func requireEnabled(_ tool: any ToolProtocol) throws {
+        guard tool.enabled else {
+            throw DisabledToolError(name: tool.name)
         }
     }
 

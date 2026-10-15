@@ -37,9 +37,9 @@ public enum AppAgentSettingsStore {
         return settings
     }
 
-    /// 读取设置，无保存记录时回落到 OneAPI 默认。
+    /// 读取设置，无保存记录时返回未配置状态；宿主默认值由宿主自行注入。
     public static func loadOrDefault() -> AppAgentEndpointSettings {
-        load() ?? .oneAPIDefault
+        load() ?? AppAgentEndpointSettings()
     }
 
     /// 保存设置：apiKey 写 Keychain，其余字段（apiKey 清空后）写 UserDefaults。

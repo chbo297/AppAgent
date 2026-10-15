@@ -21,6 +21,97 @@ final class HostToolsTests: XCTestCase {
         return nil
     }
 
+    // MARK: - Navigation submission
+
+    private actor QueuedNavigationProvider: AppNavigationProvider {
+        struct Request: Sendable, Equatable {
+            let route: String
+            let parameters: [String: String]
+        }
+
+        enum Rejection: Error {
+            case unknownRoute
+        }
+
+        private(set) var pendingRequests: [Request] = []
+        private(set) var presentedRoute: String?
+
+        func availableRoutes() async -> [AppRoute] {
+            [AppRoute(name: "profile", description: "Profile", parameters: ["user_id"])]
+        }
+
+        func navigate(to route: String, parameters: [String: String]) async throws {
+            guard route == "profile" else {
+                throw Rejection.unknownRoute
+            }
+            pendingRequests.append(Request(route: route, parameters: parameters))
+        }
+
+        func finishPresentation() {
+            guard !pendingRequests.isEmpty else {
+                return
+            }
+            presentedRoute = pendingRequests.removeFirst().route
+        }
+    }
+
+    func testNavigationRequestIsSubmittedBeforePresentation() async throws {
+        let provider = QueuedNavigationProvider()
+        let tool = AppNavigateTool(provider: provider)
+        let output = try await tool.execute(arguments: [
+            "route": .string("profile"),
+            "parameters": .object(["user_id": .string("123")])
+        ], session: makeSession())
+
+        let result = try XCTUnwrap(json(output))
+        XCTAssertEqual(result["success"]?.boolValue, true)
+        XCTAssertEqual(result["submitted"]?.boolValue, true)
+        XCTAssertEqual(result["completion"]?.stringValue, "unconfirmed")
+        XCTAssertEqual(result["route"]?.stringValue, "profile")
+        XCTAssertEqual(
+            result["message"]?.stringValue,
+            "Navigation request submitted for 'profile'; presentation completion is unconfirmed."
+        )
+
+        let pending = await provider.pendingRequests
+        let presentedBeforeCompletion = await provider.presentedRoute
+        XCTAssertEqual(pending, [.init(route: "profile", parameters: ["user_id": "123"])])
+        XCTAssertNil(presentedBeforeCompletion)
+
+        // Presentation happens independently after the tool has already returned.
+        await provider.finishPresentation()
+        let presentedAfterCompletion = await provider.presentedRoute
+        XCTAssertEqual(presentedAfterCompletion, "profile")
+    }
+
+    func testNavigationRejectionDoesNotReportSubmission() async throws {
+        let provider = QueuedNavigationProvider()
+        let tool = AppNavigateTool(provider: provider)
+        do {
+            _ = try await tool.execute(arguments: ["route": .string("unknown")], session: makeSession())
+            XCTFail("A rejected request must propagate the provider error")
+        } catch QueuedNavigationProvider.Rejection.unknownRoute {
+            // A real rejection before submission remains an error.
+        }
+
+        let pending = await provider.pendingRequests
+        let presented = await provider.presentedRoute
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertNil(presented)
+    }
+
+    func testNavigationRouteListingDoesNotSubmitRequest() async throws {
+        let provider = QueuedNavigationProvider()
+        let tool = AppNavigateTool(provider: provider)
+        let output = try await tool.execute(arguments: [:], session: makeSession())
+        let result = try XCTUnwrap(json(output))
+        XCTAssertEqual(result["count"]?.numberValue, 1)
+        XCTAssertEqual(result["available_routes"]?.arrayValue?.first?["name"]?.stringValue, "profile")
+        XCTAssertNil(result["submitted"])
+        let pending = await provider.pendingRequests
+        XCTAssertTrue(pending.isEmpty)
+    }
+
     // MARK: - Session naming
 
     func testDeriveTitleTrimsAndTruncates() {

@@ -424,7 +424,7 @@ public final class AISession: @unchecked Sendable {
 
     /// 使用已经解析过的 provider/model 更新会话，避免运行期故障切换时再次读取旧注册表。
     @discardableResult
-    func switchModel(
+    public func switchModel(
         provider: any ModelProvider,
         modelId: String,
         reference: String,

@@ -25,13 +25,14 @@ public struct AppAgentModelRef: Codable, Sendable, Equatable {
 /// - `enabledModels`：用户勾选并排序后的启用模型（每项自带协议），`[0]` 为默认（primary），
 ///   其余按序作为 fallback。同一模型 id 若两种协议都可用，可作为两项分别启用。
 ///
-/// 默认指向 OneAPI 网关；`apiKey` 建议由 `AppAgentSettingsStore` 存入 Keychain。
+/// 默认不预设服务、请求头或模型；由宿主或用户配置。
+/// `apiKey` 建议由 `AppAgentSettingsStore` 存入 Keychain。
 public struct AppAgentEndpointSettings: Codable, Sendable, Equatable {
     /// 接口地址（含 `/v1`）。
     public var baseURL: String
     /// API Key（运行期使用；持久化时由 store 拆分进 Keychain）。
     public var apiKey: String
-    /// 附加请求头（OneAPI 需要 `comate_custom_header`）。
+    /// 由宿主或用户提供的附加请求头。
     public var customHeaders: [String: String]
     /// 启用模型（有序，`[0]` 为默认）。
     public var enabledModels: [AppAgentModelRef]
@@ -40,10 +41,10 @@ public struct AppAgentEndpointSettings: Codable, Sendable, Equatable {
     public var maxTokens: Int
 
     public init(
-        baseURL: String = AppAgentEndpointSettings.oneAPIBaseURL,
+        baseURL: String = "",
         apiKey: String = "",
-        customHeaders: [String: String] = AppAgentEndpointSettings.defaultOneAPIHeaders,
-        enabledModels: [AppAgentModelRef] = [AppAgentModelRef(modelId: "gpt-5.6-sol", apiProtocol: .openaiCompletions)],
+        customHeaders: [String: String] = [:],
+        enabledModels: [AppAgentModelRef] = [],
         contextWindow: Int = 200_000,
         maxTokens: Int = 8192
     ) {
@@ -55,19 +56,47 @@ public struct AppAgentEndpointSettings: Codable, Sendable, Equatable {
         self.maxTokens = maxTokens
     }
 
-    /// 默认端点：OneAPI 网关（宿主可整体替换；此处只是开箱默认值，不含任何业务语义）。
-    public static let oneAPIBaseURL = "https://oneapi-comate.baidu-int.com/v1"
+    /// 请求入口统一使用规范化配置，不静默丢弃无效模型。
+    public var normalized: AppAgentEndpointSettings {
+        var settings = self
+        settings.baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.enabledModels = enabledModels.map { ref in
+            AppAgentModelRef(
+                modelId: ref.modelId.trimmingCharacters(in: .whitespacesAndNewlines),
+                apiProtocol: ref.apiProtocol
+            )
+        }
+        return settings
+    }
 
-    /// OneAPI 需要的自定义头；`username`/`source` 由宿主按需覆盖。
-    public static let defaultOneAPIHeaders: [String: String] = [
-        "comate_custom_header": "{\"username\":\"appagent\",\"source\":\"appagent\"}"
-    ]
+    /// 只接受可作为 API 根地址的 HTTP(S) URL，不接受内嵌凭据或查询参数。
+    public var hasUsableBaseURL: Bool {
+        let value = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty,
+              value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              let components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              components.url != nil else {
+            return false
+        }
+        return true
+    }
 
-    /// 默认接入：OneAPI + 默认模型，`apiKey` 留空由用户在设置页填写。
-    public static var oneAPIDefault: AppAgentEndpointSettings { AppAgentEndpointSettings() }
+    /// 所有入口共用的最低要求：有效地址、密钥及至少一个有效模型。
+    public var isUsable: Bool {
+        hasUsableBaseURL && hasUsableAPIKey && hasUsableModels
+    }
 
-    /// 是否具备可用于真实请求的最小配置（已填 apiKey 且至少一个启用模型）。
-    public var isUsable: Bool { hasUsableAPIKey && !enabledModels.isEmpty }
+    public var hasUsableModels: Bool {
+        !enabledModels.isEmpty && enabledModels.allSatisfy { ref in
+            !ref.modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
 
     public var hasUsableAPIKey: Bool {
         !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -78,14 +107,18 @@ public struct AppAgentEndpointSettings: Codable, Sendable, Equatable {
         "appagent-\(apiProtocol.rawValue)"
     }
 
-    /// 默认模型的模型引用（"providerName/modelId"），无启用模型时为 nil。
+    /// 默认模型的模型引用（"providerName/modelId"），配置不可用时为 nil。
     public var primaryModelRef: String? {
-        guard let first = enabledModels.first else { return nil }
-        return "\(providerName(for: first.apiProtocol))/\(first.modelId)"
+        orderedModelRefs.first
     }
 
     /// 全部启用模型的模型引用（按序，用于 ModelPolicy 的 primary + fallbacks）。
     public var orderedModelRefs: [String] {
-        enabledModels.map { "\(providerName(for: $0.apiProtocol))/\($0.modelId)" }
+        guard isUsable else {
+            return []
+        }
+        return normalized.enabledModels.map { ref in
+            "\(providerName(for: ref.apiProtocol))/\(ref.modelId)"
+        }
     }
 }

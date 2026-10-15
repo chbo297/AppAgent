@@ -182,6 +182,34 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertTrue(provider.customHeaders.isEmpty)
     }
 
+    func testProviderConfigurationUpdatesInPlace() {
+        let original = ModelSpec(id: "old-model")
+        let updated = ModelSpec(id: "new-model", maxTokens: 2048)
+        let provider = AnthropicProvider(
+            baseURL: "https://old.example.com/v1",
+            apiKey: "old-key",
+            models: [original]
+        )
+
+        provider.updateConfiguration(
+            baseURL: "https://new.example.com/v1",
+            apiKey: "new-key",
+            apiProtocol: .openaiCompletions,
+            customHeaders: [
+                "comate_custom_header": "{\"username\":\"test\",\"source\":\"test\"}"
+            ],
+            models: [updated],
+            defaultRequestMaxTokens: 1024
+        )
+
+        XCTAssertEqual(provider.baseURL, "https://new.example.com/v1")
+        XCTAssertEqual(provider.apiKey, "new-key")
+        XCTAssertEqual(provider.apiProtocol, .openaiCompletions)
+        XCTAssertEqual(provider.customHeaders["comate_custom_header"], "{\"username\":\"test\",\"source\":\"test\"}")
+        XCTAssertEqual(provider.models.map(\.id), ["new-model"])
+        XCTAssertEqual(provider.defaultRequestMaxTokens, 1024)
+    }
+
     func testProviderMultipleModels() {
         let models = [
             ModelSpec(id: "fast-model", maxTokens: 4096),
@@ -264,6 +292,23 @@ final class AppAgentCoreTests: XCTestCase {
         } else {
             XCTFail("Expected text delta")
         }
+    }
+
+    func testProviderSSEErrorPayloadIsPreserved() throws {
+        let error = try XCTUnwrap(parseProviderSSEErrorPayload(
+            #"{"error":{"message":"Our servers are currently overloaded. Please try again later.","type":"upstream_error"}}"#
+        ))
+
+        guard case .upstreamError(let type, let message) = error else {
+            return XCTFail("Expected structured upstream error")
+        }
+        XCTAssertEqual(type, "upstream_error")
+        XCTAssertEqual(message, "Our servers are currently overloaded. Please try again later.")
+
+        let classified = ErrorClassifier.classify(error)
+        XCTAssertEqual(classified.reason, .overloaded)
+        XCTAssertTrue(classified.retryable)
+        XCTAssertFalse(classified.shouldFallback)
     }
 
     func testOpenAIChatCompletionsParserToolCall() {
@@ -554,6 +599,78 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(instructions, "You are a map agent.\n\nBe concise.")
     }
 
+    func testOpenAIChatCompletionsToolResultsUseStringContentAndPreserveOrder() throws {
+        let firstCall = AIAgentMessage.ToolCall(
+            id: "call-nearby",
+            name: "app_map_nearby",
+            arguments: [
+                "op": .string("recommend")
+            ]
+        )
+        let secondCall = AIAgentMessage.ToolCall(
+            id: "call-service",
+            name: "app_map_service",
+            arguments: [
+                "op": .string("search")
+            ]
+        )
+        let assistant = AIAgentMessage(
+            role: .assistant,
+            content: [
+                .toolUse(firstCall),
+                .toolUse(secondCall)
+            ],
+            turnID: 3
+        )
+        let emptyResult = "{\"count\":0,\"results\":[]}"
+        let toolResults = AIAgentMessage(
+            role: .user,
+            content: [
+                .toolResult(
+                    AIAgentMessage.ToolCallResult(
+                        toolCallId: firstCall.id,
+                        content: emptyResult
+                    )
+                ),
+                .toolResult(
+                    AIAgentMessage.ToolCallResult(
+                        toolCallId: secondCall.id,
+                        content: emptyResult
+                    )
+                )
+            ],
+            turnID: 3
+        )
+
+        let messages = OpenAIChatCompletionsMapper.toMessages(
+            [assistant, toolResults],
+            system: []
+        )
+
+        XCTAssertEqual(messages.count, 3)
+        let assistantMessage = messages[0]
+        let wireToolCalls = try XCTUnwrap(
+            assistantMessage["tool_calls"] as? [[String: Any]]
+        )
+        XCTAssertEqual(wireToolCalls.count, 2)
+        XCTAssertEqual(
+            wireToolCalls.compactMap { call in
+                call["id"] as? String
+            },
+            [firstCall.id, secondCall.id]
+        )
+
+        let firstToolMessage = messages[1]
+        XCTAssertEqual(firstToolMessage["role"] as? String, "tool")
+        XCTAssertEqual(firstToolMessage["tool_call_id"] as? String, firstCall.id)
+        XCTAssertEqual(firstToolMessage["content"] as? String, emptyResult)
+
+        let secondToolMessage = messages[2]
+        XCTAssertEqual(secondToolMessage["role"] as? String, "tool")
+        XCTAssertEqual(secondToolMessage["tool_call_id"] as? String, secondCall.id)
+        XCTAssertEqual(secondToolMessage["content"] as? String, emptyResult)
+    }
+
 
 
     func testInMemorySessionStorage() async throws {
@@ -597,6 +714,10 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertNotNil(AIAgentError.cancelled.errorDescription)
         XCTAssertTrue(ModelError.httpError(statusCode: 429, body: "rate limited")
             .errorDescription?.contains("429") ?? false)
+        let serverBody = "{\"error\":{\"message\":\"invalid API key\"}}"
+        let httpError = ModelError.httpError(statusCode: 401, body: serverBody)
+        XCTAssertTrue(httpError.errorDescription?.contains("HTTP 401") ?? false)
+        XCTAssertTrue(httpError.errorDescription?.contains(serverBody) ?? false)
     }
 
     // MARK: - AIAgent

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] - Unreleased
+
+### Changed
+- `AppNavigationProvider.navigate` 保留 Void API，正常返回仅承诺请求已受理/提交；
+  `app_navigate` 返回 `submitted: true`、`completion: "unconfirmed"` 与明确的提交文案，
+  `success` 仅表示提交成功，不再声称页面已呈现。提交后不得仅因呈现未确认而抛错，避免诱导重复请求。
+- Endpoint Settings 默认地址、密钥、请求头和模型列表均为空，移除 `oneAPIDefault`、
+  `oneAPIBaseURL` 和 `defaultOneAPIHeaders`；宿主须显式提供自己的接入配置。
+- 设置页保存、模型探查与 Provider 构造统一校验 HTTP(S) 根地址、非空 API Key 和模型 id，
+  请求与模型引用使用去除首尾空白后的值；任一启用模型 id 为空即拒绝整份配置。
+- 无效配置不生成 Provider / ModelPolicy；应用或注册设置会清理旧的 Settings Provider，
+  保留宿主自行注册的其他 Provider。
+
 ## [0.0.2] - 2026-09-30
 
 ### Added
@@ -34,4 +47,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   决策卡片在面板内呈现，`AppAgentPresentationDelegate` 向宿主上报展示位置与遮挡区域
 - 诊断：落盘日志、诊断包导出、模拟器能力自检脚本
 - Swift 6 语言模式；Swift Package Manager 接入（不提供 CocoaPods：依赖的 BOUIKit / BODragScroll 2.2.1 未上 CocoaPods trunk）
-

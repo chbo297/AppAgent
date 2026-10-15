@@ -153,6 +153,40 @@ public final class AIAgent: @unchecked Sendable {
         return await providerCentral.resolveDefault()
     }
 
+    /// Apply a provider/model update to this agent and every existing session.
+    ///
+    /// The session selection is replaced atomically. A run that already captured
+    /// its provider continues with the old snapshot; the next run reads the new
+    /// provider and model.
+    @discardableResult
+    public func applyProviderUpdate(
+        provider: any ModelProvider,
+        modelId: String,
+        reference: String,
+        modelPolicy: ModelPolicy? = nil
+    ) -> Int {
+        if let modelPolicy {
+            self.modelPolicy = modelPolicy
+        }
+
+        var updatedCount = 0
+        for session in sessionManager.allSessions {
+            if session.switchModel(
+                provider: provider,
+                modelId: modelId,
+                reference: reference
+            ) {
+                updatedCount += 1
+            }
+        }
+
+        Logger.info(
+            "AIAgent",
+            "applyProviderUpdate: sessions=\(updatedCount), reference=\(reference)"
+        )
+        return updatedCount
+    }
+
     // MARK: - Built-in Tool Registration
 
     /// Register all SDK built-in tools into the tool central.

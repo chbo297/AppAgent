@@ -177,10 +177,18 @@ public final class AppAgentSettingsViewController: UIViewController {
     @objc private func didTapCancel() { dismiss(animated: true) }
 
     @objc private func didTapSave() {
-        let settings = currentSettings()
-        guard !settings.baseURL.isEmpty else { showAlert("信息不完整", "请填写接口地址。"); return }
-        guard !settings.enabledModels.isEmpty else {
-            showAlert("尚未选择模型", "请至少勾选一个模型（可先「探查接口」或手动添加）。"); return
+        let settings = currentSettings().normalized
+        guard settings.hasUsableBaseURL else {
+            showAlert("接口地址无效", "请填写 HTTP(S) 接口根地址，不含账号、查询参数或片段。")
+            return
+        }
+        guard settings.hasUsableAPIKey else {
+            showAlert("信息不完整", "请填写 API Key。")
+            return
+        }
+        guard settings.hasUsableModels else {
+            showAlert("模型配置无效", "请至少勾选一个模型，且每个模型 id 都不能为空。")
+            return
         }
         AppAgentSettingsStore.save(settings)
         onSave?(settings)
@@ -197,15 +205,20 @@ public final class AppAgentSettingsViewController: UIViewController {
 
     private func runProbe(refetchList: Bool) {
         view.endEditing(true)
-        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !base.isEmpty else { showAlert("信息不完整", "请先填写接口地址。"); return }
-        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            showAlert("信息不完整", "请先填写 API Key。"); return
+        let settings = currentSettings().normalized
+        guard settings.hasUsableBaseURL else {
+            showAlert("接口地址无效", "请填写 HTTP(S) 接口根地址，不含账号、查询参数或片段。")
+            return
+        }
+        guard settings.hasUsableAPIKey else {
+            showAlert("信息不完整", "请先填写 API Key。")
+            return
         }
         guard !isBusy else { return }
 
         setBusy(true)
-        let key = apiKey
+        let base = settings.baseURL
+        let key = settings.apiKey
         let headers = customHeaders
         let window = contextWindow
         let tokens = maxTokens

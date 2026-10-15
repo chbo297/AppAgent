@@ -33,6 +33,42 @@ let resolved = await providerCentral.resolve(
 )
 ```
 
+## Endpoint settings
+
+`AppAgentEndpointSettings()` starts unconfigured: URL, API key, headers and enabled models are empty.
+`AppAgentSettingsStore.loadOrDefault()` returns that empty value when no saved settings exist.
+The former `oneAPIDefault`, `oneAPIBaseURL` and `defaultOneAPIHeaders` APIs are removed.
+Hosts own service URLs, authentication headers and model defaults, and pass them explicitly:
+
+```swift
+let settings = AppAgentEndpointSettings(
+    baseURL: endpointURL,
+    apiKey: apiKeyFromSecureStorage,
+    customHeaders: endpointHeaders,
+    enabledModels: [
+        AppAgentModelRef(modelId: selectedModelID, apiProtocol: .openaiCompletions)
+    ]
+)
+await agent.applyEndpointSettings(settings)
+```
+
+The settings UI, discovery and provider construction share validation: an absolute HTTP(S) base URL
+with a host and no embedded credentials, query or fragment; a nonblank API key; and at least one
+enabled model, with every model ID nonblank. Leading/trailing whitespace is removed for requests
+and model references. Discovery of the model list only requires the URL and key.
+
+Invalid settings yield no providers, model references or policy. Both `applyEndpointSettings` and
+`ModelProviderCentral.register(settings:)` remove stale settings registrations, including when the
+new invalid configuration uses the same protocol. Only the exact `appagent-<APIProtocol.rawValue>`
+names belong to settings; other host registrations remain intact. Applying invalid settings also
+clears the agent policy. Sessions that already hold a provider retain their existing snapshot.
+`AppAgentSettingsStore` remains a persistence layer; callers must use `isUsable` before treating
+loaded settings as ready for requests.
+
+`AppAgentSettingsTests` covers invalid primary/fallback entries, normalized provider/policy
+agreement, stale registration cleanup, preservation of host providers and discovery rejection
+before network access.
+
 ## ModelSpec
 
 ```swift

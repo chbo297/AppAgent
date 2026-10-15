@@ -11,6 +11,9 @@
 - **授权是 op 级的**：`ToolProtocol.safetyLevel(for:)` 按参数判定，`app_sandbox_file` 的 `list` 是 safe 而 `delete` 是 sensitive，`app_hotfix` 的 `apply` 是 dangerous。缺 op 时**不降级为 safe**（否则模型省掉参数就绕过闸门）。
 - **只读边界**：`AIAgentProfile.toolMutationPolicy = .readOnly` 时所有 `> .safe` 的调用**直接失败**而不是弹窗问人——这是 Codex `sandbox_mode` 的 iOS 对应物（iOS 沙箱运行时收不紧，只能工具层自律）。
 - **并发按级别分流**：`safe` 并发执行，`moderate` 及以上串行。两个并发的写没有互斥，快那点不值当。
+- **`enabled` 是执行期闸门**：工具清单只是快照；executor 在预检前、异步预检后、授权结束并真正调用 `execute` 前复查实例的开关，禁用返回 `isError=true` 和 `toolCallFailed`。可变开关由工具实现同步访问；这不撤销已经开始的操作，也不保证开关读取与宿主副作用之间原子化。
+- **失败由工具显式报告**：`.error` 写入历史和下一次模型请求时必须是 `isError=true`；现有 `toolCallCompleted(result: .error(...))` 表示返回了结果，消费者仍须按 `.error` 显示失败。抛错走 `toolCallFailed`；两者都允许模型继续回答，不能直接判整轮失败。空文本、空 JSON 是否正常由工具/宿主判定，通用层不猜业务含义。回归见 `ToolPreflightTests`。
+- **已知限制：工具超时依赖协作取消**：`withThrowingTaskGroup` 在超时抛错后仍要等待执行子任务退出；不响应取消的 continuation 若一直不恢复，整轮也会一直等。当前超时只包 `execute`，不覆盖预检和授权。硬返回需要另行设计任务生命周期、迟到结果隔离及未停止副作用的处理，不能只换成游离任务就宣称已取消；由主流程单独决策。工具实现须正确完成取消与 continuation 清理。
 - **变更可回滚**：`view_set` 返回改前原值，把它写回同一个 key 即撤销。
 - **文件工具边界**：`file_read/write/search` 只管配置的工作区（默认 `Documents/AppAgent/files`），`app_sandbox_file` 管 app home 内当前范围。host 排除 SDK defaults、会话/记忆/技能原始文件、日志、抓包缓存及诊断导出；专用 memory/todo/skills/session 工具照常工作。共享 Preferences 文件须 all，父级共享目录不可整体写删；逐目标校验逻辑路径和符号链接真实路径。
 

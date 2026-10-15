@@ -5,14 +5,16 @@
 
 import Foundation
 
-/// Tool that navigates to pages within the host app.
+/// Tool that submits navigation requests within the host app.
 ///
 /// Thin wrapper over `AppNavigationProvider` — the host app provides the actual navigation logic.
 public struct AppNavigateTool: ToolProtocol {
     public let name = "app_navigate"
     public let description = """
-        Navigate to a page within the app. Use this to direct the user to specific screens \
-        (settings, profile, order details, etc.). Call with no arguments to list available routes.
+        Submit a navigation request to a page within the host app. Success means the request \
+        was accepted/submitted; it does not confirm that the destination is visible or navigation \
+        has completed. Check the host's current page before deciding whether to retry. \
+        Call with no arguments to list available routes.
         """
     public let parameters = Tool.Schema(
         properties: [
@@ -66,8 +68,10 @@ public struct AppNavigateTool: ToolProtocol {
 
         return .json(.object([
             "success": .bool(true),
+            "submitted": .bool(true),
+            "completion": .string("unconfirmed"),
             "route": .string(route),
-            "message": .string("Navigated to '\(route)'")
+            "message": .string("Navigation request submitted for '\(route)'; presentation completion is unconfirmed.")
         ]))
     }
 }

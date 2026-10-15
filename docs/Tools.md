@@ -61,6 +61,21 @@ by `app_device_info` still includes AppAgent and other SDKs—there is no fabric
 “SDK-subtracted” value. Public native provider APIs are trusted integration APIs,
 not substitutes for the tool authorization path.
 
+## Navigation submission
+
+`AppNavigationProvider.navigate(to:parameters:)` remains `async throws -> Void`.
+A normal return only promises that the host accepted/submitted the navigation
+request. It does not confirm that a page is visible or that navigation completed.
+Reject requests that cannot be submitted by throwing; after submission, do not
+throw merely because presentation is pending or completion cannot be observed.
+Such an error could trigger a duplicate navigation request.
+
+`app_navigate` reports `success: true`, `submitted: true`,
+`completion: "unconfirmed"` and “Navigation request submitted” on normal return.
+Here `success` refers only to submission. Confirm presentation through the host's
+current page/state before deciding whether to retry. Calls without a route only
+list available routes and do not submit navigation.
+
 ## ToolProtocol
 
 ```swift

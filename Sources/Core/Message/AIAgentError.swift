@@ -56,6 +56,8 @@ public enum ModelError: Error, LocalizedError, Sendable {
     case httpError(statusCode: Int, body: String)
     case decodingError(String)
     case providerError(String)
+    /// HTTP 200 流中携带的上游错误。兼容网关会把这类错误包装成 SSE 数据返回。
+    case upstreamError(type: String?, message: String)
     /// 流在 `idleSeconds` 秒内一个字节都没来，被空闲看门狗判死（见 `StreamIdleGuard`）。
     /// 典型成因是 App 切后台被冻结、连接已断但 URLSession 既不吐数据也不报错。
     case streamStalled(idleSeconds: TimeInterval)
@@ -67,11 +69,16 @@ public enum ModelError: Error, LocalizedError, Sendable {
         case .invalidResponse:
             return "Invalid HTTP response"
         case .httpError(let code, let body):
-            return "HTTP \(code): \(body)"
+            return "模型服务请求失败（HTTP \(code)）\n服务端返回：\(body)"
         case .decodingError(let msg):
             return "Decoding error: \(msg)"
         case .providerError(let msg):
             return "Provider error: \(msg)"
+        case .upstreamError(let type, let message):
+            if let type, !type.isEmpty {
+                return "模型服务上游错误（\(type)）：\(message)"
+            }
+            return "模型服务上游错误：\(message)"
         case .streamStalled(let idleSeconds):
             return String(format: "模型响应中断（%.0fs 没有新内容），正在重试。", idleSeconds)
         }

@@ -135,6 +135,29 @@ public enum ErrorClassifier {
             }
             return ClassifiedError(reason: .unknown, statusCode: nil, message: msg,
                                    retryable: true, shouldCompress: false, shouldFallback: false)
+        case .upstreamError(let type, let msg):
+            let loweredType = type?.lowercased() ?? ""
+            let loweredMessage = msg.lowercased()
+            if loweredType == "upstream_error"
+                || matchesAny(loweredType, patterns: overloadedPatterns)
+                || matchesAny(loweredMessage, patterns: overloadedPatterns) {
+                return ClassifiedError(
+                    reason: .overloaded,
+                    statusCode: nil,
+                    message: msg,
+                    retryable: true,
+                    shouldCompress: false,
+                    shouldFallback: false
+                )
+            }
+            return ClassifiedError(
+                reason: .unknown,
+                statusCode: nil,
+                message: msg,
+                retryable: true,
+                shouldCompress: false,
+                shouldFallback: false
+            )
         }
     }
 
@@ -228,5 +251,11 @@ public enum ErrorClassifier {
     private static let modelNotFoundPatterns = [
         "model not found", "model_not_found", "invalid model",
         "does not exist", "unknown model", "unsupported model",
+    ]
+
+    /// Patterns used by providers and compatibility gateways for overload responses.
+    private static let overloadedPatterns = [
+        "overload", "temporarily unavailable", "too busy", "capacity",
+        "upstream error",
     ]
 }

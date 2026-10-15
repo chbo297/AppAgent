@@ -6,7 +6,7 @@
 //  并行发一次最小流式请求，验证真实可用性并测量首 token 时延。
 //  OpenAI 兼容：GET {base}/models   + POST {base}/chat/completions
 //  Anthropic ：GET {base}/v1/models + POST {base}/v1/messages
-//  base 已以 /v1 结尾时（OneAPI 等网关）不再重复追加 /v1。
+//  base 已以 /v1 结尾时不再重复追加 /v1。
 //
 
 import Foundation
@@ -52,6 +52,7 @@ public enum AppAgentModelDiscovery {
     public enum DiscoveryError: LocalizedError {
         case noProtocols
         case invalidURL
+        case missingAPIKey
         case http(status: Int, body: String)
         case emptyResult
         case transport(String)
@@ -62,6 +63,7 @@ public enum AppAgentModelDiscovery {
             switch self {
             case .noProtocols: return "没有可探查的协议"
             case .invalidURL: return "接口地址无效"
+            case .missingAPIKey: return "请填写 API Key"
             case .http(let status, _): return "HTTP \(status)"
             case .emptyResult: return "未能从该接口获取到模型列表"
             case .transport(let msg): return "网络失败：\(msg)"
@@ -153,16 +155,29 @@ public enum AppAgentModelDiscovery {
         maxTokens: Int,
         timeout: TimeInterval = 20
     ) async -> AppAgentModelAvailability {
+        let settings = AppAgentEndpointSettings(
+            baseURL: baseURL,
+            apiKey: apiKey,
+            enabledModels: [AppAgentModelRef(modelId: candidate.modelId, apiProtocol: candidate.apiProtocol)]
+        ).normalized
+        guard settings.isUsable else {
+            return AppAgentModelAvailability(
+                candidate: candidate,
+                isAvailable: false,
+                failureReason: "接口地址、API Key 或模型 id 无效"
+            )
+        }
+        let modelId = settings.enabledModels[0].modelId
         let spec = ModelSpec(
-            id: candidate.modelId,
+            id: modelId,
             reasoning: false,
             inputModalities: ["text"],
             contextWindow: contextWindow,
             maxTokens: maxTokens
         )
         let provider = AnthropicProvider(
-            baseURL: baseURL,
-            apiKey: apiKey,
+            baseURL: settings.baseURL,
+            apiKey: settings.apiKey,
             apiProtocol: candidate.apiProtocol,
             customHeaders: customHeaders,
             models: [spec],
@@ -174,7 +189,7 @@ public enum AppAgentModelDiscovery {
             let latency = try await withTimeout(timeout) {
                 let start = Date()
                 let stream = provider.streamCompletion(
-                    messages: [.user("hi")], system: [], tools: [], modelId: candidate.modelId
+                    messages: [.user("hi")], system: [], tools: [], modelId: modelId
                 )
                 for try await event in stream {
                     switch event {
@@ -264,18 +279,23 @@ public enum AppAgentModelDiscovery {
         guard let url = modelsURL(baseURL: baseURL, apiProtocol: apiProtocol) else {
             throw DiscoveryError.invalidURL
         }
+        let settings = AppAgentEndpointSettings(baseURL: baseURL, apiKey: apiKey).normalized
+        guard settings.hasUsableAPIKey else {
+            throw DiscoveryError.missingAPIKey
+        }
+        let key = settings.apiKey
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if apiProtocol == .anthropicMessages {
-            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue(key, forHTTPHeaderField: "x-api-key")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-            // OneAPI 等网关的 Anthropic 兼容入口只认 Bearer，两种都带上。
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            // 兼容使用 Bearer 鉴权的 Anthropic 协议网关。
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         } else {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
         for (key, value) in customHeaders {
             request.setValue(value, forHTTPHeaderField: key)
@@ -293,11 +313,15 @@ public enum AppAgentModelDiscovery {
     }
 
     /// models 列表 URL：OpenAI 系 `{base}/models`；Anthropic `{base}/v1/models`，
-    /// 但 base 已以 `/v1` 结尾时（OneAPI 等网关）不再重复追加。
+    /// 但 base 已以 `/v1` 结尾时不再重复追加。
     static func modelsURL(baseURL: String, apiProtocol: APIProtocol) -> URL? {
+        guard AppAgentEndpointSettings(baseURL: baseURL).hasUsableBaseURL else {
+            return nil
+        }
         let base = normalizedBase(baseURL)
-        guard !base.isEmpty else { return nil }
-        guard apiProtocol == .anthropicMessages else { return URL(string: base + "/models") }
+        guard apiProtocol == .anthropicMessages else {
+            return URL(string: base + "/models")
+        }
         return URL(string: base.hasSuffix("/v1") ? base + "/models" : base + "/v1/models")
     }
 
@@ -355,4 +379,3 @@ public enum AppAgentModelDiscovery {
 
 
 }
-

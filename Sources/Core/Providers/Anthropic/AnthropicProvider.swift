@@ -7,14 +7,46 @@ import Foundation
 
 /// ModelProvider implementation for the Anthropic Messages API.
 public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
+    private struct Configuration: Sendable {
+        var baseURL: String
+        var apiKey: String
+        var apiProtocol: APIProtocol
+        var customHeaders: [String: String]
+        var models: [ModelSpec]
+        var requestTimeout: TimeInterval
+        var defaultRequestMaxTokens: Int
+    }
+
     public let name = "anthropic"
-    public let baseURL: String
-    public let apiKey: String
-    public let apiProtocol: APIProtocol
-    public let customHeaders: [String: String]
-    public let models: [ModelSpec]
-    public let requestTimeout: TimeInterval
-    public let defaultRequestMaxTokens: Int
+    @Locked
+    private var configuration: Configuration
+    public var baseURL: String {
+        configuration.baseURL
+    }
+
+    public var apiKey: String {
+        configuration.apiKey
+    }
+
+    public var apiProtocol: APIProtocol {
+        configuration.apiProtocol
+    }
+
+    public var customHeaders: [String: String] {
+        configuration.customHeaders
+    }
+
+    public var models: [ModelSpec] {
+        configuration.models
+    }
+
+    public var requestTimeout: TimeInterval {
+        configuration.requestTimeout
+    }
+
+    public var defaultRequestMaxTokens: Int {
+        configuration.defaultRequestMaxTokens
+    }
     private let concurrencyLimiter: ConcurrencyLimiter
     private let session: URLSession
 
@@ -33,15 +65,49 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
     ) {
         precondition(!models.isEmpty, "AnthropicProvider requires at least one model")
         precondition(defaultRequestMaxTokens > 0, "defaultRequestMaxTokens must be positive")
-        self.baseURL = baseURL
-        self.apiKey = apiKey
-        self.apiProtocol = apiProtocol
-        self.customHeaders = customHeaders
-        self.models = models
-        self.requestTimeout = requestTimeout
-        self.defaultRequestMaxTokens = defaultRequestMaxTokens
+        self._configuration = Locked(
+            wrappedValue: Configuration(
+                baseURL: baseURL,
+                apiKey: apiKey,
+                apiProtocol: apiProtocol,
+                customHeaders: customHeaders,
+                models: models,
+                requestTimeout: requestTimeout,
+                defaultRequestMaxTokens: defaultRequestMaxTokens
+            )
+        )
         self.concurrencyLimiter = ConcurrencyLimiter(limit: maxConcurrency)
         self.session = Self.makeSession(requestTimeout: requestTimeout)
+    }
+
+    /// Update the request configuration in place.
+    ///
+    /// Existing sessions may retain this provider instance. Updating the
+    /// configuration in place lets those sessions use the new endpoint,
+    /// credentials, protocol, headers, and model specs on their next run.
+    /// A request already building or streaming keeps its captured snapshot.
+    public func updateConfiguration(
+        baseURL: String,
+        apiKey: String,
+        apiProtocol: APIProtocol,
+        customHeaders: [String: String],
+        models: [ModelSpec],
+        requestTimeout: TimeInterval? = nil,
+        defaultRequestMaxTokens: Int? = nil
+    ) {
+        precondition(!models.isEmpty, "AnthropicProvider requires at least one model")
+        let current = configuration
+        let next = Configuration(
+            baseURL: baseURL,
+            apiKey: apiKey,
+            apiProtocol: apiProtocol,
+            customHeaders: customHeaders,
+            models: models,
+            requestTimeout: requestTimeout ?? current.requestTimeout,
+            defaultRequestMaxTokens: defaultRequestMaxTokens ?? current.defaultRequestMaxTokens
+        )
+        precondition(next.defaultRequestMaxTokens > 0, "defaultRequestMaxTokens must be positive")
+        configuration = next
     }
 
     /// 每个 provider 自己一条 session，不用 `URLSession.shared`。
@@ -80,17 +146,31 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
                 do {
                     // 额度的取与放由 withPermit 配对，提前 return / 抛错都不会漏还。
                     try await self.concurrencyLimiter.withPermit {
-                        guard let spec = self.modelSpec(for: modelId) else {
+                        let configuration = self.configuration
+                        guard let spec = configuration.models.first(where: { model in
+                            model.id == modelId
+                        }) else {
                             throw ModelError.providerError("Model '\(modelId)' not found in provider '\(self.name)'")
                         }
                         try Task.checkCancellation()
-                        let requestMaxTokens = min(spec.maxTokens, self.defaultRequestMaxTokens)
-                        let request = try self.buildRequest(messages: messages, system: system, tools: tools, modelId: modelId, maxTokens: requestMaxTokens)
+                        let requestMaxTokens = min(spec.maxTokens, configuration.defaultRequestMaxTokens)
+                        let request = try self.buildRequest(
+                            messages: messages,
+                            system: system,
+                            tools: tools,
+                            modelId: modelId,
+                            maxTokens: requestMaxTokens,
+                            configuration: configuration
+                        )
                         Logger.info("Anthropic", "streamCompletion: starting, model=\(modelId)")
 
                         // 最低支持 iOS 15 / macOS 12，`URLSession.bytes` 一定可用——
                         // 原来的 iOS 13/14 delegate 降级路径已随最低版本上调删除。
-                        try await self.streamWithBytes(request: request, continuation: continuation)
+                        try await self.streamWithBytes(
+                            request: request,
+                            apiProtocol: configuration.apiProtocol,
+                            continuation: continuation
+                        )
                     }
                 } catch {
                     continuation.finish(throwing: error)
@@ -106,6 +186,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
     private func streamWithBytes(
         request: URLRequest,
+        apiProtocol: APIProtocol,
         continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
     ) async throws {
         let (bytes, response) = try await session.bytes(for: request)
@@ -135,6 +216,10 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
                 // 于是「模型说 stop=tool_calls 但我们解析出 0 个调用」这种问题在诊断包里
                 // 查不到根因（实测遇到过，只能靠猜端点的 tool_calls 格式）。截断防刷爆。
                 Logger.debug("Anthropic", "sse<< \(sseEvent.data.prefix(800))")
+                if let error = parseProviderSSEErrorPayload(sseEvent.data) {
+                    Logger.error("Anthropic", "sseError: \(error.localizedDescription)")
+                    throw error
+                }
                 for providerEvent in parseProviderSSEEvent(
                     apiProtocol: apiProtocol,
                     sseEvent: sseEvent,
@@ -147,6 +232,10 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         // Flush remaining SSE data
         if let sseEvent = parser.flush() {
+            if let error = parseProviderSSEErrorPayload(sseEvent.data) {
+                Logger.error("Anthropic", "sseError: \(error.localizedDescription)")
+                throw error
+            }
             for providerEvent in parseProviderSSEEvent(
                 apiProtocol: apiProtocol,
                 sseEvent: sseEvent,
@@ -171,16 +260,18 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         system: [ContentOrCacheControl<SystemPrompt>],
         tools: [ContentOrCacheControl<any ToolProtocol>],
         modelId: String,
-        maxTokens: Int
+        maxTokens: Int,
+        configuration: Configuration
     ) throws -> URLRequest {
-        switch apiProtocol {
+        switch configuration.apiProtocol {
         case .anthropicMessages:
             return try buildAnthropicMessagesRequest(
                 messages: messages,
                 system: system,
                 tools: tools,
                 modelId: modelId,
-                maxTokens: maxTokens
+                maxTokens: maxTokens,
+                configuration: configuration
             )
         case .openaiCompletions:
             return try buildOpenAIChatCompletionsRequest(
@@ -188,7 +279,8 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
                 system: system,
                 tools: tools,
                 modelId: modelId,
-                maxTokens: maxTokens
+                maxTokens: maxTokens,
+                configuration: configuration
             )
         case .openaiResponses:
             return try buildOpenAIResponsesRequest(
@@ -196,10 +288,11 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
                 system: system,
                 tools: tools,
                 modelId: modelId,
-                maxTokens: maxTokens
+                maxTokens: maxTokens,
+                configuration: configuration
             )
         default:
-            throw ModelError.providerError("API protocol '\(apiProtocol.rawValue)' is not implemented")
+            throw ModelError.providerError("API protocol '\(configuration.apiProtocol.rawValue)' is not implemented")
         }
     }
 
@@ -208,11 +301,12 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         system: [ContentOrCacheControl<SystemPrompt>],
         tools: [ContentOrCacheControl<any ToolProtocol>],
         modelId: String,
-        maxTokens: Int
+        maxTokens: Int,
+        configuration: Configuration
     ) throws -> URLRequest {
-        let effectiveBaseURL = baseURL.isEmpty
+        let effectiveBaseURL = configuration.baseURL.isEmpty
             ? "https://api.anthropic.com"
-            : baseURL
+            : configuration.baseURL
         let base = effectiveBaseURL.hasSuffix("/")
             ? String(effectiveBaseURL.dropLast())
             : effectiveBaseURL
@@ -229,12 +323,12 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = requestTimeout
+        request.timeoutInterval = configuration.requestTimeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue(configuration.apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue(apiVersion, forHTTPHeaderField: "anthropic-version")
 
-        for (key, value) in customHeaders {
+        for (key, value) in configuration.customHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
@@ -284,11 +378,12 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         system: [ContentOrCacheControl<SystemPrompt>],
         tools: [ContentOrCacheControl<any ToolProtocol>],
         modelId: String,
-        maxTokens: Int
+        maxTokens: Int,
+        configuration: Configuration
     ) throws -> URLRequest {
-        let effectiveBaseURL = baseURL.isEmpty
+        let effectiveBaseURL = configuration.baseURL.isEmpty
             ? "https://api.openai.com/v1"
-            : baseURL
+            : configuration.baseURL
         let base = effectiveBaseURL.hasSuffix("/")
             ? String(effectiveBaseURL.dropLast())
             : effectiveBaseURL
@@ -303,11 +398,11 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = requestTimeout
+        request.timeoutInterval = configuration.requestTimeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
 
-        for (key, value) in customHeaders {
+        for (key, value) in configuration.customHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
@@ -344,11 +439,12 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         system: [ContentOrCacheControl<SystemPrompt>],
         tools: [ContentOrCacheControl<any ToolProtocol>],
         modelId: String,
-        maxTokens: Int
+        maxTokens: Int,
+        configuration: Configuration
     ) throws -> URLRequest {
-        let effectiveBaseURL = baseURL.isEmpty
+        let effectiveBaseURL = configuration.baseURL.isEmpty
             ? "https://api.openai.com/v1"
-            : baseURL
+            : configuration.baseURL
         let base = effectiveBaseURL.hasSuffix("/")
             ? String(effectiveBaseURL.dropLast())
             : effectiveBaseURL
@@ -363,11 +459,11 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = requestTimeout
+        request.timeoutInterval = configuration.requestTimeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
 
-        for (key, value) in customHeaders {
+        for (key, value) in configuration.customHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
@@ -421,4 +517,25 @@ private func parseProviderSSEEvent(
     default:
         return []
     }
+}
+
+private struct ProviderSSEErrorEnvelope: Decodable {
+    let error: ProviderSSEError?
+}
+
+private struct ProviderSSEError: Decodable {
+    let type: String?
+    let message: String?
+}
+
+func parseProviderSSEErrorPayload(_ payload: String) -> ModelError? {
+    guard let data = payload.data(using: .utf8),
+          let envelope = try? JSONDecoder().decode(ProviderSSEErrorEnvelope.self, from: data),
+          let error = envelope.error else {
+        return nil
+    }
+
+    let message = error.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+        ?? "上游模型服务返回未命名错误"
+    return ModelError.upstreamError(type: error.type, message: message)
 }

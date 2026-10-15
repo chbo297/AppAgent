@@ -14,7 +14,14 @@ import Foundation
 public protocol AppNavigationProvider: Sendable {
     /// List all navigable routes (so the LLM knows what's available).
     func availableRoutes() async -> [AppRoute]
-    /// Navigate to a specific route.
+
+    /// Submit a navigation request to a specific route.
+    ///
+    /// A normal return means the host accepted/submitted the request. It does not
+    /// confirm that the destination is visible or that navigation has completed.
+    /// Throw when the request cannot be accepted/submitted. Once submitted, do not
+    /// throw solely because presentation is pending or its completion is unknown;
+    /// reporting failure at that point can cause a duplicate request on retry.
     func navigate(to route: String, parameters: [String: String]) async throws
 }
 

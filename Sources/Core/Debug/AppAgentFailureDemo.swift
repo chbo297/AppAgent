@@ -107,7 +107,7 @@ final class AppAgentFailureDemoProvider: ModelProvider, @unchecked Sendable {
                     try await Task.sleep(nanoseconds: delay)
                     switch snapshot.scenario {
                     case .preparation, .firstRequest:
-                        throw ModelError.httpError(statusCode: 401, body: "【本地演示】首次请求鉴权失败，API Key 无效；未收到模型输出。")
+                        throw ModelError.httpError(statusCode: 401, body: "【本地演示】服务端返回鉴权失败；未收到模型输出。")
                     case .requestRetries:
                         throw ModelError.httpError(
                             statusCode: 503,

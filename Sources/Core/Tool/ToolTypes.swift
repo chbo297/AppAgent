@@ -85,6 +85,7 @@ public enum Tool {
     public enum Output: Sendable {
         case text(String)
         case json(JSONValue)
+        /// Explicit failure. The executor does not infer failure from empty text or JSON.
         case error(String)
         /// 图片 + 一句文字说明。文本部分照常进上下文，图片交给 provider 的多模态通道。
         case image(ImageOutput)
@@ -127,11 +128,15 @@ public protocol ToolProtocol: Sendable {
     /// JSON Schema describing the tool's input parameters.
     var parameters: Tool.Schema { get }
     /// Whether this tool is currently enabled (default: true).
+    /// Rechecked before preflight, after preflight, and immediately before execution.
+    /// Mutable implementations must synchronize access; disabling does not stop work already started.
     var enabled: Bool { get }
 
     /// Execute the tool with the given arguments.
     /// Stateless tools may ignore the session parameter;
     /// stateful tools use it to access per-session state.
+    /// Implementations must cooperate with cancellation, including resuming callback continuations.
+    /// The executor's task-group timeout cannot finish until the execution task exits.
     func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output
 
     /// Logical grouping for batch enable/disable and UI organization.

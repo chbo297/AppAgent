@@ -167,7 +167,10 @@ final class ModelFallbackTests: XCTestCase {
                     return XCTFail("重试耗尽且无备用模型时应保留原始 HTTP 错误")
                 }
                 XCTAssertEqual(statusCode, 503)
-                XCTAssertEqual(error.localizedDescription, "HTTP 503: no such model")
+                XCTAssertEqual(
+                    error.localizedDescription,
+                    "模型服务请求失败（HTTP 503）\n服务端返回：no such model"
+                )
             } else {
                 guard case .maxIterationsReached(let limit) = error as? AIAgentError else {
                     return XCTFail("重试也消耗 loop 预算，应返回带本轮 limit 的错误")
