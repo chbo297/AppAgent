@@ -299,16 +299,17 @@ final class AppAgentCoreTests: XCTestCase {
             #"{"error":{"message":"Our servers are currently overloaded. Please try again later.","type":"upstream_error"}}"#
         ))
 
-        guard case .upstreamError(let type, let message) = error else {
+        guard case .upstreamError(let type, let code, let message) = error else {
             return XCTFail("Expected structured upstream error")
         }
         XCTAssertEqual(type, "upstream_error")
+        XCTAssertNil(code)
         XCTAssertEqual(message, "Our servers are currently overloaded. Please try again later.")
 
         let classified = ErrorClassifier.classify(error)
         XCTAssertEqual(classified.reason, .overloaded)
         XCTAssertTrue(classified.retryable)
-        XCTAssertFalse(classified.shouldFallback)
+        XCTAssertTrue(classified.shouldFallback)
     }
 
     func testOpenAIChatCompletionsParserToolCall() {
@@ -407,14 +408,14 @@ final class AppAgentCoreTests: XCTestCase {
 
     // MARK: - OpenAI Responses protocol
 
-    func testOpenAIResponsesParserTextDelta() {
+    func testOpenAIResponsesParserTextDelta() throws {
         var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let event = SSEEvent(
             event: "response.output_text.delta",
             data: #"{"type":"response.output_text.delta","output_index":0,"delta":"Hello"}"#
         )
 
-        let events = OpenAIResponsesMapper.parseSSEEvent(event, activeToolCalls: &activeToolCalls)
+        let events = try OpenAIResponsesMapper.parseSSEEvent(event, activeToolCalls: &activeToolCalls)
 
         XCTAssertEqual(events.count, 1)
         if case .textDelta(let text) = events[0] {
@@ -424,26 +425,26 @@ final class AppAgentCoreTests: XCTestCase {
         }
     }
 
-    func testOpenAIResponsesParserToolCall() {
+    func testOpenAIResponsesParserToolCall() throws {
         var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
 
         let added = SSEEvent(
             event: "response.output_item.added",
             data: #"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"file_search","arguments":""}}"#
         )
-        XCTAssertTrue(OpenAIResponsesMapper.parseSSEEvent(added, activeToolCalls: &activeToolCalls).isEmpty)
+        XCTAssertTrue(try OpenAIResponsesMapper.parseSSEEvent(added, activeToolCalls: &activeToolCalls).isEmpty)
 
         let argsDelta = SSEEvent(
             event: "response.function_call_arguments.delta",
             data: #"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"query\":\"Swift\"}"}"#
         )
-        XCTAssertTrue(OpenAIResponsesMapper.parseSSEEvent(argsDelta, activeToolCalls: &activeToolCalls).isEmpty)
+        XCTAssertTrue(try OpenAIResponsesMapper.parseSSEEvent(argsDelta, activeToolCalls: &activeToolCalls).isEmpty)
 
         let completed = SSEEvent(
             event: "response.completed",
             data: #"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":12,"output_tokens":7}}}"#
         )
-        let events = OpenAIResponsesMapper.parseSSEEvent(completed, activeToolCalls: &activeToolCalls)
+        let events = try OpenAIResponsesMapper.parseSSEEvent(completed, activeToolCalls: &activeToolCalls)
 
         XCTAssertEqual(events.count, 3)
         if case .usage(let input, let output) = events[0] {
@@ -466,13 +467,13 @@ final class AppAgentCoreTests: XCTestCase {
         }
     }
 
-    func testOpenAIResponsesParserCompletedEndTurn() {
+    func testOpenAIResponsesParserCompletedEndTurn() throws {
         var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let completed = SSEEvent(
             event: "response.completed",
             data: #"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":4}}}"#
         )
-        let events = OpenAIResponsesMapper.parseSSEEvent(completed, activeToolCalls: &activeToolCalls)
+        let events = try OpenAIResponsesMapper.parseSSEEvent(completed, activeToolCalls: &activeToolCalls)
 
         XCTAssertEqual(events.count, 2)
         if case .done(let stopReason) = events[1] {
@@ -482,13 +483,13 @@ final class AppAgentCoreTests: XCTestCase {
         }
     }
 
-    func testOpenAIResponsesParserIncompleteMaxTokens() {
+    func testOpenAIResponsesParserIncompleteMaxTokens() throws {
         var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let incomplete = SSEEvent(
             event: "response.incomplete",
             data: #"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#
         )
-        let events = OpenAIResponsesMapper.parseSSEEvent(incomplete, activeToolCalls: &activeToolCalls)
+        let events = try OpenAIResponsesMapper.parseSSEEvent(incomplete, activeToolCalls: &activeToolCalls)
 
         guard case .done(let stopReason) = events.last else {
             return XCTFail("Expected done event")

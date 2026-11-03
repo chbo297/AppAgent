@@ -205,12 +205,24 @@ public final class OpenAICompatibleProvider: ModelProvider, @unchecked Sendable 
 
 `LLMExecutor` uses `ErrorClassifier.retryable` to decide whether to retry a failed model request. Transport errors such as `URLError`, HTTP 429, and server errors are retryable; authentication errors such as HTTP 401/403 are not retried on the same model.
 
+HTTP 200 SSE failures throw `ModelError.upstreamError(type:code:message:)`, preserving Anthropic
+and Chat Completions `error` fields, Responses `response.error`, and flat Responses `error` events.
+Responses `response.failed` never becomes `.done(.unknown)`. Only recognized transient stream
+errors (server, overload, rate limit, timeout) retry; unknown, authentication, quota and request
+errors do not. Stream failures can use the configured model fallback after this retry decision.
+
+Responses releases tool calls only on `response.completed`, with complete JSON object arguments.
+Failed/incomplete responses and proxy `[DONE]` markers cannot release pending calls. Text-only
+`max_output_tokens` retains `.maxTokens`; incomplete tool output throws and is discarded.
+
 ### Retry and turn limits
 
 - `RetryPolicy.maxRetries` defaults to **3 retries**, excluding the initial request: up to **4 attempts** for consecutive failures on the current model. The counter resets after a successful stream or a model fallback. Retry delays use exponential backoff (normally about 1, 2, and 4 seconds, with ±25% jitter).
 - **A stalled stream is a retryable transport error, not a dead model.** `ModelError.streamStalled(idleSeconds:)` (raised by the executor's idle watchdog) and every non-timeout `URLError` classify as `FailoverReason.transport` with `retryable = true` and `shouldFallback = false`: the endpoint is fine, the connection died, so retrying the same model is the correct move and probing fallback candidates only wastes a round.
 - `AIAgentProfile.maxIterations` defaults to **70 iterations per user turn**. Requests after tool execution, retry requests, and fallback requests all consume this same budget; retries are not an extra allowance on top of the 70 iterations. A successful final answer on the last allowed iteration completes normally.
-- When an error is not retryable, or retries are exhausted, the executor tries the next available, untried model in `ModelPolicy`. If none is available, it returns the last original provider/transport error, such as `HTTP 503: ...` or the system's localized network error. There is no separate “retry limit exceeded” error.
+- When an error is not retryable, or retries are exhausted, the executor tries the next available, untried model in `ModelPolicy` if `shouldFallback` is true or the failed stream produced partial output. If none is available, it returns the last original provider/transport error. There is no separate “retry limit exceeded” error.
 - When the loop budget runs out before a final answer, the error is `AIAgentError.maxIterationsReached(limit:)`, displayed as `AIAgent loop exceeded maximum(70) iterations` with the actual configured limit. This can also happen before all retries or fallback models have been attempted.
 
-The classifier's `shouldCompress` and `shouldFallback` fields are recommendations, not gates currently consumed by the executor. Context compression is checked separately before requests based on estimated context usage; runtime fallback follows `ModelPolicy` after the retry decision.
+Context compression is checked separately before requests based on estimated context usage;
+`shouldCompress` remains a recommendation. Retry and fallback discard the failed attempt's
+partial text and unexecuted calls before sending the next request.

@@ -22,13 +22,23 @@ public final class AppAgentRunLog: @unchecked Sendable {
     private var _maxFileBytes: Int = 2 * 1024 * 1024
     private var _maxFiles: Int = 3
 
-    /// 以下三个只在 `queue` 上访问。
+    private let now: @Sendable () -> Date
+
+    /// 以下状态只在 `queue` 上访问。
     private var handle: FileHandle?
     private var currentURL: URL?
     private var writtenBytes = 0
+    private var lastFileMicroseconds: UInt64 = 0
 
-    public init(directory: URL? = nil) {
-        self._directory = directory ?? AppAgentRunLog.defaultDirectory()
+    public convenience init(directory: URL? = nil) {
+        self.init(directory: directory ?? AppAgentRunLog.defaultDirectory(), now: {
+            Date()
+        })
+    }
+
+    internal init(directory: URL, now: @escaping @Sendable () -> Date) {
+        self._directory = directory
+        self.now = now
     }
 
     /// 日志目录（默认 `Documents/AppAgent/logs`，这样 `file_read` / 系统「文件」App 都能看到）。
@@ -39,7 +49,7 @@ public final class AppAgentRunLog: @unchecked Sendable {
 
     public var isInstalled: Bool { lock.read { _isInstalled } }
 
-    /// 单个文件上限，超过就换下一个。
+    /// 单个文件上限，超过就换下一个。默认 2 MB。
     ///
     /// 和 `directory` 一样走锁：宿主在主线程设，滚动判定在 `queue` 上读。这个类是
     /// `@unchecked Sendable`，裸 `public var` 等于对外宣称了一个自己没有的线程安全
@@ -49,7 +59,8 @@ public final class AppAgentRunLog: @unchecked Sendable {
         set { lock.writeSync { _maxFileBytes = max(1, newValue) } }
     }
 
-    /// 保留的文件个数（含当前正在写的那个）。
+    /// 保留的文件个数（含当前正在写的那个），默认 3。
+    /// 轮转仅保留近期日志；完整载荷会更快耗尽留存窗口，不保证保留完整会话。
     public var maxFiles: Int {
         get { lock.read { _maxFiles } }
         set { lock.writeSync { _maxFiles = max(1, newValue) } }
@@ -127,18 +138,29 @@ public final class AppAgentRunLog: @unchecked Sendable {
         try? handle?.close()
         handle = nil
         writtenBytes = 0
+        currentURL = nil
 
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("appagent-\(AppAgentRunLog.fileStamp(Date())).log")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        while true {
+            // 微秒时间加单调递增兜底：同秒甚至同一时刻轮转也不复用文件，时钟回拨不倒序。
+            let clockMicroseconds = UInt64(max(0, now().timeIntervalSince1970) * 1_000_000)
+            lastFileMicroseconds = max(clockMicroseconds, lastFileMicroseconds + 1)
+            let date = Date(timeIntervalSince1970: Double(lastFileMicroseconds) / 1_000_000)
+            let suffix = String(format: "%020llu", lastFileMicroseconds)
+            let url = dir.appendingPathComponent("appagent-\(AppAgentRunLog.fileStamp(date))_\(suffix).log")
+            do {
+                // 独占创建；与其他实例或已有文件冲突时换序号，不追加或覆盖旧文件。
+                try Data().write(to: url, options: .withoutOverwriting)
+                handle = try FileHandle(forWritingTo: url)
+                currentURL = url
+                break
+            } catch let error as NSError {
+                if error.domain == NSCocoaErrorDomain, error.code == NSFileWriteFileExistsError {
+                    continue
+                }
+                return
+            }
         }
-        handle = try? FileHandle(forWritingTo: url)
-        if let handle {
-            let end = (try? handle.seekToEnd()) ?? 0
-            writtenBytes = Int(end)
-        }
-        currentURL = url
         prune(directory: dir)
     }
 

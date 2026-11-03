@@ -737,13 +737,17 @@ public final class LLMExecutor: @unchecked Sendable {
             if let preparedHostContext {
                 messagesForProvider.append(preparedHostContext.message(turnID: turnID))
             }
-            let stream = StreamIdleGuard.wrap(
+            let requestID = UUID().uuidString
+            let providerStream = ModelRequestLogContext.$requestID.withValue(requestID) {
                 state.provider.streamCompletion(
                     messages: messagesForProvider,
                     system: systemParts,
                     tools: toolSegments,
                     modelId: state.modelId
-                ),
+                )
+            }
+            let stream = StreamIdleGuard.wrap(
+                providerStream,
                 idleLimit: session.executionPolicy.streamIdleTimeout,
                 onStall: { [sessionId = session.id, provider = state.provider,
                             modelId = state.modelId, iteration = state.iteration] idle in
@@ -752,6 +756,7 @@ public final class LLMExecutor: @unchecked Sendable {
                         .failure,
                         message: String(format: "模型响应中断：%.1fs 没有新内容，按可重试错误处理", idle),
                         sessionId: sessionId,
+                        requestId: requestID,
                         provider: provider.name,
                         apiProtocol: provider.apiProtocol.rawValue,
                         modelId: modelId,
@@ -762,11 +767,12 @@ public final class LLMExecutor: @unchecked Sendable {
             )
             // 请求已发出，等首个内容：卡在这一步基本是网络 / 鉴权 / 网关问题。
             setStage(.requesting)
-            Logger.debug("LLMExecutor", "streamCompletion requested: provider=\(state.provider.name), model=\(state.modelId), messageCount=\(messagesForProvider.count), toolCount=\(toolSegments.count)")
+            Logger.debug("LLMExecutor", "streamCompletion requested: request=\(requestID), session=\(session.id), iteration=\(state.iteration), provider=\(state.provider.name), model=\(state.modelId), messageCount=\(messagesForProvider.count), toolCount=\(toolSegments.count)")
             AppAgentDebugLog.shared.record(
                 .request,
                 message: "发起模型请求（消息 \(state.currentMessages.count) 条，工具 \(toolSegments.count) 个）",
                 sessionId: session.id,
+                requestId: requestID,
                 provider: state.provider.name,
                 apiProtocol: state.provider.apiProtocol.rawValue,
                 modelId: state.modelId,
@@ -821,20 +827,36 @@ public final class LLMExecutor: @unchecked Sendable {
                         "LLMExecutor",
                         "streamProtocolError: iteration=\(state.iteration), missing stop reason"
                     )
+                    AppAgentDebugLog.shared.record(
+                        .failure,
+                        message: "模型响应流结束但缺少终止原因",
+                        sessionId: session.id,
+                        requestId: requestID,
+                        provider: state.provider.name,
+                        apiProtocol: state.provider.apiProtocol.rawValue,
+                        modelId: state.modelId,
+                        iteration: state.iteration,
+                        reason: "stream_protocol",
+                        durationMs: Int(Date().timeIntervalSince(streamStart) * 1000)
+                    )
                     finishWithError(error, messages: state.currentMessages)
                     return
                 }
                 Logger.info("LLMExecutor", "streamConsumed: textLength=\(assistantText.count), toolCalls=\(toolCalls.count)[\(toolCalls.map(\.name).joined(separator: ", "))], stopReason=\(stopReason)")
-                AppAgentDebugLog.shared.record(
-                    .success,
-                    message: "模型返回完成（文本 \(assistantText.count) 字，工具调用 \(toolCalls.count) 次，stop=\(stopReason)）",
-                    sessionId: session.id,
-                    provider: state.provider.name,
-                    apiProtocol: state.provider.apiProtocol.rawValue,
-                    modelId: state.modelId,
-                    iteration: state.iteration,
-                    durationMs: Int(Date().timeIntervalSince(streamStart) * 1000)
-                )
+                // 协议异常由下方对应分支记 failure，不能先记成成功。
+                if stopReason != .unknown && !(stopReason == .toolUse && toolCalls.isEmpty) {
+                    AppAgentDebugLog.shared.record(
+                        .success,
+                        message: "模型返回完成（文本 \(assistantText.count) 字，工具调用 \(toolCalls.count) 次，stop=\(stopReason)）",
+                        sessionId: session.id,
+                        requestId: requestID,
+                        provider: state.provider.name,
+                        apiProtocol: state.provider.apiProtocol.rawValue,
+                        modelId: state.modelId,
+                        iteration: state.iteration,
+                        durationMs: Int(Date().timeIntervalSince(streamStart) * 1000)
+                    )
+                }
                 state.retryCount = 0
             } catch is CancellationError {
                 await discardPreparedHostContext(preparedHostContext)
@@ -851,6 +873,7 @@ public final class LLMExecutor: @unchecked Sendable {
                     .failure,
                     message: classified.message,
                     sessionId: session.id,
+                    requestId: requestID,
                     provider: state.provider.name,
                     apiProtocol: state.provider.apiProtocol.rawValue,
                     modelId: state.modelId,
@@ -954,11 +977,13 @@ public final class LLMExecutor: @unchecked Sendable {
                     .failure,
                     message: "模型返回 stop=tool_use 但没有任何工具调用（可能是该端点的 tool_calls 流式格式没被解析）",
                     sessionId: session.id,
+                    requestId: requestID,
                     provider: state.provider.name,
                     apiProtocol: state.provider.apiProtocol.rawValue,
                     modelId: state.modelId,
                     iteration: state.iteration,
-                    reason: "toolUseWithoutCalls"
+                    reason: "toolUseWithoutCalls",
+                    durationMs: Int(Date().timeIntervalSince(streamStart) * 1000)
                 )
                 // 同一个端点再请求一次还是同样的格式，重试没意义；直接按 modelPolicy 换下一个
                 // 还没试过的模型/协议重跑这一轮（Anthropic 协议的 `tool_use` 块和 chat/completions
@@ -1003,6 +1028,18 @@ public final class LLMExecutor: @unchecked Sendable {
                 Logger.error(
                     "LLMExecutor",
                     "streamProtocolError: iteration=\(state.iteration), unknown stop reason"
+                )
+                AppAgentDebugLog.shared.record(
+                    .failure,
+                    message: "模型返回未知终止原因，详见同 request 的原始响应日志",
+                    sessionId: session.id,
+                    requestId: requestID,
+                    provider: state.provider.name,
+                    apiProtocol: state.provider.apiProtocol.rawValue,
+                    modelId: state.modelId,
+                    iteration: state.iteration,
+                    reason: "stream_protocol",
+                    durationMs: Int(Date().timeIntervalSince(streamStart) * 1000)
                 )
                 finishWithError(error, messages: state.currentMessages)
                 return

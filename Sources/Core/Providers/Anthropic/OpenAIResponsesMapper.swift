@@ -136,12 +136,16 @@ enum OpenAIResponsesMapper {
     static func parseSSEEvent(
         _ sseEvent: SSEEvent,
         activeToolCalls: inout [Int: OpenAIChatCompletionsMapper.ActiveToolCall]
-    ) -> [ProviderStreamEvent] {
+    ) throws -> [ProviderStreamEvent] {
         let payload = sseEvent.data.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Responses API terminates with `response.completed`; `[DONE]` is only emitted by
-        // some proxies. Flush any dangling tool calls defensively.
+        if let error = parseProviderSSEErrorPayload(payload, eventType: sseEvent.event) {
+            activeToolCalls.removeAll()
+            throw error
+        }
+        // 代理的 [DONE] 不能替代 response.completed，也不能提交尚未完成的工具调用。
         guard payload != "[DONE]" else {
-            return flushToolCalls(&activeToolCalls)
+            activeToolCalls.removeAll()
+            return []
         }
 
         guard let data = payload.data(using: .utf8),
@@ -191,20 +195,23 @@ enum OpenAIResponsesMapper {
                     outputTokens: usage.outputTokens ?? 0
                 ))
             }
-            let hadToolCalls = !activeToolCalls.isEmpty
-            events.append(contentsOf: flushToolCalls(&activeToolCalls))
             if event.type == "response.incomplete" {
-                let maxedOut = event.response?.incompleteDetails?.reason == "max_output_tokens"
-                events.append(.done(stopReason: maxedOut ? .maxTokens : .unknown))
-            } else if hadToolCalls {
-                events.append(.done(stopReason: .toolUse))
+                let reason = event.response?.incompleteDetails?.reason
+                let hadToolCalls = !activeToolCalls.isEmpty
+                activeToolCalls.removeAll()
+                guard reason == "max_output_tokens", !hadToolCalls else {
+                    throw ModelError.upstreamError(
+                        type: "response.incomplete", code: reason,
+                        message: "模型响应未完成，未执行本次工具调用。"
+                    )
+                }
+                events.append(.done(stopReason: .maxTokens))
             } else {
-                events.append(.done(stopReason: .endTurn))
+                let hadToolCalls = !activeToolCalls.isEmpty
+                events.append(contentsOf: try flushToolCalls(&activeToolCalls))
+                events.append(.done(stopReason: hadToolCalls ? .toolUse : .endTurn))
             }
             return events
-
-        case "response.failed", "error":
-            return [.done(stopReason: .unknown)]
 
         default:
             return []
@@ -215,27 +222,30 @@ enum OpenAIResponsesMapper {
 
     private static func flushToolCalls(
         _ activeToolCalls: inout [Int: OpenAIChatCompletionsMapper.ActiveToolCall]
-    ) -> [ProviderStreamEvent] {
-        let calls = activeToolCalls
+    ) throws -> [ProviderStreamEvent] {
+        defer {
+            activeToolCalls.removeAll()
+        }
+        return try activeToolCalls
             .sorted { $0.key < $1.key }
-            .compactMap { _, toolCall -> ProviderStreamEvent? in
-                guard !toolCall.name.isEmpty else { return nil }
+            .map { _, toolCall -> ProviderStreamEvent in
+                guard !toolCall.name.isEmpty else {
+                    throw ModelError.decodingError("Responses 工具调用缺少名称")
+                }
                 return .toolCall(AIAgentMessage.ToolCall(
                     id: toolCall.id,
                     name: toolCall.name,
-                    arguments: decodeArguments(toolCall.arguments)
+                    arguments: try decodeArguments(toolCall.arguments)
                 ))
             }
-        activeToolCalls.removeAll()
-        return calls
     }
 
-    private static func decodeArguments(_ raw: String) -> [String: JSONValue] {
+    private static func decodeArguments(_ raw: String) throws -> [String: JSONValue] {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let data = trimmed.data(using: .utf8),
               let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) else {
-            return [:]
+            throw ModelError.decodingError("Responses 工具参数不是完整的 JSON 对象")
         }
         return decoded
     }

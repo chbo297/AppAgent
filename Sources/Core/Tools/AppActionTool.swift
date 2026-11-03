@@ -19,7 +19,7 @@ public struct AppActionTool: ToolProtocol {
     public let parameters = Tool.Schema(
         properties: [
             "action": .string(description: "Action name to execute. Omit to list available actions."),
-            "_why": .string(description: "One sentence on why this action is needed. Shown to the user when they are asked to approve."),
+            "_why": .string(description: "One sentence on why this action is needed."),
             "parameters": .object(
                 description: "Key-value parameters for the action."
             )
@@ -27,7 +27,10 @@ public struct AppActionTool: ToolProtocol {
         required: []
     )
     public let group: String = "custom"
-    public let safetyLevel: Tool.SafetyLevel = .sensitive
+
+    // Host-registered actions use normal app flows, like user interaction or public OpenAPI.
+    // Execute without an SDK approval card; readOnly and the host execution gate still apply.
+    public let safetyLevel: Tool.SafetyLevel = .moderate
 
     private let provider: any AppActionProvider
 

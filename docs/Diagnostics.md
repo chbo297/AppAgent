@@ -9,10 +9,12 @@
 - 导出在调试面板（会话侧栏的「调试」入口）：面板顶部有显眼的「导出全部数据」按钮，导航栏分享菜单里也有同一项。走 `AppAgentDiagnostics.export`，打出一个 zip：`summary.txt`（环境 + 各项计数 + 包内清单）、`debug-log.txt/.json`（模型调用记录）、`run-logs/`、`sessions/`（会话快照，含每轮工具往返）、`memory/`。
 - zip 不引三方库：`NSFileCoordinator` 的 `.forUploading` 读意图会给出目录的临时 zip 副本，拷出来即可。**这一步阻塞**，所以 `export` 在后台队列跑、回调切主线程，UI 期间显示「正在打包…」。
 - 导出前必须 `runLog.flush()`：写入是异步排队的，不 flush 最后几行还在队列里——恰恰是卡住之前那几行。
-- **响应侧的原始 SSE 也落日志**（`AnthropicProvider` 里每条 `sse<<` 一行，截断 800 字）。以前只记请求体，于是「模型说 stop=tool_calls、我们却解析出 0 个调用」这类问题在诊断包里查不到根因，只能靠猜端点格式。
+- **模型报文完整记录（需 Logger 启用且 minimumLevel 为 DEBUG）**：内置 provider 的三种协议统一记录实际发送的 JSON body、HTTP 状态与请求标识，以及解析前收到的每条响应文本。`phase=request/response_line/http_error_body` 保留完整正文，末帧、未知格式和解码失败不会因解析分支而漏记；`sse_flush/eof/stream_error` 标明结束路径。记录的是应用层文本，不是 HTTP 抓包：不包含认证头、Cookie、URL query，也不保留网络换行字节的差异。
+- 每次请求都有 `request=<UUID>`，可从 `debug-log` 的 `requestId` 对应到原始报文；长正文按 `part=i/N` 分块，`payload=` 后是 JSON 字符串，逐块 JSON 解码后按序拼接即可还原脱敏后的全文。响应另按 `seq` 区分各文本行；`bytes` 是分块前原文的 UTF-8 字节数。**没有 800 字裁剪，但磁盘仍只保留最近 2MB × 3 个文件**，旧请求可能被轮转淘汰。
+- 报文日志强制遮盖 API Key、配置中的自定义请求头值及常见凭据字段，即使关闭普通日志脱敏也不放行凭据。其余业务正文会进入诊断包。协议终止缺失或 `unknown` 记为 failure，不再先记 SUCCESS；错误恢复策略不由日志层改变。
 - **OpenAI 兼容端点的三个坑**（都是排查的产物）：① 有的端点在流式分片里用 `message` 而不是 `delta`，`OpenAIChoice.delta` 必须是 Optional 并 `delta ?? message` 兜住——非 Optional 时这类分片整块解码失败被静默丢掉，工具调用就这么没了；② 老式 `function_call` 也要收，并到 0 号槽走同一套收尾。`finish_reason=tool_calls` 却 flush 出 0 个调用时会打 warning 并带上原始 chunk；③ **续传分片里 `id` / `name` 是空字符串而不是缺键**（GLM 系 OneAPI 端点实测如此：首片给全名，后续每片都带 `"id":"","name":""`）。`if let` 挡不住空串，覆盖上去就把首片的工具名擦掉，`flushToolCalls` 再按「名字为空」整条丢掉 —— 现象正是 ② 那句 warning + 界面 loading 转一圈没结果。所以 `OpenAIChatCompletionsMapper` 合并分片一律走 `nonEmpty(_:)`：**空值只补不覆盖**；`OpenAIResponsesMapper` 的 `call_id` / `id` 同理。`Tests/Core/AppAgentCoreTests.swift` 用真实分片序列锁住这条。
-- **「切后台回来就不动了」在日志里长这样**：`sse<<` 在某个时刻整片断掉，随后出现 `streamStalled: iteration=N, idle=…s` 与一条 reason=`transport`、文案「模型响应中断：Ns 没有新内容，按可重试错误处理」的 debug-log failure，紧跟着 `retry`。看到这组就是连接在挂起期间被撕掉、由空闲看门狗判死后重试，机制见 `docs/TurnLifecycle.md` → 打断与恢复。**只有 `sse<<` 断掉、没有 `streamStalled`** 才是真的卡住 —— 那说明这条流没被 `StreamIdleGuard` 包上。
-- `Tests/Core/AppAgentDebugLogTests.swift` 锁住两点：`Logger` 的行确实进了文件；诊断包是真 zip（`PK` 魔数）且概要计数正确。
+- **「切后台回来就不动了」在日志里长这样**：`phase=response_line` 在某个时刻停止，随后出现 `streamStalled: iteration=N, idle=…s` 与一条 reason=`transport`、文案「模型响应中断：Ns 没有新内容，按可重试错误处理」的 debug-log failure，紧跟着 `retry`。这说明空闲看门狗判死后重试，机制见 `docs/TurnLifecycle.md` → 打断与恢复；具体网络原因仍需结合原文和传输错误判断。
+- `Tests/Core/AppAgentDebugLogTests.swift` 验证长正文还原、强制脱敏、快速轮转及导出；`LLMStreamFailureTests.swift` 验证解析前记录、EOF 尾帧和失败摘要的请求关联。
 
 ## 模拟器能力自检（工具回归的主力手段）
 

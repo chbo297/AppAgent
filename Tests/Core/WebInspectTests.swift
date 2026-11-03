@@ -3,7 +3,7 @@
 //  AppAgentTests — web / H5 内省
 //
 //  Core 侧用例（原生 macOS 也能跑）：工具的参数校验、op 路由、失败判定。
-//  真实 WKWebView 的 DOM 查询要在模拟器自检里验（单测拿不到 UIKit 运行时）。
+//  真实 HTML / 原生 overlay 由 UIKit runner 的 WebInspectViewTests 定向验证。
 //
 
 import XCTest
@@ -13,24 +13,48 @@ import XCTest
 private final class StubWebInspectProvider: WebInspectProvider, @unchecked Sendable {
     var calls: [String] = []
     var nextResult = "ok"
+    var contexts: [HostInspectionContext] = []
 
-    func targets() async -> String {
+    func targets(context: HostInspectionContext) async -> String {
+        contexts.append(context)
         calls.append("targets")
         return nextResult
     }
 
-    func domSummary(webviewId: String?, path: String?, maxNodes: Int) async -> String {
+    func domSummary(webviewId: String?, path: String?, maxNodes: Int, context: HostInspectionContext) async -> String {
         calls.append("dom_summary(\(webviewId ?? "-"),\(path ?? "-"),\(maxNodes))")
         return nextResult
     }
 
-    func domQuery(webviewId: String?, selector: String?, path: String?) async -> String {
+    func domQuery(webviewId: String?, selector: String?, path: String?, context: HostInspectionContext) async -> String {
         calls.append("dom_query(\(selector ?? "-"),\(path ?? "-"))")
         return nextResult
     }
 
-    func whyHidden(webviewId: String?, selector: String?, path: String?) async -> String {
+    func whyHidden(webviewId: String?, selector: String?, path: String?, context: HostInspectionContext) async -> String {
         calls.append("why_hidden(\(selector ?? "-"),\(path ?? "-"))")
+        return nextResult
+    }
+
+    func highlight(webviewId: String?, selector: String?, path: String?, context: HostInspectionContext) async -> String {
+        contexts.append(context)
+        calls.append("highlight(\(webviewId ?? "-"),\(selector ?? "-"),\(path ?? "-"))")
+        return nextResult
+    }
+
+    func clearHighlight(webviewId: String?, context: HostInspectionContext) async -> String {
+        contexts.append(context)
+        calls.append("clear_highlight(\(webviewId ?? "-"))")
+        return nextResult
+    }
+
+    func pageSource(webviewId: String?, kind: String, maxBytes: Int, context: HostInspectionContext) async -> String {
+        calls.append("page_source(\(kind),\(maxBytes))")
+        return nextResult
+    }
+
+    func consoleRead(webviewId: String?, limit: Int, sinceSeq: UInt64?, context: HostInspectionContext) async -> String {
+        calls.append("console_read(\(limit),\(sinceSeq.map(String.init) ?? "-"))")
         return nextResult
     }
 }
@@ -125,24 +149,233 @@ final class WebInspectTests: XCTestCase {
         XCTAssertEqual(text(output), "w1 onscreen rect=0,0,390,844")
     }
 
-    // MARK: - 权限基线（内部阶段放开，见 liji_server docs/WEB_INSPECT_DESIGN.md §6）
+    // MARK: - 正式操作不能借读取权限运行任意 JS
 
-    func testReadOpsAreSafeAndEvalIsModerate() {
+    func testReadOpsAreSafeAndEvalRequiresSeparateApproval() {
         let tool = WebInspectTool(provider: StubWebInspectProvider())
         XCTAssertEqual(tool.safetyLevel(for: ["op": .string("dom_summary")]), .safe)
         XCTAssertEqual(tool.safetyLevel(for: ["op": .string("why_hidden")]), .safe)
-        XCTAssertEqual(tool.safetyLevel(for: ["op": .string("eval")]), .moderate)
+        XCTAssertEqual(tool.safetyLevel(for: ["op": .string("highlight")]), .moderate)
+        XCTAssertEqual(tool.safetyLevel(for: ["op": .string("clear_highlight")]), .moderate)
+        XCTAssertEqual(tool.safetyLevel(for: ["op": .string("eval")]), .sensitive)
         // 缺 op 不降级为 safe，否则模型省掉参数就绕过闸门。
-        XCTAssertEqual(tool.safetyLevel(for: [:]), .moderate)
+        XCTAssertEqual(tool.safetyLevel(for: [:]), .sensitive)
+    }
+
+    func testHighlightDispatchPreservesSelectionAndSceneAndReportsFailure() async throws {
+        let provider = StubWebInspectProvider()
+        let tool = WebInspectTool(provider: provider)
+        let session = makeSession()
+        session.inspectionSceneIdentifier = "scene-web"
+        let missing = try await tool.execute(arguments: ["op": .string("highlight")], session: session)
+        XCTAssertNotNil(error(missing))
+        XCTAssertTrue(provider.calls.isEmpty)
+        _ = try await tool.execute(arguments: [
+            "op": .string("highlight"), "webviewId": .string("uuid"), "selector": .string("#button"),
+            "path": .string("0/frame/1/shadow")
+        ], session: session)
+        provider.nextResult = "JS error: Unsupported closed or absent shadow root"
+        let failure = try await tool.execute(arguments: [
+            "op": .string("highlight"), "path": .string("0/shadow/0")
+        ], session: session)
+        XCTAssertNotNil(error(failure))
+        _ = try await tool.execute(arguments: [
+            "op": .string("clear_highlight"), "webviewId": .string("uuid")
+        ], session: session)
+        XCTAssertEqual(provider.calls, [
+            "highlight(uuid,#button,0/frame/1/shadow)", "highlight(-,-,0/shadow/0)", "clear_highlight(uuid)"
+        ])
+        XCTAssertEqual(provider.contexts, Array(repeating: HostInspectionContext(sceneIdentifier: "scene-web"), count: 3))
+    }
+
+    func testReadOnlyRejectsHighlightAndEvalBeforeProvider() async throws {
+        let provider = StubWebInspectProvider()
+        let tool = WebInspectTool(provider: provider)
+        var profile = AIAgentProfile()
+        profile.toolMutationPolicy = .readOnly
+        let session = AISession(id: "web-readonly", agentMask: AIAgentMask(profile: profile, toolCentral: ToolCentral()))
+        for op in ["highlight", "clear_highlight", "eval"] {
+            do {
+                _ = try await tool.execute(arguments: [
+                    "op": .string(op), "selector": .string("body"), "script": .string("return 1;")
+                ], session: session)
+                XCTFail("readOnly must reject \(op)")
+            } catch {
+                XCTAssertEqual(error as? HostInspectionError, .readOnly)
+            }
+        }
+        XCTAssertTrue(provider.calls.isEmpty)
+        _ = try await tool.execute(arguments: ["op": .string("targets")], session: session)
+        XCTAssertEqual(provider.calls, ["targets"])
+    }
+
+    func testExpandedScopeDoesNotReachProviderWithoutApproval() async {
+        let provider = StubWebInspectProvider()
+        let session = makeSession()
+        session.allowsAppAgentInspection = false
+        do {
+            _ = try await WebInspectTool(provider: provider).execute(
+                arguments: ["op": .string("targets"), "scope": .string("all")], session: session
+            )
+            XCTFail("scope approval is required")
+        } catch {
+            XCTAssertEqual(error as? HostInspectionError, .denied)
+        }
+        XCTAssertTrue(provider.calls.isEmpty)
+    }
+
+    func testMalformedOptionalTargetsNeverFallBackToDefaultPage() async throws {
+        let provider = StubWebInspectProvider()
+        let tool = WebInspectTool(provider: provider)
+        let session = makeSession()
+        for invalid in [JSONValue.null, .number(1), .bool(false), .string(""), .string(" \n")] {
+            for op in ["highlight", "clear_highlight", "dom_query"] {
+                let arguments: [String: JSONValue] = [
+                    "op": .string(op), "webviewId": invalid, "selector": .string("#target")
+                ]
+                let preflight = await tool.preflightRejection(for: arguments, session: session)
+                XCTAssertNotNil(preflight)
+                let result = try await tool.execute(arguments: arguments, session: session)
+                XCTAssertNotNil(error(result))
+            }
+        }
+        for (key, value) in [
+            ("selector", JSONValue.bool(true)), ("selector", .string(" ")),
+            ("path", .number(0)), ("pageWorld", .string("false"))
+        ] {
+            var arguments: [String: JSONValue] = ["op": .string("highlight"), "selector": .string("#target")]
+            arguments[key] = value
+            let result = try await tool.execute(arguments: arguments, session: session)
+            XCTAssertNotNil(error(result))
+        }
+        XCTAssertTrue(provider.calls.isEmpty)
+        // Empty path is a valid explicit body selection; only omitted webviewId selects default.
+        _ = try await tool.execute(arguments: ["op": .string("highlight"), "path": .string("")], session: session)
+        XCTAssertEqual(provider.calls, ["highlight(-,-,)"])
+    }
+
+    func testNumericInputsRejectOverflowNonfiniteFractionsAndWrongTypes() async throws {
+        let provider = StubWebInspectProvider()
+        let tool = WebInspectTool(provider: provider)
+        let session = makeSession()
+        for key in ["maxNodes", "maxBytes", "limit", "sinceSeq"] {
+            for invalid in [JSONValue.number(.nan), .number(.infinity), .number(-.infinity),
+                            .number(1e100), .number(1.5), .string("10"), .null, .bool(true)] {
+                let result = try await tool.execute(arguments: ["op": .string("targets"), key: invalid], session: session)
+                XCTAssertNotNil(error(result), "Rejected \(key)=\(invalid)")
+            }
+        }
+        for invalid in [Double(UInt64.max), -1] {
+            let result = try await tool.execute(arguments: [
+                "op": .string("console_read"), "sinceSeq": .number(invalid)
+            ], session: session)
+            XCTAssertNotNil(error(result))
+        }
+        let intBoundary = try await tool.execute(arguments: [
+            "op": .string("dom_summary"), "maxNodes": .number(Double(Int.max))
+        ], session: session)
+        XCTAssertNotNil(error(intBoundary))
+        for value in [Double.nan, .infinity, -1, 1e100] {
+            let result = try await tool.execute(arguments: [
+                "op": .string("probe"), "x": .number(value), "y": .number(0)
+            ], session: session)
+            XCTAssertNotNil(error(result))
+        }
+        XCTAssertTrue(provider.calls.isEmpty)
+    }
+
+    func testNumericBoundariesConvertExactlyAndBudgetsClamp() async throws {
+        let provider = StubWebInspectProvider()
+        let tool = WebInspectTool(provider: provider)
+        let session = makeSession()
+        for value in [Double(Int.min), Double(Int.max).nextDown] {
+            _ = try await tool.execute(arguments: [
+                "op": .string("dom_summary"), "maxNodes": .number(value)
+            ], session: session)
+            _ = try await tool.execute(arguments: [
+                "op": .string("page_source"), "maxBytes": .number(value)
+            ], session: session)
+            _ = try await tool.execute(arguments: [
+                "op": .string("console_read"), "limit": .number(value), "sinceSeq": .number(0)
+            ], session: session)
+        }
+        let largestSequence = Double(UInt64.max).nextDown
+        _ = try await tool.execute(arguments: [
+            "op": .string("console_read"), "sinceSeq": .number(largestSequence)
+        ], session: session)
+        XCTAssertEqual(provider.calls, [
+            "dom_summary(-,-,10)", "page_source(html,1024)", "console_read(1,0)",
+            "dom_summary(-,-,1000)", "page_source(html,524288)", "console_read(1000,0)",
+            "console_read(100,\(try XCTUnwrap(UInt64(exactly: largestSequence))))"
+        ])
+    }
+
+    func testInvalidEnumsAndParameterTypesFailDuringPreflight() async throws {
+        let provider = StubWebInspectProvider()
+        let tool = WebInspectTool(provider: provider)
+        let session = makeSession()
+        for (key, invalid) in [
+            ("scope", JSONValue.string("HOST")), ("kind", .string("pdf")),
+            ("op", .bool(true)), ("script", .array([])), ("selector", .object([:])),
+            ("path", .null), ("pageWorld", .number(0)), ("x", .bool(false)), ("y", .string("0"))
+        ] {
+            var arguments: [String: JSONValue] = ["op": .string("targets")]
+            arguments[key] = invalid
+            let rejection = await tool.preflightRejection(for: arguments, session: session)
+            let output = try await tool.execute(arguments: arguments, session: session)
+            XCTAssertNotNil(rejection, key)
+            XCTAssertEqual(error(output), rejection, key)
+        }
+        XCTAssertTrue(provider.calls.isEmpty)
+    }
+
+    func testHostExecutionGateReceivesFullHighlightArgumentsAndCanReject() async throws {
+        let provider = StubWebInspectProvider()
+        let tool = WebInspectTool(provider: provider)
+        let gate = WebInspectDenyGate()
+        let tools = ToolCentral()
+        await tools.register(tool)
+        let agent = AIAgent(
+            id: "web-gate-\(UUID().uuidString)",
+            profile: AIAgentProfile(autoPersist: false, toolExecutionGate: gate, registerBuiltInTools: false),
+            toolCentral: tools, memoryStorage: InMemoryMemoryStorage(), sessionStorage: InMemorySessionStorage()
+        )
+        let session = await agent.createSession(title: "Web gate")
+        for op in ["highlight", "clear_highlight", "eval"] {
+            do {
+                _ = try await tool.execute(arguments: [
+                    "op": .string(op), "webviewId": .string("explicit-id"), "selector": .string("#target"),
+                    "path": .string("0/frame"), "script": .string("return 1;")
+                ], session: session)
+                XCTFail("Gate must reject \(op)")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("Web test gate denied"))
+            }
+        }
+        let arguments = await gate.arguments
+        XCTAssertEqual(arguments.count, 3)
+        XCTAssertEqual(arguments.first?["path"], .string("0/frame"))
+        XCTAssertEqual(arguments.first?["webviewId"], .string("explicit-id"))
+        XCTAssertTrue(provider.calls.isEmpty)
+        withExtendedLifetime(agent) {
+        }
     }
 
     // MARK: - 抓包通道扩展
 
-    func testCaptureChannelsAppendedInOrder() {
-        // bitIndex 与宿主侧枚举一一对应，只能在末尾追加；顺序变了就是错通道读数据。
-        XCTAssertEqual(HookCaptureStore.channels,
-                       ["talos_in", "talos_out", "shell_in", "shell_out", "web_console", "web_nav"])
-        XCTAssertTrue(HookCaptureStore.isValidChannel("web_console"))
-        XCTAssertTrue(HookCaptureStore.isValidChannel("web_nav"))
+    func testCaptureChannelsUseHostDefinedNames() {
+        XCTAssertTrue(HookCaptureStore.isValidChannel("bridge_in"))
+        XCTAssertTrue(HookCaptureStore.isValidChannel("page.navigation"))
+        XCTAssertFalse(HookCaptureStore.isValidChannel("../escape"))
+        XCTAssertFalse(HookCaptureStore.isValidChannel(""))
+    }
+}
+
+private actor WebInspectDenyGate: ToolExecutionGate {
+    var arguments: [[String: JSONValue]] = []
+
+    func rejection(for tool: any ToolProtocol, arguments: [String: JSONValue], session: AISession) async -> String? {
+        self.arguments.append(arguments)
+        return "Web test gate denied"
     }
 }

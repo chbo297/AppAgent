@@ -267,7 +267,7 @@ public enum ChatMessageAssembler {
                 turn.activityContents.append(("\(message.id)-\(index)", content))
             case .hostContext:
                 // 宿主状态/事件消息只进模型的逻辑历史，**不进展示层**：既不是用户气泡，
-                // 也不是过程明细（见 liji_server docs/HOST_APP_CONTEXT_DESIGN.md §9.3）。
+                // 也不是过程明细。
                 break
             }
         }

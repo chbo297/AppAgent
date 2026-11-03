@@ -35,7 +35,7 @@ public protocol RuntimeInspectProvider: Sendable {
     func viewSubtree(path: String, maxDepth: Int, context: HostInspectionContext) async -> String
     /// 分层摘要：以 VC 树为骨架，视图只列语义锚点（有文本 / 可交互 / 宿主自定义的视图），
     /// UIKit 包装层穿透、大子树折叠成统计并附上可二次调用的 path。
-    /// 让首次调用花几百 token 拿到「地图」，细节按需再问。
+    /// 让首次调用用较少 token 拿到结构摘要，细节按需再问。
     func uiHierarchySummary(context: HostInspectionContext) async -> String
     /// 某路径视图的详细信息（类名、frame、层级关系、常用属性）。
     func viewInfo(path: String, context: HostInspectionContext) async -> String

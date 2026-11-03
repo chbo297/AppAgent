@@ -252,7 +252,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         }
     }
 
-    // MARK: - 分层摘要：先给地图，细节按需二次调用
+    // MARK: - 分层摘要：先给结构摘要，细节按需二次调用
 
     public func uiHierarchySummary(context: HostInspectionContext) async -> String {
         await MainActor.run { Self.hierarchySummary(context: context) }
@@ -1330,7 +1330,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
     // MARK: - 摘要引擎
     //
     // 全量层级在真实 app 里动辄几十 KB（本仓库 demo 三个空 window 已经 19 KB），
-    // 一次塞给模型就把上下文吃光了。所以首次调用只给「地图」：
+    // 一次塞给模型就把上下文吃光了。所以首次调用只给结构摘要：
     //   骨架用 VC 树（页面栈才是 agent 真正想问的东西），
     //   视图只列语义锚点，UIKit 包装层穿透不占行，
     //   大子树折叠成统计并附上可直接二次调用的 path。

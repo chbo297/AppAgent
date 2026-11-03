@@ -10,7 +10,7 @@ import Foundation
 public struct HotfixTool: ToolProtocol {
     public let name = "app_hotfix"
     public let description = """
-        Manage host-app JS hotfix patches (BMBandage-compatible). Choose an 'op':
+        Manage host-app JS patch slots through the injected host provider. Choose an 'op':
         - 'list': list installed patch slots
         - 'apply': install/replace patch 'name' with 'javascript' ('applyMode': instant|restart)
         - 'toggle': enable/disable patch 'name' via 'enabled'

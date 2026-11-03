@@ -232,7 +232,7 @@ enum CapabilitySelfCheck {
                                                   "detail": .string("full")],
                                       session: session).stringValue
         } ?? ""
-        // 摘要必须真的省下来，否则「先看地图再钻取」这条路等于没做。
+        // 摘要必须真的省下来，否则「先看结构再钻取」这条路等于没做。
         let summaryBytes = summary.utf8.count
         let fullBytes = full.utf8.count
         let shrunk = summaryBytes > 0 && fullBytes > summaryBytes
@@ -538,7 +538,7 @@ enum CapabilitySelfCheck {
         }
 
 
-        // 宿主后台服务（liji_server）相关工具已迁到宿主侧，由宿主自行注册到 ToolCentral，
+        // 宿主后台服务相关工具由宿主自行注册到 ToolCentral，
         // AppAgent 不再内置，故本自检不再覆盖；宿主侧自检请在宿主工程里做。
 
         rec.section("app_device_info")

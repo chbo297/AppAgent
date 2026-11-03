@@ -3,12 +3,9 @@
 > **归属：AppAgent SDK。** 本文是通用 SDK 协议，描述「宿主 App 如何向 agent 提供固有能力、
 > 当前状态、语义事件与动态工作区」，**不绑定任何具体 App**。
 >
-> 本文已从 宿主后台服务（liji_server）仓迁入 AppAgent 仓（`docs/HostContext.md`）——本仓即归属仓。
->
-> 状态：协议冻结基线 v0.3（正文为冻结原文，仅把示例中的具体 App 名替换为中性表述）。
+> 状态：协议冻结基线 v0.3。
 > 实现现状见 AppAgent `Sources/Core/HostContext/HostContextTypes.swift`、`HostStateMirror.swift`；
 > 尚未实现的是「固有能力 Manifest」那一层（§4）。
-> 原 §19「当前代码改造索引」已并入 宿主后台服务 `docs/ARCHITECTURE_REVIEW.md` §9，不在本文重复。
 
 ---
 
@@ -17,9 +14,9 @@
 本方案采用四类数据：
 
 1. **固有能力 Manifest**：描述 App 有什么产品能力、页面、模块和技术实现。
-2. **当前页面状态**：描述 App 当前展示的页面、页面栈、页面内容、页面交互和页面所属地图状态。
+2. **当前页面状态**：描述 App 当前展示的页面、页面栈、页面内容和页面交互。
 3. **App 自动事件**：由用户操作 App 触发、需要进入模型会话并可能触发模型执行的一类特殊消息。
-4. **万金油页面工作区**：描述某个会话创建的动态 H5/底图页面及其可恢复状态。
+4. **动态页面工作区**：描述某个会话创建的动态 Web 或原生页面及其可恢复状态。
 
 最重要的消息边界如下：
 
@@ -33,7 +30,7 @@ App 状态变化
 
 因此：
 
-- 当前页面状态和万金油页面工作区状态**会进入大模型可见的逻辑消息历史**；
+- 当前页面状态和动态页面工作区状态**会进入大模型可见的逻辑消息历史**；
 - 它们**不会显示成用户气泡**；
 - 它们**不会全部进入用户可见的聊天消息列表**；
 - 首次进入会话时发送完整状态快照；
@@ -63,23 +60,22 @@ App 状态变化
 
 - 让模型理解宿主 App 的产品能力和技术边界。
 - 让模型知道当前位于哪个页面、页面栈如何、页面展示了什么、用户正在进行什么交互。
-- 让模型了解当前页面所属地图的关键状态。
+- 让模型了解当前页面的关键状态。
 - 让模型在后续每轮请求中获得最新状态变化。
 - 让 App 自动事件区别于用户直接输入。
 - 让动态 H5 页面可以绑定会话、切换恢复和内存回收。
-- 让 宿主后台服务 在生成补丁时拿到与问题相关的页面、能力和运行态上下文。
+- 让宿主服务在处理任务时拿到与问题相关的页面、能力和运行态上下文。
 - 让能力缓存只在能力内容真正变化时失效，不因无关 App 小版本升级而失效。
 
 ### 2.2 非目标
 
 本方案当前不做以下事情：
 
-- 不让 宿主后台服务 中转 App 的实时状态。
+- 不让宿主服务中转 App 的实时状态。
 - 不把所有 UI 层级、UIKit 属性和 DOM 内容发送给模型。
-- 不把地图每一次拖动、缩放、定位变化都作为一条聊天消息。
+- 不把高频交互变化都作为一条聊天消息。
 - 不把所有 App 状态都写成用户可见的聊天气泡。
-- 不在当前协议中引入地图旋转和俯仰。
-- 不在地图状态中复制完整 POI 详情。
+- 不在当前协议中复制完整业务对象详情。
 - 不让 H5 直接调用任意宿主 API 或任意反射接口。
 
 ---
@@ -123,9 +119,9 @@ Manifest 描述“App 固有地具备什么能力”，不描述某一时刻的�
 
 ```json
 {
-  "capabilityId": "map_search",
-  "productName": "地图检索",
-  "description": "根据关键词和位置检索地图地点",
+  "capabilityId": "content_search",
+  "productName": "内容检索",
+  "description": "根据关键词和上下文检索内容",
   "inputs": [
     "keyword",
     "location"
@@ -135,7 +131,7 @@ Manifest 描述“App 固有地具备什么能力”，不描述某一时刻的�
     "search_result_page"
   ],
   "toolNames": [
-    "app_map"
+    "app_content_search"
   ],
   "implementationRefs": [
     "module/map_search",
@@ -152,7 +148,7 @@ Manifest 描述“App 固有地具备什么能力”，不描述某一时刻的�
   "pageId": "poi_detail",
   "productName": "地点详情页",
   "aliases": [
-    "POI详情",
+    "内容详情",
     "地点详情",
     "地点卡片详情"
   ],
@@ -191,7 +187,7 @@ Manifest 描述“App 固有地具备什么能力”，不描述某一时刻的�
 - CI 检查 Manifest 中的 `className`、路由和实现引用是否仍然存在。
 - 代码扫描只负责技术索引，不能自动推断完整产品语义。
 
-Manifest 随 App 包提供，但不需要把整份源代码放入 App 包。详细实现说明可以按需放入文档资源或由 宿主后台服务 根据版本读取源码。
+Manifest 随 App 包提供，但不需要把整份源代码放入 App 包。详细实现说明可以按需放入文档资源或由宿主服务根据版本读取源码。
 
 ### 4.4 Manifest 与 system prompt 的关系
 
@@ -205,10 +201,10 @@ Manifest 不应整体拼进每一轮 system prompt。建议分三层：
 你运行在宿主 App 中。
 
 宿主提供：
-- 地图检索
-- 地点详情与导航
+- 内容检索
+- 内容详情与导航
 - 当前页面状态读取
-- 页面内地图操作
+- 页面内交互操作
 - 动态页面创建、更新和关闭
 
 宿主能力必须通过已注册的 App 工具调用。
@@ -220,7 +216,7 @@ Manifest 不应整体拼进每一轮 system prompt。建议分三层：
 - 短；
 - 稳定；
 - 不包含完整类名和方法清单；
-- 不包含当前定位、当前 POI 和当前页面实例数据；
+- 不包含当前定位、当前业务对象和当前页面实例数据；
 - 不因无关 App 小版本升级而变化。
 
 #### 正式能力接口：放入 tools
@@ -231,7 +227,6 @@ Manifest 不应整体拼进每一轮 system prompt。建议分三层：
 app_discover
 app_navigate
 app_action
-app_map
 app_workspace
 ```
 
@@ -253,9 +248,8 @@ app_workspace
 | 工具 | 作用 | 默认使用方式 |
 |---|---|---|
 | `app_discover` | 查询能力列表、能力摘要和详细契约 | 模型不确定宿主能力时调用 |
-| `app_map` | 地图搜索、绘制、清除和聚焦 | 有对应原生地图能力时优先调用 |
+| `app_action` | 执行已登记的宿主业务动作 | 仅调用已登记的业务 action |
 | `app_navigate` | 打开、关闭、返回和替换原生页面 | 有对应原生页面能力时优先调用 |
-| `app_action` | 执行非地图、非导航的宿主业务动作 | 仅调用已登记的业务 action |
 | `app_workspace` | 创建或操作动态自定义工作区 | 原生能力不足或用户明确要求自定义时调用 |
 
 除 `app_discover` 外，工具都只暴露已登记的正式 action。推荐统一使用：
@@ -496,7 +490,7 @@ App 发布事件
   → 触发模型一轮
 ```
 
-例如地图连续拖动过程中，可能产生几十次中心点变化，但不应触发几十轮模型。下一次用户提问时只附带合并后的最新变化。
+例如连续拖动或滚动过程中，可能产生几十次位置变化，但不应触发几十轮模型。下一次用户提问时只附带合并后的最新变化。
 
 ---
 
@@ -644,7 +638,7 @@ source: host
     "stack": [
       {
         "pageId": "map_home",
-        "productName": "地图首页",
+      "productName": "宿主首页",
         "className": "ExampleMainPage",
         "route": "map/home"
       },
@@ -670,7 +664,7 @@ source: host
     "pageId": "poi_detail",
     "productName": "地点详情页",
     "aliases": [
-      "POI详情",
+      "内容详情",
       "地点详情"
     ],
     "className": "ExampleDetailPage",
@@ -769,14 +763,14 @@ source: host
 不保存：
 
 - 每次手指移动；
-- 每次地图平移；
+- 每次高频拖动；
 - 每次 scroll；
 - 每次 GPS 小幅变化；
 - 所有底层 UIKit 事件。
 
 ### 7.8 H5 / WebView 现场
 
-当前页面是 H5 容器（壳浏览器 / Cordova / 内嵌 WebView）时，`current` 额外带一个 `web` 块，
+当前页面是 H5 容器（内嵌 WebView）时，`current` 额外带一个 `web` 块，
 描述这张网页的运行态。它只放**摘要与计数**，不放 DOM、不放源码——完整 DOM 永远按需走 web 内省工具
 （见 `WEB_INSPECT_PROTOCOL.md`），页面状态里塞 DOM 只会每轮烧 token。
 
@@ -786,7 +780,7 @@ source: host
     "pageId": "module_web",
     "className": "ModuleWebViewPage",
     "web": {
-      "url": "https://map.baidu.com/act/xxx",
+      "url": "https://example.invalid/page",
       "container": "shell",
       "load": {
         "state": "finished",
@@ -826,9 +820,9 @@ source: host
 - 走 §8 的增量协议：`jsErrors` 变化就是一条 delta，不新造通路。
 - 只有三类值得升级成 §10 的 App 自动事件主动触发模型：白屏、web 进程终止、同一 api 连续多次 bridge 失败；
   且必须守 §10.4 的防循环——agent 自己触发的错误不得反向触发模型。
-- **`url` 只存在于这层（AppAgent 内存态给模型看）**：当这份现场被序列化、随需求提交给 liji_server 时，
+- **`url` 只存在于这层（AppAgent 内存态给模型看）**：当这份现场被序列化并交给宿主服务时，
   `url` 及任何 `http(s):` 值会被服务端现场契约的安全校验拒绝，客户端须剔除；页面地址若要给服务端，
-  走独立的 web-diagnosis 接口。见 liji_server `CLIENT_CONTEXT_CONTRACT.md` §2。
+  由宿主自己的诊断接口接收。
 
 ---
 
@@ -893,7 +887,7 @@ AppAgent 可以判断中间状态可能丢失，需要重新请求完整快照�
 - 状态变化按照 cursor 顺序合并。
 - 发现 epoch 变化或 revision 断档：重新获取完整快照。
 
-例如取消 POI 选中：
+例如取消当前内容选中：
 
 ```json
 {
@@ -1125,8 +1119,8 @@ App 自动事件默认：
 建议允许：
 
 - 用户完成一次搜索；
-- 用户选中一个 POI；
-- 用户打开或关闭 POI 详情；
+- 用户选中一个业务对象；
+- 用户打开或关闭内容详情；
 - 用户完成筛选确认；
 - 用户完成路线选择；
 - 用户提交动态页面表单；
@@ -1134,8 +1128,8 @@ App 自动事件默认：
 
 默认只更新状态、不触发模型：
 
-- 地图拖动过程；
-- 地图缩放过程；
+- 拖动过程；
+- 缩放过程；
 - GPS 小幅变化；
 - 页面滚动；
 - 普通 loading；
@@ -1171,7 +1165,7 @@ causedBy = system
 ---
 
 
-## 12. 万金油页面工作区
+## 12. 动态页面工作区
 
 ### 12.1 两层职责
 
@@ -1195,9 +1189,9 @@ AppAgent 负责：
 - 管理内存；
 - 执行页面重建。
 
-当前 `LijiBoundPageController` 只是每个 session 缓存一个 placeholder：
+宿主页面控制器可以为每个 session 缓存一个 placeholder：
 
-`mapframework/Sources/AppAgentIntegration/private/LijiBoundPageController.swift:20`
+宿主自己的页面控制器实现位置。
 
 它需要扩展为 `HostWorkspaceController`。
 
@@ -1228,7 +1222,7 @@ AppAgent 负责：
 
 ### 12.3 工作区状态如何进入模型历史
 
-万金油页面工作区状态也遵守 Host Context Message 规则：
+动态页面工作区状态也遵守 Host Context Message 规则：
 
 - 会话首次创建动态页面时，附带完整 workspace snapshot；
 - 后续用户在动态页面中产生重要交互时，追加 workspace delta；
@@ -1261,7 +1255,7 @@ actualVisible = false
 
 ### 12.6 Agent 调起原生页面
 
-如果 Agent 调起 POI 详情、导航、搜索或其他原生页面：
+如果 Agent 调起内容详情、导航、搜索或其他原生页面：
 
 ```text
 displayIntent = collapsed
@@ -1290,7 +1284,7 @@ H5 通过白名单协议声明响应区域。宿主校验区域后才允许触�
 - 任意 JS 调宿主；
 - 任意反射调用。
 
-地图覆盖物需要按 `workspaceId` 隔离，页面收起时解绑该工作区订阅和临时覆盖物。
+页面临时对象需要按 `workspaceId` 隔离，页面收起时解绑该工作区订阅和临时对象。
 
 ### 12.8 内存回收
 
@@ -1313,7 +1307,7 @@ H5 通过白名单协议声明响应区域。宿主校验区域后才允许触�
 
 - WebView；
 - 页面控制器；
-- 地图临时对象；
+- 页面临时对象；
 - 图片缓存；
 - 订阅。
 
@@ -1367,7 +1361,7 @@ struct HostWorkspaceState
 - `HostWorkspaceState` 只描述工作区协议状态，不携带 WebView 或 UIKit 实例。
 
 状态合并、cursor 校验和模型可见 cursor 追踪应放在独立的
-`HostStateMirror`/`HostContextCoordinator` 中，不放进地图 provider。
+`HostStateMirror`/`HostContextCoordinator` 中，不放进某个业务 provider。
 
 当前协议位置：
 
@@ -1458,10 +1452,10 @@ App 自动事件不应依赖 `.user` role 判断。
 | Host State Snapshot/Delta | 模型逻辑消息历史 | 是，随 session |
 | 高频未触发事件的 delta | AppAgent 内存 | 否 |
 | App 自动事件 | AppAgent session storage | 是 |
-| 万金油页面 H5 资源 | App 沙箱/Application Support | 是 |
-| 万金油页面恢复状态 | App 沙箱/Application Support | 是 |
-| WebView、控制器、临时地图对象 | 内存 | 否 |
-| 宿主后台服务 任务快照 | 服务端数据库 | 是 |
+| 动态页面 H5 资源 | App 沙箱/Application Support | 是 |
+| 动态页面恢复状态 | App 沙箱/Application Support | 是 |
+| WebView、控制器、页面临时对象 | 内存 | 否 |
+| 宿主服务任务快照 | 服务端数据库 | 是 |
 
 关键原则：
 
@@ -1488,7 +1482,7 @@ App 自动事件不应依赖 `.user` role 判断。
 ### 17.2 普通页面状态变化
 
 ```text
-用户拖动地图
+用户拖动页面
   → App 发布多次 map.viewportBounds 变化
   → AppAgent 合并到 StateMirror
   → 不触发模型
@@ -1503,7 +1497,7 @@ App 自动事件不应依赖 `.user` role 判断。
 ### 17.3 App 自动事件
 
 ```text
-用户点击 POI 气泡
+用户点击内容卡片
   → App 更新页面 interaction
   → App 发布 hostEvent(selected_poi)
   → AppAgent 合并 StateMirror
@@ -1553,7 +1547,7 @@ AppAgent 恢复历史 session
 
 ### 18.2 不要把每次状态变化立即触发模型
 
-地图拖动、定位、滚动等变化频率很高。状态发布、状态合并、模型触发必须解耦。
+拖动、定位、滚动等变化频率很高。状态发布、状态合并、模型触发必须解耦。
 
 ### 18.3 不要把完整状态重复发送
 
@@ -1581,15 +1575,14 @@ App build 只用于诊断。能力缓存使用语义内容 hash。
 1. 固有能力摘要进入稳定 system prompt。
 2. 正式能力进入 tools。
 3. 详细技术结构进入按需检索文档。
-4. 当前页面状态和万金油页面工作区状态进入模型逻辑消息历史，但不进入用户可见气泡列表。
+4. 当前页面状态和动态页面工作区状态进入模型逻辑消息历史，但不进入用户可见气泡列表。
 5. 新会话首次请求发送完整状态快照。
 6. 后续每次向模型发送新请求前，发送上次模型已看到状态之后的增量。
 7. 状态变化不自动触发模型；固定语义用户操作才生成 App 自动事件。
 8. App 自动事件进入模型历史，也进入 UI，但 UI 以折叠 App 消息展示。
 9. `epoch/revision` 只用于端内状态一致性，不进入 system prompt。
 10. `appBuild` 只用于诊断，不参与能力缓存。
-11. 页面是状态第一归属单位，地图状态隶属于页面。
-12. 地图当前只保留 bounds、定位点和覆盖物/选中引用，不提供 zoom、比例尺、旋转、俯仰和完整 POI 详情。
+11. 页面是状态第一归属单位，业务状态隶属于页面。
+12. 页面只保留业务方声明的最小状态和选中引用，不复制完整业务对象详情。
 13. 动态页面的展示意图、实际显隐和内存实例分离管理。
-14. AppAgent 维护状态镜像，宿主 App 维护运行事实，宿主后台服务 只保存开发任务所需快照。
-
+14. AppAgent 维护状态镜像，宿主 App 维护运行事实，宿主服务只保存任务所需快照。

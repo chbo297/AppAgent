@@ -3,25 +3,36 @@
 //  AppAgent — 宿主能力层
 //
 //  WKWebView 的通用 web 内省实现，宿主零代码即可用：
-//  - 容器发现走 UIKit 视图树（含预加载池里没上屏的实例），id 记在弱引用表里，跨调用稳定。
+//  - 容器发现走当前 scene 的 UIKit 视图树；不承诺发现外部 SDK 的脱离视图树的预加载池。
+//    UUID 存在实例 associated object，登记表只持弱引用。
 //  - DOM 查询是**一次性** evaluateJavaScript，跑在独立 WKContentWorld：未被调用时页面里没有任何
 //    我们的代码，加载路径零改动；查询期间也看不见、改不了页面自己的全局变量。
 //  - 只有 console 采集需要常驻探针（页面调的是页面 world 的 console），所以它按需 arming，
 //    且保留原函数透传、错误采集用 addEventListener 而不是覆盖 window.onerror。
-//  - **绝不调 removeAllUserScripts**：宿主（如百度地图 BMWebView）自己也往同一个
-//    userContentController 装脚本（静音、闪屏浮层），清掉就是破坏宿主功能。
+//  - **绝不调 removeAllUserScripts**：宿主可能已向同一 userContentController
+//    注入自己的脚本，清掉就是破坏宿主行为。
 //
 
 #if canImport(UIKit) && canImport(WebKit)
 import Foundation
 import UIKit
 import WebKit
+import ObjectiveC.runtime
 
 public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sendable {
 
     public static let shared = DefaultWebInspectProvider()
+    private let environment: WebInspectEnvironment
 
     public init() {
+        environment = .live
+    }
+
+    /// A real UIView hierarchy for hostless Catalyst, where constructing UIWindow requires
+    /// UIApplicationMain. Only root discovery is replaced; WebKit and ownership checks are live.
+    @MainActor
+    init(testingRoot: UIView, binding: String) {
+        environment = .testing(root: testingRoot, binding: binding)
     }
 
     // MARK: - 容器登记
@@ -35,78 +46,111 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     }
 
     @MainActor private static var registry: [String: WeakWebView] = [:]
-    @MainActor private static var nextIndex = 1
+    @MainActor private var knownViews: [String: WeakWebView] = [:]
+    @MainActor private var ownedHandlers: [String: ConsoleHandler] = [:]
 
-    private static let worldName = "appagent.inspect"
+    static let worldName = "appagent.inspect"
+    // Keep the named world alive across calls; WebKit may discard its isolated globals
+    // when the last WKContentWorld reference is released.
+    @MainActor static let inspectionWorld = WKContentWorld.world(name: worldName)
     private static let handlerName = "appagentWebLog"
     static let consoleBufferLimit = 500
 
     @MainActor
-    private static func windows() -> [UIWindow] {
-        var result: [UIWindow] = []
-        for scene in UIApplication.shared.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else {
-                continue
-            }
-            result.append(contentsOf: windowScene.windows)
+    private func collect(_ view: UIView, context: HostInspectionContext, into found: inout [WKWebView]) {
+        let ownership = HostInspectionContext(scope: context.scope)
+        guard HostInspectionUIKit.canTraverse(view, context: ownership) else {
+            return
         }
-        return result
-    }
-
-    @MainActor
-    private func collect(_ view: UIView, into found: inout [WKWebView]) {
-        if let web = view as? WKWebView {
+        if let web = view as? WKWebView, environment.includes(web, context: context) {
             found.append(web)
             return
         }
         for sub in view.subviews {
-            collect(sub, into: &found)
+            collect(sub, context: context, into: &found)
         }
     }
 
     @MainActor
-    private func allWebViews() -> [WKWebView] {
+    private func allWebViews(context: HostInspectionContext) throws -> [WKWebView] {
+        Self.registry = Self.registry.filter { entry in
+            entry.value.view != nil
+        }
         var found: [WKWebView] = []
-        for window in Self.windows() {
-            collect(window, into: &found)
+        for window in try environment.roots(context) {
+            collect(window, context: context, into: &found)
         }
         return found
     }
 
     @MainActor
-    private func identifier(for webView: WKWebView) -> String {
-        for (id, box) in Self.registry where box.view === webView {
-            return id
+    public static func identity(for webView: WKWebView) -> String {
+        registry = registry.filter { entry in
+            entry.value.view != nil
         }
-        let id = "w\(Self.nextIndex)"
-        Self.nextIndex += 1
+        // Cross-component ABI: selector value itself, never the address of a Swift variable.
+        let key = unsafeBitCast(NSSelectorFromString("appagent.webview.identity.v1"), to: UnsafeRawPointer.self)
+        let id: String
+        if let existing = objc_getAssociatedObject(webView, key) as? String {
+            id = existing
+        } else {
+            id = NSUUID().uuidString
+            objc_setAssociatedObject(webView, key, id as NSString, .OBJC_ASSOCIATION_COPY_NONATOMIC)
+        }
         Self.registry[id] = WeakWebView(webView)
         return id
     }
 
     @MainActor
-    private func isOnScreen(_ webView: UIView) -> Bool {
-        guard webView.window != nil, !webView.isHidden, webView.alpha > 0.01 else {
-            return false
+    private func identifier(for webView: WKWebView) -> String {
+        knownViews = knownViews.filter { entry in
+            entry.value.view != nil
         }
-        return webView.bounds.width > 1 && webView.bounds.height > 1
+        let id = Self.identity(for: webView)
+        knownViews[id] = WeakWebView(webView)
+        return id
+    }
+
+    /// End this provider's inspections without discovering targets or executing page JS.
+    /// Preserve host scripts and buffered console records.
+    @MainActor
+    public func stopAllInspections() {
+        for entry in knownViews.values {
+            if let view = entry.view {
+                WebInspectHighlight.existingController(for: view)?.stop(clearPageSelection: false)
+            }
+        }
+        knownViews.removeAll()
+        for (id, handler) in ownedHandlers {
+            handler.isActive = false
+            if Self.handlers[id] === handler {
+                handler.controller?.removeScriptMessageHandler(forName: Self.handlerName)
+                Self.handlers[id] = nil
+            }
+        }
+        ownedHandlers.removeAll()
     }
 
     /// 没给 id 时取「已上屏且面积最大」的容器：预加载池里的实例没上屏，不该被当成用户在看的页面。
     @MainActor
-    private func resolveTarget(_ webviewId: String?) -> WKWebView? {
-        if let webviewId {
-            return Self.registry[webviewId]?.view
-        }
-        let candidates = allWebViews()
+    private func resolveTarget(_ webviewId: String?, context: HostInspectionContext) throws -> WKWebView? {
+        let candidates = try allWebViews(context: context)
         for view in candidates {
             _ = identifier(for: view)
         }
-        let visible = candidates.filter { view in
-            isOnScreen(view)
+        if let webviewId {
+            guard let view = Self.registry[webviewId]?.view else {
+                return nil
+            }
+            guard environment.includes(view, context: context) else {
+                throw UIKitInspectionError.outsideScope
+            }
+            return view
         }
-        let pool = visible.isEmpty ? candidates : visible
-        return pool.max(by: { lhs, rhs in
+        let visible = candidates.filter { view in
+            WebInspectVisibility.isVisible(view, context: context, environment: environment)
+        }
+        return visible.max(by: { lhs, rhs in
             lhs.bounds.width * lhs.bounds.height < rhs.bounds.width * rhs.bounds.height
         })
     }
@@ -117,14 +161,14 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     /// **`Any` 不许跨过 continuation** —— `Result<Any, Error>` 不是 Sendable，
     /// Swift 6 的 region isolation 会直接拦住；而 WKWebView 的回调本来就在主线程，
     /// 在回调里就地压成字符串既合规又少一层类型。
-    private enum JSOutcome: Sendable {
+    enum JSOutcome: Sendable {
         case value(String)
         case failure(String)
     }
 
     @MainActor
-    private func evaluate(_ js: String, on webView: WKWebView, pageWorld: Bool) async -> JSOutcome {
-        let world = pageWorld ? WKContentWorld.page : WKContentWorld.world(name: Self.worldName)
+    func evaluate(_ js: String, on webView: WKWebView, pageWorld: Bool) async -> JSOutcome {
+        let world = pageWorld ? WKContentWorld.page : Self.inspectionWorld
         return await withCheckedContinuation { continuation in
             webView.evaluateJavaScript(js, in: nil, in: world) { result in
                 continuation.resume(returning: Self.outcome(of: result))
@@ -136,8 +180,12 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     private static func outcome(of result: Result<Any, any Error>) -> JSOutcome {
         switch result {
         case .success(let value):
-            if let text = value as? String { return .value(text) }
-            if value is NSNull { return .value("(null)") }
+            if let text = value as? String {
+                return .value(text)
+            }
+            if value is NSNull {
+                return .value("(null)")
+            }
             return .value(String(describing: value))
         case .failure(let error):
             return .failure(error.localizedDescription)
@@ -148,15 +196,29 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     /// 失败一律以 sentinel 前缀返回，由 WebInspectTool 翻译成工具错误。
     @MainActor
     private func perform(webviewId: String?,
+                         context: HostInspectionContext,
                          pageWorld: Bool = false,
                          makeScript: @MainActor (WKWebView) -> String) async -> String {
-        guard let view = resolveTarget(webviewId) else {
+        let target: WKWebView?
+        do {
+            target = try resolveTarget(webviewId, context: context)
+        } catch {
+            return error.localizedDescription
+        }
+        guard let view = target else {
             if let webviewId {
                 return "(webview not found: \(webviewId). Call op='targets' first.)"
             }
             return "(no web view found on screen)"
         }
-        switch await evaluate(makeScript(view), on: view, pageWorld: pageWorld) {
+        guard !Task.isCancelled else {
+            return "Inspection denied: cancelled."
+        }
+        let result = await evaluate(makeScript(view), on: view, pageWorld: pageWorld)
+        guard !Task.isCancelled, environment.includes(view, context: context) else {
+            return "Inspection denied: cancelled or target left scope."
+        }
+        switch result {
         case .value(let text):
             return text
         case .failure(let message):
@@ -167,8 +229,13 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     // MARK: - WebInspectProvider
 
     @MainActor
-    public func targets() async -> String {
-        let views = allWebViews()
+    public func targets(context: HostInspectionContext = .init()) async -> String {
+        let views: [WKWebView]
+        do {
+            views = try allWebViews(context: context)
+        } catch {
+            return error.localizedDescription
+        }
         guard !views.isEmpty else {
             return "(no web view found on screen)"
         }
@@ -179,10 +246,13 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
             let host = Self.owningController(view)
             var parts: [String] = []
             parts.append(id)
-            parts.append(isOnScreen(view) ? "onscreen" : "offscreen")
+            parts.append(WebInspectVisibility.isVisible(view, context: context, environment: environment) ? "onscreen" : "offscreen")
             parts.append("rect=\(Int(frame.origin.x)),\(Int(frame.origin.y)),\(Int(frame.width)),\(Int(frame.height))")
             parts.append("class=\(String(describing: type(of: view)))")
-            parts.append("host=\(host.map { String(describing: type(of: $0)) } ?? "-")")
+            let hostName = host.map { controller in
+                String(describing: type(of: controller))
+            } ?? "-"
+            parts.append("host=\(hostName)")
             parts.append("loading=\(view.isLoading)")
             parts.append("title=\(view.title ?? "-")")
             parts.append("url=\(view.url?.absoluteString ?? "-")")
@@ -191,34 +261,64 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
         return lines.joined(separator: "\n")
     }
 
-    public func domSummary(webviewId: String?, path: String?, maxNodes: Int) async -> String {
+    public func domSummary(webviewId: String?, path: String?, maxNodes: Int, context: HostInspectionContext = .init()) async -> String {
         let root = Self.jsString(path)
-        return await perform(webviewId: webviewId) { _ in
+        return await perform(webviewId: webviewId, context: context) { _ in
             Self.script("return A.summary(\(root), \(maxNodes));")
         }
     }
 
-    public func domQuery(webviewId: String?, selector: String?, path: String?) async -> String {
+    public func domQuery(webviewId: String?, selector: String?, path: String?, context: HostInspectionContext = .init()) async -> String {
         let sel = Self.jsString(selector)
         let root = Self.jsString(path)
-        return await perform(webviewId: webviewId) { _ in
+        return await perform(webviewId: webviewId, context: context) { _ in
             Self.script("return A.query(\(sel), \(root));")
         }
     }
 
-    public func whyHidden(webviewId: String?, selector: String?, path: String?) async -> String {
+    public func whyHidden(webviewId: String?, selector: String?, path: String?, context: HostInspectionContext = .init()) async -> String {
         let sel = Self.jsString(selector)
         let root = Self.jsString(path)
-        return await perform(webviewId: webviewId) { _ in
+        return await perform(webviewId: webviewId, context: context) { _ in
             Self.script("return A.whyHidden(\(sel), \(root));")
         }
     }
 
-    public func probe(webviewId: String?, x: Double, y: Double) async -> String {
-        await perform(webviewId: webviewId) { view in
-            // 传进来的是 view 坐标（pt），JS 侧按 innerWidth / boundsWidth 换算成 CSS px。
-            // 双指缩放过的页面这个换算是近似值，结论里会带上换算比例。
-            Self.script("return A.probe(\(x), \(y), \(Double(view.bounds.width)));")
+    @MainActor
+    public func highlight(webviewId: String?, selector: String?, path: String?, context: HostInspectionContext = .init()) async -> String {
+        do {
+            guard !Task.isCancelled, let view = try resolveTarget(webviewId, context: context) else {
+                return "(no web view found on screen)"
+            }
+            guard WebInspectVisibility.isVisible(view, context: context, environment: environment), !view.isLoading else {
+                return "Inspection denied: highlight requires a visible, loaded web view in the active scene."
+            }
+            let id = identifier(for: view)
+            return await WebInspectHighlight.controller(for: view).start(
+                selector: selector, path: path, context: context, environment: environment, webviewId: id
+            )
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    @MainActor
+    public func clearHighlight(webviewId: String?, context: HostInspectionContext = .init()) async -> String {
+        do {
+            guard !Task.isCancelled, let view = try resolveTarget(webviewId, context: context) else {
+                return "(no web view found on screen)"
+            }
+            WebInspectHighlight.existingController(for: view)?.stop()
+            return "OK. highlight cleared for \(identifier(for: view))."
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    public func probe(webviewId: String?, x: Double, y: Double, context: HostInspectionContext = .init()) async -> String {
+        await perform(webviewId: webviewId, context: context) { view in
+            let inset = view.scrollView.adjustedContentInset
+            return Self.script("return A.probe(\(x - Double(inset.left)), \(y - Double(inset.top)), \(Double(view.bounds.width - inset.left - inset.right)));")
         }
     }
 
@@ -235,8 +335,8 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
         return nil
     }
 
-    public func pageSource(webviewId: String?, kind: String, maxBytes: Int) async -> String {
-        await perform(webviewId: webviewId) { _ in
+    public func pageSource(webviewId: String?, kind: String, maxBytes: Int, context: HostInspectionContext = .init()) async -> String {
+        await perform(webviewId: webviewId, context: context) { _ in
             if kind == "resources" {
                 return Self.script("return A.resources();")
             }
@@ -244,10 +344,10 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
         }
     }
 
-    public func eval(webviewId: String?, script: String, inPageWorld: Bool) async -> String {
-        // 内部阶段放开任意 JS：不做语法/能力过滤，只保证结果可读（对象走 JSON.stringify）。
+    public func eval(webviewId: String?, script: String, inPageWorld: Bool, context: HostInspectionContext = .init()) async -> String {
+        // 任意 JS 的授权在工具执行边界；直接调用 provider 的宿主自行负责授权。
         let wrapped = "(function(){\nvar __r = (function(){\n\(script)\n})();\ntry {\nreturn typeof __r === 'string' ? __r : JSON.stringify(__r);\n} catch (e) {\nreturn String(__r);\n}\n})()"
-        return await perform(webviewId: webviewId, pageWorld: inPageWorld) { _ in
+        return await perform(webviewId: webviewId, context: context, pageWorld: inPageWorld) { _ in
             wrapped
         }
     }
@@ -255,17 +355,19 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     // MARK: - console 采集
 
     @MainActor
-    public func consoleStart(webviewId: String?) async -> String {
-        guard let view = resolveTarget(webviewId) else {
+    public func consoleStart(webviewId: String?, context: HostInspectionContext = .init()) async -> String {
+        guard !Task.isCancelled, let view = try? resolveTarget(webviewId, context: context) else {
             return "(no web view found on screen)"
         }
         let id = identifier(for: view)
         let controller = view.configuration.userContentController
         // 重复 start 幂等：先摘旧 handler 再装，避免 "already has handler" 抛异常。
+        Self.handlers[id]?.isActive = false
         controller.removeScriptMessageHandler(forName: Self.handlerName)
-        let handler = ConsoleHandler(webviewId: id, store: Self.consoleStore)
+        let handler = ConsoleHandler(webviewId: id, store: Self.consoleStore, controller: controller)
         controller.add(handler, name: Self.handlerName)
         Self.handlers[id] = handler
+        ownedHandlers[id] = handler
         if Self.installedScripts.contains(id) == false {
             let userScript = WKUserScript(source: Self.consoleProbeJS,
                                           injectionTime: .atDocumentStart,
@@ -274,7 +376,11 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
             Self.installedScripts.insert(id)
         }
         // 当前已经加载完的页面不会再跑 documentStart 脚本，所以立刻在页面 world 里补装一次。
-        switch await evaluate(Self.consoleProbeJS, on: view, pageWorld: true) {
+        let result = await evaluate(Self.consoleProbeJS, on: view, pageWorld: true)
+        guard handler.isActive, Self.handlers[id] === handler, !Task.isCancelled else {
+            return "Inspection denied: console capture cancelled."
+        }
+        switch result {
         case .value:
             return "OK. console capture armed for \(id). Only logs produced from now on are captured; "
                 + "reproduce the problem, then call op='console_read'."
@@ -284,8 +390,8 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     }
 
     @MainActor
-    public func consoleRead(webviewId: String?, limit: Int, sinceSeq: UInt64?) async -> String {
-        guard let view = resolveTarget(webviewId) else {
+    public func consoleRead(webviewId: String?, limit: Int, sinceSeq: UInt64?, context: HostInspectionContext = .init()) async -> String {
+        guard let view = try? resolveTarget(webviewId, context: context) else {
             return "(no web view found on screen)"
         }
         let id = identifier(for: view)
@@ -303,13 +409,15 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     }
 
     @MainActor
-    public func consoleStop(webviewId: String?) async -> String {
-        guard let view = resolveTarget(webviewId) else {
+    public func consoleStop(webviewId: String?, context: HostInspectionContext = .init()) async -> String {
+        guard !Task.isCancelled, let view = try? resolveTarget(webviewId, context: context) else {
             return "(no web view found on screen)"
         }
         let id = identifier(for: view)
+        Self.handlers[id]?.isActive = false
         view.configuration.userContentController.removeScriptMessageHandler(forName: Self.handlerName)
         Self.handlers[id] = nil
+        ownedHandlers[id] = nil
         // 注入的代理函数留在页面里（不能只摘单条 user script，而 removeAllUserScripts 会清掉宿主的脚本）；
         // 它的 postMessage 已包在 try/catch 里，handler 摘掉后就是空转，下次页面加载自然消失。
         return "OK. console capture stopped for \(id) (buffered records kept; probe goes idle)."
@@ -362,18 +470,24 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
     @MainActor private static var handlers: [String: ConsoleHandler] = [:]
     @MainActor private static var installedScripts: Set<String> = []
 
-    final class ConsoleHandler: NSObject, WKScriptMessageHandler {
+    @MainActor final class ConsoleHandler: NSObject, WKScriptMessageHandler {
         private let webviewId: String
         private let store: ConsoleStore
+        weak var controller: WKUserContentController?
+        var isActive = true
 
-        init(webviewId: String, store: ConsoleStore) {
+        init(webviewId: String, store: ConsoleStore, controller: WKUserContentController) {
             self.webviewId = webviewId
             self.store = store
+            self.controller = controller
             super.init()
         }
 
         func userContentController(_ userContentController: WKUserContentController,
                                    didReceive message: WKScriptMessage) {
+            guard isActive else {
+                return
+            }
             guard let body = message.body as? [String: Any] else {
                 store.append(webviewId: webviewId, line: "log \(message.body)")
                 return
@@ -393,24 +507,31 @@ public final class DefaultWebInspectProvider: WebInspectProvider, @unchecked Sen
 
     // MARK: - 脚本组装
 
-    private static func jsString(_ value: String?) -> String {
+    static func jsString(_ value: String?) -> String {
         guard let value else {
             return "null"
         }
-        var escaped = value.replacingOccurrences(of: "\\", with: "\\\\")
-        escaped = escaped.replacingOccurrences(of: "\"", with: "\\\"")
-        escaped = escaped.replacingOccurrences(of: "\n", with: "\\n")
-        return "\"\(escaped)\""
+        // JSON encoding also covers CR, tabs and other controls; selectors never become JS code.
+        guard let data = try? JSONEncoder().encode(value), let encoded = String(data: data, encoding: .utf8) else {
+            return "null"
+        }
+        return encoded
     }
 
     /// 探针库每次随查询一起下发（几 KB 的解析成本可忽略），因此不需要「是否已注入」的状态机，
     /// 也不会在页面里留下任何常驻代码。
-    private static func script(_ call: String) -> String {
-        "(function(){\n" + probeJS + "\n" + call + "\n})()"
+    static func script(_ call: String) -> String {
+        "(function(){\ntry {\n" + probeJS + "\n" + call
+            + "\n} catch (e) {\nreturn 'JS error: ' + e.message;\n}\n})()"
+    }
+
+    static func highlightScript(_ call: String) -> String {
+        "(function(){\ntry {\n" + probeJSCore + probeJSGeometry + "\n" + call
+            + "\n} catch (e) {\nreturn 'JS error: ' + e.message;\n}\n})()"
     }
 
     static var probeJS: String {
-        probeJSCore + probeJSSummary + probeJSWalk + probeJSDetail + probeJSWhy + probeJSMisc
+        probeJSCore + probeJSSummary + probeJSWalk + probeJSDetail + probeJSWhy + probeJSMisc + probeJSGeometry
     }
 
     private static let probeJSCore = #"""
@@ -434,13 +555,23 @@ A.text = function (el) {
     return t;
 };
 A.path = function (el) {
-    var parts = [];
-    var cur = el;
-    while (cur && cur !== document.body && cur.parentElement) {
-        parts.unshift(Array.prototype.indexOf.call(cur.parentElement.children, cur));
-        cur = cur.parentElement;
+    var doc = el.ownerDocument;
+    var prefix = doc === document ? '' : A.path(doc.defaultView.frameElement) + '/frame';
+    if (el === doc.body) {
+        return prefix;
     }
-    return parts.join('/');
+    if (el === doc.documentElement) {
+        return (prefix ? prefix + '/' : '') + 'html';
+    }
+    if (el.nodeType === 11 && el.host) {
+        return A.path(el.host) + '/shadow';
+    }
+    var parent = el.parentNode;
+    if (!parent || !parent.children) {
+        throw new Error('Unsupported detached node path');
+    }
+    var base = A.path(parent);
+    return (base ? base + '/' : '') + Array.prototype.indexOf.call(parent.children, el);
 };
 A.node = function (path) {
     if (!path) {
@@ -452,8 +583,44 @@ A.node = function (path) {
         if (parts[i] === '') {
             continue;
         }
-        var idx = parseInt(parts[i], 10);
-        if (!cur || !cur.children || isNaN(idx) || idx >= cur.children.length) {
+        if (!cur) {
+            return null;
+        }
+        if (parts[i] === 'frame') {
+            if (cur.tagName !== 'IFRAME' && cur.tagName !== 'FRAME') {
+                throw new Error('frame path segment requires an iframe');
+            }
+            var doc;
+            try {
+                doc = cur.contentDocument;
+                if (!doc) {
+                    throw new Error('inaccessible');
+                }
+            } catch (e) {
+                throw new Error('Unsupported cross-origin or sandboxed iframe');
+            }
+            if (!doc.body) {
+                throw new Error('Iframe document body is not ready');
+            }
+            cur = doc.body;
+            continue;
+        }
+        if (parts[i] === 'shadow') {
+            if (!cur.shadowRoot) {
+                throw new Error('Unsupported closed or absent shadow root');
+            }
+            cur = cur.shadowRoot;
+            continue;
+        }
+        if (parts[i] === 'html') {
+            cur = cur.ownerDocument.documentElement;
+            continue;
+        }
+        if (!/^\d+$/.test(parts[i])) {
+            throw new Error('Invalid path segment: ' + parts[i]);
+        }
+        var idx = Number(parts[i]);
+        if (!cur.children || idx >= cur.children.length) {
             return null;
         }
         cur = cur.children[idx];
@@ -462,9 +629,14 @@ A.node = function (path) {
 };
 A.resolve = function (sel, path) {
     if (sel) {
-        return document.querySelector(sel);
+        var root = path == null ? document : A.node(path);
+        return root ? root.querySelector(sel) : null;
     }
-    return A.node(path);
+    var node = A.node(path);
+    if (node && node.nodeType !== 1) {
+        throw new Error('Path selects a shadow root; add a child index or selector');
+    }
+    return node;
 };
 
 """#
@@ -488,7 +660,8 @@ A.rectOf = function (el) {
     return Math.round(r.left) + ',' + Math.round(r.top) + ',' + Math.round(r.width) + ',' + Math.round(r.height);
 };
 A.flags = function (el) {
-    var cs = getComputedStyle(el);
+    var win = el.ownerDocument.defaultView;
+    var cs = win.getComputedStyle(el);
     var r = el.getBoundingClientRect();
     var f = [];
     if (cs.display === 'none') {
@@ -503,7 +676,7 @@ A.flags = function (el) {
     if (r.width < 1 || r.height < 1) {
         f.push('zero-size');
     }
-    if (r.bottom < 0 || r.right < 0 || r.top > window.innerHeight || r.left > window.innerWidth) {
+    if (r.bottom < 0 || r.right < 0 || r.top > win.innerHeight || r.left > win.innerWidth) {
         f.push('outside-viewport');
     }
     return f;
@@ -532,11 +705,30 @@ A.emit = function (el, depth, lines) {
     lines.push(line);
 };
 A.walk = function (el, depth, lines, count, maxNodes) {
+    if (el.nodeType === 11) {
+        for (var s = 0; s < el.children.length && count.n < maxNodes; s++) {
+            A.walk(el.children[s], depth, lines, count, maxNodes);
+        }
+        return;
+    }
     if (A.SKIP.indexOf(el.tagName.toLowerCase()) >= 0) {
         return;
     }
     A.emit(el, depth, lines);
     count.n += 1;
+    if (el.shadowRoot) {
+        lines.push(A.indent(depth + 1) + 'open shadow root: path=' + A.path(el) + '/shadow');
+    }
+    if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+        try {
+            if (!el.contentDocument) {
+                throw new Error('cross-origin');
+            }
+            lines.push(A.indent(depth + 1) + 'same-origin iframe: path=' + A.path(el) + '/frame');
+        } catch (e) {
+            lines.push(A.indent(depth + 1) + 'unsupported cross-origin or sandboxed iframe');
+        }
+    }
     var f = A.flags(el);
     if (f.indexOf('display:none') >= 0 || depth >= 14) {
         var deep = A.deep(el);
@@ -570,7 +762,7 @@ A.summary = function (rootPath, maxNodes) {
         n: 0
     };
     A.walk(root, 0, lines, count, maxNodes);
-    return A.head() + '\n' + lines.join('\n');
+    return A.head() + '\nrect coordinates: CSS px in each node owner-document layout viewport\n' + lines.join('\n');
 };
 
 """#
@@ -584,10 +776,18 @@ A.query = function (sel, path) {
     if (!el) {
         return '(no element for ' + (sel || path) + ')';
     }
-    var cs = getComputedStyle(el);
+    var win = el.ownerDocument.defaultView;
+    var cs = win.getComputedStyle(el);
     var out = [];
     out.push('node ' + A.label(el) + ' path=' + A.path(el));
     out.push(A.head());
+    var attrs = {};
+    for (var a = 0; a < el.attributes.length; a++) {
+        attrs[el.attributes[a].name] = el.attributes[a].value;
+    }
+    out.push('attributes=' + JSON.stringify(attrs));
+    out.push('coordinateSpace: CSS px in owner-document layout viewport; rect is getBoundingClientRect, not screen pt'
+        + '; documentURL=' + el.ownerDocument.URL);
     out.push('rect=' + A.rectOf(el) + ' flags=[' + A.flags(el).join(',') + ']');
     out.push('client=' + el.clientWidth + 'x' + el.clientHeight
         + ' scroll=' + el.scrollWidth + 'x' + el.scrollHeight
@@ -606,10 +806,10 @@ A.query = function (sel, path) {
     var cur = el.parentElement;
     while (cur && chain.length < 10) {
         var cr = cur.getBoundingClientRect();
-        var ccs = getComputedStyle(cur);
+        var ccs = win.getComputedStyle(cur);
         chain.push(A.label(cur) + ' w=' + Math.round(cr.width) + ' overflow=' + ccs.overflow + ' path=' + A.path(cur));
-        if (!narrow && Math.round(cr.width) < window.innerWidth - 1) {
-            narrow = A.label(cur) + ' w=' + Math.round(cr.width) + ' < viewport ' + window.innerWidth
+        if (!narrow && Math.round(cr.width) < win.innerWidth - 1) {
+            narrow = A.label(cur) + ' w=' + Math.round(cr.width) + ' < viewport ' + win.innerWidth
                 + ' (width:' + ccs.width + ' maxWidth:' + ccs.maxWidth + ' padding=' + ccs.paddingLeft + '/' + ccs.paddingRight + ') path=' + A.path(cur);
         }
         cur = cur.parentElement;
@@ -629,7 +829,8 @@ A.whyHidden = function (sel, path) {
         return '(no element for ' + (sel || path) + ')';
     }
     var reasons = [];
-    var cs = getComputedStyle(el);
+    var win = el.ownerDocument.defaultView;
+    var cs = win.getComputedStyle(el);
     var r = el.getBoundingClientRect();
     if (cs.display === 'none') {
         reasons.push('self display:none');
@@ -643,12 +844,12 @@ A.whyHidden = function (sel, path) {
     if (r.width < 1 || r.height < 1) {
         reasons.push('self zero size (rect=' + A.rectOf(el) + ' width:' + cs.width + ' height:' + cs.height + ')');
     }
-    if (r.bottom < 0 || r.right < 0 || r.top > window.innerHeight || r.left > window.innerWidth) {
-        reasons.push('outside viewport (rect=' + A.rectOf(el) + ' viewport=' + window.innerWidth + 'x' + window.innerHeight + ') — may just need scrolling');
+    if (r.bottom < 0 || r.right < 0 || r.top > win.innerHeight || r.left > win.innerWidth) {
+        reasons.push('outside viewport (rect=' + A.rectOf(el) + ' viewport=' + win.innerWidth + 'x' + win.innerHeight + ') — may just need scrolling');
     }
     var cur = el.parentElement;
     while (cur) {
-        var ccs = getComputedStyle(cur);
+        var ccs = win.getComputedStyle(cur);
         var crect = cur.getBoundingClientRect();
         if (ccs.display === 'none') {
             reasons.push('ancestor ' + A.label(cur) + ' display:none path=' + A.path(cur));
@@ -666,26 +867,30 @@ A.whyHidden = function (sel, path) {
         cur = cur.parentElement;
     }
     if (r.width > 0 && r.height > 0) {
-        var cx = Math.min(Math.max(r.left + r.width / 2, 1), window.innerWidth - 1);
-        var cy = Math.min(Math.max(r.top + r.height / 2, 1), window.innerHeight - 1);
-        var top = document.elementFromPoint(cx, cy);
+        var cx = Math.min(Math.max(r.left + r.width / 2, 1), win.innerWidth - 1);
+        var cy = Math.min(Math.max(r.top + r.height / 2, 1), win.innerHeight - 1);
+        var root = el.getRootNode();
+        var top = root.elementFromPoint ? root.elementFromPoint(cx, cy) : el.ownerDocument.elementFromPoint(cx, cy);
         if (top && top !== el && !el.contains(top) && !top.contains(el)) {
-            reasons.push('covered at its center by ' + A.label(top) + ' (z-index ' + getComputedStyle(top).zIndex + ') path=' + A.path(top));
+            reasons.push('covered at its center by ' + A.label(top) + ' (z-index ' + win.getComputedStyle(top).zIndex + ') path=' + A.path(top));
         }
     }
     if (reasons.length === 0) {
         reasons.push('nothing hides it: rect=' + A.rectOf(el) + ', it is laid out and visible. Check that this is the node the user means, or whether it is scrolled out of the visible area.');
     }
-    return 'node ' + A.label(el) + ' path=' + A.path(el) + '\n' + A.head() + '\n- ' + reasons.join('\n- ');
+    return 'node ' + A.label(el) + ' path=' + A.path(el) + '\n' + A.head()
+        + '\ncoordinateSpace: owner-document CSS px; occlusion checks are local to this document/root'
+        + '\n- ' + reasons.join('\n- ');
 };
 
 """#
 
     private static let probeJSMisc = #"""
 A.probe = function (x, y, boundsWidth) {
-    var ratio = (window.innerWidth && boundsWidth) ? (window.innerWidth / boundsWidth) : 1;
-    var cx = x * ratio;
-    var cy = y * ratio;
+    var vp = window.visualViewport;
+    var ratio = ((vp ? vp.width : window.innerWidth) / boundsWidth);
+    var cx = x * ratio + (vp ? vp.offsetLeft : 0);
+    var cy = y * ratio + (vp ? vp.offsetTop : 0);
     var el = document.elementFromPoint(cx, cy);
     if (!el) {
         return '(no element at view point ' + x + ',' + y + ' → css ' + Math.round(cx) + ',' + Math.round(cy) + ')';
@@ -725,6 +930,98 @@ A.resources = function () {
         out.push('(performance API unavailable: ' + e + ')');
     }
     return out.join('\n');
+};
+
+"""#
+
+    /// Read-only geometry, shared by the initial selection and subsequent native redraws.
+    private static let probeJSGeometry = #"""
+A.parent = function (el) {
+    return el.parentElement || (el.getRootNode && el.getRootNode().host) || null;
+};
+A.geometry = function (el) {
+    if (!el || !el.isConnected) {
+        throw new Error('Selected node is detached');
+    }
+    var r = el.getBoundingClientRect();
+    var box = {left: r.left, top: r.top, right: r.right, bottom: r.bottom};
+    var clip = function (l, t, r, b) {
+        box.left = Math.max(box.left, l);
+        box.top = Math.max(box.top, t);
+        box.right = Math.min(box.right, r);
+        box.bottom = Math.min(box.bottom, b);
+    };
+    var current = el;
+    var doc = el.ownerDocument;
+    while (true) {
+        var win = doc.defaultView;
+        for (var p = current; p; p = A.parent(p)) {
+            var cs = win.getComputedStyle(p);
+            if (cs.display === 'none' || cs.visibility !== 'visible' || Number(cs.opacity) <= 0.01) {
+                throw new Error('Selected node or ancestor is hidden');
+            }
+            if (p !== current && /(hidden|clip|scroll|auto)/.test(cs.overflow + cs.overflowX + cs.overflowY)) {
+                var pr = p.getBoundingClientRect();
+                clip(pr.left, pr.top, pr.right, pr.bottom);
+            }
+        }
+        if (doc === document) {
+            break;
+        }
+        clip(0, 0, win.innerWidth, win.innerHeight);
+        var frame = win.frameElement;
+        if (!frame || frame.contentDocument !== doc || !frame.isConnected) {
+            throw new Error('Selected iframe navigated or detached');
+        }
+        // Axis-aligned scale/translation are supported; do not invent a rect for rotated frames.
+        for (var f = frame; f; f = A.parent(f)) {
+            var transform = f.ownerDocument.defaultView.getComputedStyle(f).transform;
+            if (transform !== 'none') {
+                var m = new DOMMatrixReadOnly(transform);
+                if (!m.is2D || m.b !== 0 || m.c !== 0 || m.a <= 0 || m.d <= 0) {
+                    throw new Error('Unsupported rotated, skewed or perspective iframe geometry');
+                }
+            }
+        }
+        var fr = frame.getBoundingClientRect();
+        var fs = frame.ownerDocument.defaultView.getComputedStyle(frame);
+        var sx = fr.width / frame.offsetWidth;
+        var sy = fr.height / frame.offsetHeight;
+        var left = fr.left + (frame.clientLeft + parseFloat(fs.paddingLeft)) * sx;
+        var top = fr.top + (frame.clientTop + parseFloat(fs.paddingTop)) * sy;
+        box = {left: left + box.left * sx, top: top + box.top * sy,
+            right: left + box.right * sx, bottom: top + box.bottom * sy};
+        current = frame;
+        doc = frame.ownerDocument;
+    }
+    var vp = window.visualViewport;
+    var vx = vp ? vp.offsetLeft : 0;
+    var vy = vp ? vp.offsetTop : 0;
+    var vw = vp ? vp.width : window.innerWidth;
+    var vh = vp ? vp.height : window.innerHeight;
+    clip(vx, vy, vx + vw, vy + vh);
+    if (box.right <= box.left || box.bottom <= box.top || vw <= 0) {
+        throw new Error('Selected node is outside the visible viewport');
+    }
+    return {x: (box.left - vx) / vw, y: (box.top - vy) / vw,
+        width: (box.right - box.left) / vw, height: (box.bottom - box.top) / vw,
+        path: A.path(el), coordinateSpace: 'normalized top visual viewport; all axes divided by viewport width'};
+};
+A.selectHighlight = function (token, sel, path) {
+    var el = A.resolve(sel, path);
+    if (!el) {
+        throw new Error('No element for highlight');
+    }
+    var geometry = A.geometry(el);
+    window.__appagentHighlight = {token: token, node: el};
+    return JSON.stringify(geometry);
+};
+A.highlightGeometry = function (token) {
+    var state = window.__appagentHighlight;
+    if (!state || state.token !== token) {
+        throw new Error('Highlight selection expired');
+    }
+    return JSON.stringify(A.geometry(state.node));
 };
 
 """#

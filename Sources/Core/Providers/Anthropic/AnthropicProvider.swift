@@ -162,13 +162,22 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
                             maxTokens: requestMaxTokens,
                             configuration: configuration
                         )
-                        Logger.info("Anthropic", "streamCompletion: starting, model=\(modelId)")
+                        let trace = ProviderWireTrace(
+                            requestID: ModelRequestLogContext.requestID ?? UUID().uuidString,
+                            apiProtocol: configuration.apiProtocol,
+                            secrets: [configuration.apiKey] + Array(configuration.customHeaders.values)
+                        )
+                        trace.record(
+                            phase: "request",
+                            payload: String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+                        )
 
                         // 最低支持 iOS 15 / macOS 12，`URLSession.bytes` 一定可用——
                         // 原来的 iOS 13/14 delegate 降级路径已随最低版本上调删除。
                         try await self.streamWithBytes(
                             request: request,
                             apiProtocol: configuration.apiProtocol,
+                            trace: trace,
                             continuation: continuation
                         )
                     }
@@ -187,6 +196,26 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
     private func streamWithBytes(
         request: URLRequest,
         apiProtocol: APIProtocol,
+        trace: ProviderWireTrace,
+        continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
+    ) async throws {
+        do {
+            try await receiveResponse(
+                request: request,
+                apiProtocol: apiProtocol,
+                trace: trace,
+                continuation: continuation
+            )
+        } catch {
+            trace.record(phase: "stream_error", payload: String(describing: error))
+            throw error
+        }
+    }
+
+    private func receiveResponse(
+        request: URLRequest,
+        apiProtocol: APIProtocol,
+        trace: ProviderWireTrace,
         continuation: AsyncThrowingStream<ProviderStreamEvent, Error>.Continuation
     ) async throws {
         let (bytes, response) = try await session.bytes(for: request)
@@ -194,57 +223,36 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
             continuation.finish(throwing: ModelError.invalidResponse)
             return
         }
-        Logger.debug("Anthropic", "httpResponse: statusCode=\(httpResponse.statusCode)")
+        // 只记录用于排查的响应元信息，认证头、Cookie 和 URL query 不进入日志。
+        trace.record(
+            phase: "http_response",
+            payload: "status=\(httpResponse.statusCode) contentType=\(httpResponse.mimeType ?? "-") requestID=\(httpResponse.value(forHTTPHeaderField: "x-request-id") ?? "-")"
+        )
 
         if !(200..<300).contains(httpResponse.statusCode) {
             var body = ""
-            for try await line in bytes.lines { body += line }
-            Logger.error("Anthropic", "httpError: statusCode=\(httpResponse.statusCode), body=\(body.prefix(500))")
+            var sequence = 0
+            for try await line in bytes.lines {
+                sequence += 1
+                trace.record(phase: "http_error_body", sequence: sequence, payload: line)
+                body += line
+            }
             continuation.finish(throwing: ModelError.httpError(
                 statusCode: httpResponse.statusCode, body: body))
             return
         }
 
-        var parser = SSEParser()
-        var anthropicToolCalls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
-        var openAIToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
-
+        var decoder = ProviderSSEStreamDecoder(apiProtocol: apiProtocol, trace: trace)
         for try await line in bytes.lines {
             try Task.checkCancellation()
-            if let sseEvent = parser.processLine(line) {
-                // 响应侧的原始 SSE 也要落日志：请求体一直有记录、回来的东西却没有，
-                // 于是「模型说 stop=tool_calls 但我们解析出 0 个调用」这种问题在诊断包里
-                // 查不到根因（实测遇到过，只能靠猜端点的 tool_calls 格式）。截断防刷爆。
-                Logger.debug("Anthropic", "sse<< \(sseEvent.data.prefix(800))")
-                if let error = parseProviderSSEErrorPayload(sseEvent.data) {
-                    Logger.error("Anthropic", "sseError: \(error.localizedDescription)")
-                    throw error
-                }
-                for providerEvent in parseProviderSSEEvent(
-                    apiProtocol: apiProtocol,
-                    sseEvent: sseEvent,
-                    anthropicToolCalls: &anthropicToolCalls,
-                    openAIToolCalls: &openAIToolCalls) {
-                    continuation.yield(providerEvent)
-                }
+            for event in try decoder.processLine(line) {
+                continuation.yield(event)
             }
         }
-
-        // Flush remaining SSE data
-        if let sseEvent = parser.flush() {
-            if let error = parseProviderSSEErrorPayload(sseEvent.data) {
-                Logger.error("Anthropic", "sseError: \(error.localizedDescription)")
-                throw error
-            }
-            for providerEvent in parseProviderSSEEvent(
-                apiProtocol: apiProtocol,
-                sseEvent: sseEvent,
-                anthropicToolCalls: &anthropicToolCalls,
-                openAIToolCalls: &openAIToolCalls) {
-                continuation.yield(providerEvent)
-            }
+        for event in try decoder.finish() {
+            continuation.yield(event)
         }
-
+        trace.record(phase: "eof", payload: "lines=\(decoder.lineCount)")
         continuation.finish()
     }
 
@@ -359,17 +367,6 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        // Log the full request details
-        Logger.debug("Anthropic", "buildRequest: url=\(url.absoluteString), model=\(modelId), maxTokens=\(maxTokens), messageCount=\(messages.count), systemSegments=\(system.count), toolCount=\(tools.count)")
-        if Logger.isEnabled {
-            if let bodyData = request.httpBody,
-               let jsonObj = try? JSONSerialization.jsonObject(with: bodyData),
-               let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys]),
-               let prettyStr = String(data: prettyData, encoding: .utf8) {
-                Logger.debug("Anthropic", "buildRequest body:\n\(prettyStr)")
-            }
-        }
-
         return request
     }
 
@@ -420,16 +417,6 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        Logger.debug("Anthropic", "buildOpenAIChatCompletionsRequest: url=\(url.absoluteString), model=\(modelId), maxTokens=\(maxTokens), messageCount=\(messages.count), systemSegments=\(system.count), toolCount=\(tools.count)")
-        if Logger.isEnabled {
-            if let bodyData = request.httpBody,
-               let jsonObj = try? JSONSerialization.jsonObject(with: bodyData),
-               let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys]),
-               let prettyStr = String(data: prettyData, encoding: .utf8) {
-                Logger.debug("Anthropic", "buildOpenAIChatCompletionsRequest body:\n\(prettyStr)")
-            }
-        }
 
         return request
     }
@@ -487,17 +474,74 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        Logger.debug("Anthropic", "buildOpenAIResponsesRequest: url=\(url.absoluteString), model=\(modelId), maxTokens=\(maxTokens), messageCount=\(messages.count), systemSegments=\(system.count), toolCount=\(tools.count)")
-        if Logger.isEnabled {
-            if let bodyData = request.httpBody,
-               let jsonObj = try? JSONSerialization.jsonObject(with: bodyData),
-               let prettyData = try? JSONSerialization.data(withJSONObject: jsonObj, options: [.prettyPrinted, .sortedKeys]),
-               let prettyStr = String(data: prettyData, encoding: .utf8) {
-                Logger.debug("Anthropic", "buildOpenAIResponsesRequest body:\n\(prettyStr)")
-            }
-        }
-
         return request
+    }
+}
+
+/// 记录应用层报文；不记录认证头。完整 payload 分块后仍走既有日志轮转与导出。
+struct ProviderWireTrace: Sendable {
+    let requestID: String
+    let apiProtocol: APIProtocol
+    let secrets: [String]
+
+    func record(phase: String, sequence: Int = 0, payload: @autoclosure () -> String) {
+        guard Logger.isEnabled, Logger.minimumLevel <= .debug else {
+            return
+        }
+        Logger.diagnosticPayload(
+            "Anthropic",
+            metadata: "wire request=\(requestID) protocol=\(apiProtocol.rawValue) phase=\(phase) seq=\(sequence) time=\(AppAgentRunLog.stamp(Date()))",
+            payload: payload(),
+            secrets: secrets
+        )
+    }
+}
+
+/// 先记录每条收到的文本，再解析；未知格式、解码失败和 EOF 尾帧也有原文可查。
+struct ProviderSSEStreamDecoder {
+    let apiProtocol: APIProtocol
+    let trace: ProviderWireTrace
+    private var parser = SSEParser()
+    private var anthropicToolCalls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
+    private var openAIToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
+    private(set) var lineCount = 0
+
+    init(apiProtocol: APIProtocol, trace: ProviderWireTrace) {
+        self.apiProtocol = apiProtocol
+        self.trace = trace
+    }
+
+    mutating func processLine(_ line: String) throws -> [ProviderStreamEvent] {
+        lineCount += 1
+        trace.record(phase: "response_line", sequence: lineCount, payload: line)
+        guard let event = parser.processLine(line) else {
+            return []
+        }
+        return try decode(event, source: "sse")
+    }
+
+    mutating func finish() throws -> [ProviderStreamEvent] {
+        guard let event = parser.flush() else {
+            return []
+        }
+        return try decode(event, source: "sse_flush")
+    }
+
+    private mutating func decode(_ event: SSEEvent, source: String) throws -> [ProviderStreamEvent] {
+        // 原文已在 response_line 中；这里仅标明实际采用的解析路径。
+        trace.record(phase: source, sequence: lineCount, payload: "event=\(event.event)")
+        if let error = parseProviderSSEErrorPayload(event.data, eventType: event.event) {
+            anthropicToolCalls.removeAll()
+            openAIToolCalls.removeAll()
+            trace.record(phase: "sse_error", sequence: lineCount, payload: error.localizedDescription)
+            throw error
+        }
+        return try parseProviderSSEEvent(
+            apiProtocol: apiProtocol,
+            sseEvent: event,
+            anthropicToolCalls: &anthropicToolCalls,
+            openAIToolCalls: &openAIToolCalls
+        )
     }
 }
 
@@ -506,36 +550,38 @@ private func parseProviderSSEEvent(
     sseEvent: SSEEvent,
     anthropicToolCalls: inout [Int: (id: String, name: String, jsonAccumulator: String)],
     openAIToolCalls: inout [Int: OpenAIChatCompletionsMapper.ActiveToolCall]
-) -> [ProviderStreamEvent] {
+) throws -> [ProviderStreamEvent] {
     switch apiProtocol {
     case .anthropicMessages:
         return AnthropicMapper.parseSSEEvent(sseEvent, activeToolCalls: &anthropicToolCalls)
     case .openaiCompletions:
         return OpenAIChatCompletionsMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
     case .openaiResponses:
-        return OpenAIResponsesMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
+        return try OpenAIResponsesMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
     default:
         return []
     }
 }
 
-private struct ProviderSSEErrorEnvelope: Decodable {
-    let error: ProviderSSEError?
-}
-
-private struct ProviderSSEError: Decodable {
-    let type: String?
-    let message: String?
-}
-
-func parseProviderSSEErrorPayload(_ payload: String) -> ModelError? {
+func parseProviderSSEErrorPayload(_ payload: String, eventType: String? = nil) -> ModelError? {
     guard let data = payload.data(using: .utf8),
-          let envelope = try? JSONDecoder().decode(ProviderSSEErrorEnvelope.self, from: data),
-          let error = envelope.error else {
+          let envelope = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+        if eventType == "error" || eventType == "response.failed" {
+            return .upstreamError(type: eventType, message: payload)
+        }
         return nil
     }
-
-    let message = error.message?.trimmingCharacters(in: .whitespacesAndNewlines)
-        ?? "上游模型服务返回未命名错误"
-    return ModelError.upstreamError(type: error.type, message: message)
+    let kind = envelope["type"] as? String ?? eventType
+    let response = envelope["response"] as? [String: Any]
+    let error = response?["error"] as? [String: Any] ?? envelope["error"] as? [String: Any]
+    let isFailure = kind == "response.failed" || kind == "error" || response?["status"] as? String == "failed"
+    guard error != nil || isFailure else {
+        return nil
+    }
+    // Anthropic/Chat Completions 使用 error；Responses 还使用 response.error 或顶层 code/message。
+    let details = error ?? envelope
+    let type = error?["type"] as? String ?? (isFailure ? kind : nil)
+    let code = details["code"] as? String
+    let message = details["message"] as? String ?? "上游模型服务返回未命名错误"
+    return .upstreamError(type: type, code: code, message: message)
 }

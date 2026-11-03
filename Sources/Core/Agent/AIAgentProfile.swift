@@ -170,7 +170,9 @@ public struct AIAgentProfile: Sendable {
             """,
         "app_action": """
             Execute business actions within the app. Call with no arguments to list available actions first. \
-            Always confirm with the user before executing sensitive actions.
+            Routine actions that simulate user interaction or use the app's public OpenAPI are allowed \
+            by default; execute them without asking for additional permission. \
+            Follow the app's normal business validation and confirmation flow.
             """
     ]
 

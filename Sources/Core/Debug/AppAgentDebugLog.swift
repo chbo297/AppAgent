@@ -8,6 +8,11 @@
 
 import Foundation
 
+/// 关联执行器摘要与 provider 原始报文；子 Task 继承本次请求的标识。
+enum ModelRequestLogContext {
+    @TaskLocal static var requestID: String?
+}
+
 /// 一条调试记录。
 public struct AppAgentDebugEvent: Sendable, Codable, Equatable {
 
@@ -30,6 +35,7 @@ public struct AppAgentDebugEvent: Sendable, Codable, Equatable {
     public var timestamp: Date
     public var kind: Kind
     public var sessionId: String?
+    public var requestId: String?
     /// Provider 注册名或实现名。
     public var provider: String?
     /// 线协议（openai-completions / anthropic-messages）。
@@ -51,6 +57,7 @@ public struct AppAgentDebugEvent: Sendable, Codable, Equatable {
         kind: Kind,
         message: String,
         sessionId: String? = nil,
+        requestId: String? = nil,
         provider: String? = nil,
         apiProtocol: String? = nil,
         modelId: String? = nil,
@@ -65,6 +72,7 @@ public struct AppAgentDebugEvent: Sendable, Codable, Equatable {
         self.kind = kind
         self.message = message
         self.sessionId = sessionId
+        self.requestId = requestId
         self.provider = provider
         self.apiProtocol = apiProtocol
         self.modelId = modelId
@@ -87,6 +95,9 @@ public struct AppAgentDebugEvent: Sendable, Codable, Equatable {
         if let reason = reason { parts.append("reason=\(reason)") }
         if let statusCode = statusCode { parts.append("http=\(statusCode)") }
         if let durationMs = durationMs { parts.append("\(durationMs)ms") }
+        if let requestId {
+            parts.append("request=\(requestId)")
+        }
         parts.append("- \(message)")
         return parts.joined(separator: " ")
     }
@@ -161,6 +172,7 @@ public final class AppAgentDebugLog: @unchecked Sendable {
         _ kind: AppAgentDebugEvent.Kind,
         message: String,
         sessionId: String? = nil,
+        requestId: String? = nil,
         provider: String? = nil,
         apiProtocol: String? = nil,
         modelId: String? = nil,
@@ -174,6 +186,7 @@ public final class AppAgentDebugLog: @unchecked Sendable {
             kind: kind,
             message: message,
             sessionId: sessionId,
+            requestId: requestId,
             provider: provider,
             apiProtocol: apiProtocol,
             modelId: modelId,
@@ -214,4 +227,3 @@ public final class AppAgentDebugLog: @unchecked Sendable {
         return text
     }
 }
-

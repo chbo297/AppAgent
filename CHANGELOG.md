@@ -8,11 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - Unreleased
 
 ### Added
+- `app_web_inspect` 正式 `highlight` / `clear_highlight`：原生透传红框、滚动/布局跟随与导航/离屏清理，
+  支持同源 iframe / open shadow 路径、节点 attributes 和坐标说明；补充真实 WKWebView 回归测试。
 - 通用 `ToolExecutionGate` 与 `AIAgentProfile.toolExecutionGate`（默认 nil，运行时依赖、不持久化）：
   授权前和执行前检查完整工具参数；拒绝作为工具错误，不申请授权、不执行。
   子任务继承父 gate，发送任务前调用 `prepareDelegation`，供宿主固定子任务权限上限。
 
 ### Changed
+- `app_action` 的常规宿主动作改为 `.moderate`，与模拟用户操作、公开 OpenAPI 导航一致，默认无需 SDK 授权确认；保留只读限制与宿主执行门禁。
+- Responses 流失败保留上游 type/code/message，接入既有有界重试与模型回退；未知流错误不默认重试。
+  失败、不完整响应及 `[DONE]` 不再输出待执行工具调用，完整响应也拒绝损坏的工具参数。
+- `app_hook_capture` 不再内置业务桥通道或错误码集合；通道名、字段语义和脱敏规则由宿主定义，
+  SDK 只提供安全通道名校验、配置切换、文件读取、游标过滤和有界输出。
+- 清理 Host Capability、WebInspect、HostContext 与示例中的具体宿主命名，通用 SDK 不再依赖某个
+  App 的桥框架、页面容器或后台服务。
+- WebInspect 容器使用 selector associated-object UUID；所有 Provider 方法新增 `HostInspectionContext`，
+  接入 scene/scope/readOnly/gate，无可见页不回退隐藏页；任意 `eval` 提升为 sensitive。
+- WebInspect 参数预检拒绝空目标、错误类型、非法枚举与数值溢出，预算使用精确整数转换；
+  原生标注共享持有 isolated world，补充无 scene 的真实 WebKit 测试入口、迟到结果及释放回归。
+- 模型诊断日志按请求 ID 关联完整请求体与解析前响应文本，长报文分块保存并强制脱敏；
+  补齐 EOF 尾帧、HTTP 错误正文和未知格式记录，修复同秒轮转复用文件及协议异常误记 SUCCESS。
 - 会话内直接调用宿主能力的写操作也检查 gate，缺少已安装工具时拒绝；作用域授权后重新检查。
 - UI 语义激活拒绝隐藏、透明、禁用的目标及祖先；检查视图的读取路径仍可访问这些目标。
 - 属性观察改为按运行时声明直接读取 getter/ivar，保留明确允许的 UIKit 只读 getter；

@@ -135,30 +135,54 @@ public enum ErrorClassifier {
             }
             return ClassifiedError(reason: .unknown, statusCode: nil, message: msg,
                                    retryable: true, shouldCompress: false, shouldFallback: false)
-        case .upstreamError(let type, let msg):
-            let loweredType = type?.lowercased() ?? ""
-            let loweredMessage = msg.lowercased()
-            if loweredType == "upstream_error"
-                || matchesAny(loweredType, patterns: overloadedPatterns)
-                || matchesAny(loweredMessage, patterns: overloadedPatterns) {
-                return ClassifiedError(
-                    reason: .overloaded,
-                    statusCode: nil,
-                    message: msg,
-                    retryable: true,
-                    shouldCompress: false,
-                    shouldFallback: false
-                )
-            }
-            return ClassifiedError(
-                reason: .unknown,
-                statusCode: nil,
-                message: msg,
-                retryable: true,
-                shouldCompress: false,
-                shouldFallback: false
-            )
+        case .upstreamError(let type, let code, let msg):
+            return classifyUpstreamError(type: type, code: code, message: msg)
         }
+    }
+
+    private static func classifyUpstreamError(type: String?, code: String?, message: String) -> ClassifiedError {
+        // OpenAI 的具体 code 优先于宽泛 type（例如 insufficient_quota / rate_limit_error）。
+        let identifiers = [code, type].compactMap {
+            $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        var reason: FailoverReason = .unknown
+        for identifier in identifiers {
+            switch identifier {
+            case "server_error", "internal_server_error", "api_error":
+                reason = .serverError
+            case "overloaded", "overloaded_error":
+                reason = .overloaded
+            case "upstream_error" where matchesAny(message.lowercased(), patterns: overloadedPatterns):
+                reason = .overloaded
+            case "rate_limit_error", "rate_limit_exceeded":
+                reason = .rateLimited
+            case "authentication_error", "invalid_api_key", "permission_error", "permission_denied":
+                reason = .authError
+            case "insufficient_quota", "billing_error":
+                reason = .billing
+            case "invalid_request_error", "invalid_request", "content_filter", "response.incomplete":
+                reason = .formatError
+            case "context_length_exceeded":
+                reason = .contextOverflow
+            case "model_not_found":
+                reason = .modelNotFound
+            case "timeout", "request_timeout":
+                reason = .timeout
+            default:
+                continue
+            }
+            break
+        }
+        // 未知的流失败不能凭 HTTP 200 或错误文案默认重试；回退沿用现有 ModelPolicy。
+        let retryable = [.serverError, .overloaded, .rateLimited, .timeout].contains(reason)
+        return ClassifiedError(
+            reason: reason,
+            statusCode: nil,
+            message: ModelError.upstreamError(type: type, code: code, message: message).localizedDescription,
+            retryable: retryable,
+            shouldCompress: reason == .contextOverflow,
+            shouldFallback: true
+        )
     }
 
     private static func classifyHTTPError(statusCode: Int, body: String) -> ClassifiedError {
