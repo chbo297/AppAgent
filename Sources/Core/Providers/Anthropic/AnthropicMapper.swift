@@ -73,6 +73,11 @@ enum AnthropicMapper {
             ))
         case .hostContext(let payload):
             return .text(AnthropicTextBlock(text: payload.modelText))
+        case .attachment(let attachment):
+            guard let image = attachment.image else {
+                return .text(AnthropicTextBlock(text: attachment.modelText))
+            }
+            return .image(AnthropicImageBlock(base64: image.base64, mediaType: image.mediaType))
         }
     }
 
@@ -113,7 +118,7 @@ enum AnthropicMapper {
                 let toolDict: [String: Any] = [
                     "name": tool.name,
                     "description": tool.description,
-                    "input_schema": buildInputSchema(tool.parameters)
+                    "input_schema": ToolSchemaMapper.inputSchema(tool.parameters)
                 ]
                 tools.append(toolDict)
 
@@ -127,89 +132,6 @@ enum AnthropicMapper {
         return tools
     }
 
-    /// Build the JSON Schema dict from an Tool.Schema.
-    private static func buildInputSchema(_ schema: Tool.Schema) -> [String: Any] {
-        var properties: [String: Any] = [:]
-        for (key, prop) in schema.properties {
-            properties[key] = buildJSONSchema(prop)
-        }
-
-        return [
-            "type": "object",
-            "properties": properties,
-            "required": schema.required
-        ]
-    }
-
-    /// Build a single property's JSON Schema dict from a JSONSchema enum.
-    private static func buildJSONSchema(_ schema: JSONSchema) -> [String: Any] {
-        switch schema {
-        case .string(let desc, let enumValues, let defaultValue):
-            var dict: [String: Any] = ["type": "string"]
-            if let desc { dict["description"] = desc }
-            if let enumValues { dict["enum"] = enumValues }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .number(let desc, let minimum, let maximum, let defaultValue):
-            var dict: [String: Any] = ["type": "number"]
-            if let desc { dict["description"] = desc }
-            if let minimum { dict["minimum"] = minimum }
-            if let maximum { dict["maximum"] = maximum }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .integer(let desc, let minimum, let maximum, let defaultValue):
-            var dict: [String: Any] = ["type": "integer"]
-            if let desc { dict["description"] = desc }
-            if let minimum { dict["minimum"] = minimum }
-            if let maximum { dict["maximum"] = maximum }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .boolean(let desc, let defaultValue):
-            var dict: [String: Any] = ["type": "boolean"]
-            if let desc { dict["description"] = desc }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .array(let desc, let items, let maxItems):
-            var dict: [String: Any] = ["type": "array"]
-            if let desc { dict["description"] = desc }
-            if let items { dict["items"] = buildJSONSchema(items) }
-            if let maxItems { dict["maxItems"] = maxItems }
-            return dict
-
-        case .object(let desc, let properties, let required):
-            var dict: [String: Any] = ["type": "object"]
-            if let desc { dict["description"] = desc }
-            if let properties {
-                var nested: [String: Any] = [:]
-                for (key, prop) in properties {
-                    nested[key] = buildJSONSchema(prop)
-                }
-                dict["properties"] = nested
-            }
-            if let required { dict["required"] = required }
-            return dict
-        }
-    }
-
-    /// Convert JSONValue to Any for JSON serialization.
-    private static func jsonValueToAny(_ value: JSONValue) -> Any {
-        switch value {
-        case .string(let s): return s
-        case .number(let n): return n
-        case .bool(let b): return b
-        case .null: return NSNull()
-        case .array(let arr): return arr.map { jsonValueToAny($0) }
-        case .object(let obj):
-            var dict: [String: Any] = [:]
-            for (k, v) in obj { dict[k] = jsonValueToAny(v) }
-            return dict
-        }
-    }
-
     // MARK: - SSE Events → Provider Events
 
     /// Parse an SSE event and return zero or more `ProviderStreamEvent`s.
@@ -219,7 +141,7 @@ enum AnthropicMapper {
     static func parseSSEEvent(
         _ sseEvent: SSEEvent,
         activeToolCalls: inout [Int: (id: String, name: String, jsonAccumulator: String)]
-    ) -> [ProviderStreamEvent] {
+    ) throws -> [ProviderStreamEvent] {
         let decoder = JSONDecoder()
 
         guard let data = sseEvent.data.data(using: .utf8) else { return [] }
@@ -257,11 +179,19 @@ enum AnthropicMapper {
 
             if let toolInfo = activeToolCalls.removeValue(forKey: parsed.index) {
                 let arguments: [String: JSONValue]
-                if let jsonData = toolInfo.jsonAccumulator.data(using: .utf8),
+                // A tool with no parameters may have no input_json_delta at all.
+                let raw = toolInfo.jsonAccumulator.trimmingCharacters(in: .whitespacesAndNewlines)
+                if raw.isEmpty {
+                    arguments = [:]
+                } else if let jsonData = raw.data(using: .utf8),
                    let decoded = try? decoder.decode([String: JSONValue].self, from: jsonData) {
                     arguments = decoded
                 } else {
-                    arguments = [:]
+                    // 参数 JSON 不完整：多半是撞到 max_tokens 被截断。先放回去，等 message_delta
+                    // 的 stop_reason 再定性——是 max_tokens 就丢掉这个调用让上层续写，否则才算协议错误。
+                    activeToolCalls[parsed.index] = toolInfo
+                    Logger.debug("AnthropicMapper", "SSE content_block_stop: incomplete tool arguments, name=\(toolInfo.name), deferred until stop_reason")
+                    return []
                 }
                 Logger.debug("AnthropicMapper", "SSE content_block_stop: tool completed, name=\(toolInfo.name), id=\(toolInfo.id), argKeys=[\(arguments.keys.sorted().joined(separator: ", "))]")
                 return [.toolCall(AIAgentMessage.ToolCall(id: toolInfo.id, name: toolInfo.name, arguments: arguments))]
@@ -280,6 +210,15 @@ enum AnthropicMapper {
             if let stop = parsed.delta.stopReason {
                 let reason = ProviderStreamEvent.StopReason(rawValue: stop) ?? .unknown
                 Logger.debug("AnthropicMapper", "SSE message_delta: stopReason=\(stop), reason=\(reason)")
+                // 还留着的都是参数不完整的调用（见 content_block_stop），一律不执行。
+                if !activeToolCalls.isEmpty {
+                    let names = activeToolCalls.keys.sorted().compactMap { activeToolCalls[$0]?.name }
+                    activeToolCalls.removeAll()
+                    guard reason == .maxTokens else {
+                        throw ModelError.malformedToolCall("Anthropic 工具参数不是完整的 JSON 对象（\(names.joined(separator: ", "))）")
+                    }
+                    events.append(contentsOf: names.map { ProviderStreamEvent.discardedToolCall(name: $0) })
+                }
                 events.append(.done(stopReason: reason))
             }
             return events

@@ -55,18 +55,27 @@ public actor AIAgentCentral {
         toolPolicy: ToolCentral.ToolPolicy? = nil,
         memoryStorage: any MemoryStorage = FileMemoryStorage(),
         sessionStorage: any SessionStorage = FileSessionStorage(),
-        skillsManager: SkillsManager = SkillsManager()
+        skillsManager: SkillsManager = SkillsManager(),
+        fileResources: FileResourceRegistry? = nil,
+        appActionProvider: (any AppActionProvider)? = nil,
+        hostInfoProvider: (any HostInfoProvider)? = nil
     ) -> AIAgent {
+        var configuredProfile = profile
+        if let fileResources {
+            configuredProfile.fileResources = fileResources
+        }
         let agent = AIAgent(
             id: name,
-            profile: profile,
+            profile: configuredProfile,
             toolCentral: toolCentral,
             providerCentral: providerCentral,
             modelPolicy: modelPolicy,
             toolPolicy: toolPolicy,
             memoryStorage: memoryStorage,
             sessionStorage: sessionStorage,
-            skillsManager: skillsManager
+            skillsManager: skillsManager,
+            appActionProvider: appActionProvider,
+            hostInfoProvider: hostInfoProvider
         )
         agents[name] = agent
         Logger.info("AIAgentCentral", "created: name=\(name)")

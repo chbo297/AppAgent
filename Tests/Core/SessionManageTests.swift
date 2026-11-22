@@ -1,6 +1,6 @@
 //
 //  SessionManageTests.swift
-//  AppAgent — session_manage tool (codex-style self-awareness)
+//  AppAgent — unified session tool (codex-style self-awareness)
 //
 //  Exercises the agent's ability to introspect and manage its own sessions:
 //  list (with runtime status + is_current), read history, rename, and delete
@@ -21,7 +21,7 @@ final class SessionManageTests: XCTestCase {
         )
     }
 
-    private let tool = SessionManageTool()
+    private let tool = SessionTool()
 
     /// 并行准入：上限 9，第 10 个被拒；已经在跑的会话复用自己的名额，永远放行。
     /// 上限本身是产品策略（可调），但「撞线要被拒、重跑不被拒」这两条是口径，别被顺手改掉。
@@ -209,6 +209,173 @@ final class SessionManageTests: XCTestCase {
         XCTAssertEqual(Set(refs), Set(["pa/A", "pa/B"]))
     }
 
+    private func endpointAgent(provider: (any ModelProvider)? = nil) async -> AIAgent {
+        let central = ModelProviderCentral()
+        if let provider {
+            await central.register(name: "endpoint", provider: provider)
+        }
+        return AIAgent(
+            id: UUID().uuidString,
+            profile: AIAgentProfile(autoPersist: false, registerBuiltInTools: false),
+            providerCentral: central,
+            modelPolicy: provider == nil ? nil : ModelPolicy(primary: "endpoint/test-model"),
+            memoryStorage: InMemoryMemoryStorage(),
+            sessionStorage: InMemorySessionStorage()
+        )
+    }
+
+    func testCurrentEndpointMatchesActualRequestsForThreeProtocols() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [EndpointRequestEchoProtocol.self]
+        let transport = URLSession(configuration: configuration)
+        defer {
+            transport.invalidateAndCancel()
+        }
+        let root = "https://endpoint-diagnostics.invalid"
+        let cases: [(APIProtocol, String, String)] = [
+            (.anthropicMessages, "", "/v1/messages"),
+            (.anthropicMessages, "/gateway/v1/", "/gateway/v1/messages"),
+            (.anthropicMessages, "/v1/messages/", "/v1/messages"),
+            (.openaiCompletions, "/v1", "/v1/chat/completions"),
+            (.openaiCompletions, "/gateway/v1/", "/gateway/v1/chat/completions"),
+            (.openaiCompletions, "/v1/chat/completions/", "/v1/chat/completions"),
+            (.openaiResponses, "/v1", "/v1/responses"),
+            (.openaiResponses, "/gateway/v1/", "/gateway/v1/responses"),
+            (.openaiResponses, "/v1/responses/", "/v1/responses")
+        ]
+        for (apiProtocol, basePath, requestPath) in cases {
+            let provider = AnthropicProvider(
+                baseURL: root + basePath,
+                apiKey: "fixture-api-key",
+                apiProtocol: apiProtocol,
+                customHeaders: ["X-Fixture-Auth": "fixture-header-secret"],
+                models: [ModelSpec(id: "test-model")],
+                requestTimeout: 2,
+                session: transport
+            )
+            let agent = await endpointAgent(provider: provider)
+            let session = await agent.createSession()
+            let result = try await run(["op": .string("models")], on: session)
+            let endpoint = try XCTUnwrap(result["current_endpoint"])
+            XCTAssertEqual(endpoint["base_url"]?.stringValue, root + basePath)
+            XCTAssertEqual(endpoint["request_url"]?.stringValue, root + requestPath)
+            XCTAssertEqual(endpoint["api_protocol"]?.stringValue, apiProtocol.rawValue)
+            XCTAssertEqual(endpoint["credentials_exposed"]?.boolValue, false)
+            XCTAssertEqual(result["models"]?.arrayValue?.first?["endpoint"], endpoint)
+            XCTAssertEqual(tool.safetyLevel(for: ["op": .string("models")]), .safe)
+
+            // Exercise the production request builders and URLSession without going out to a server.
+            do {
+                for try await _ in provider.streamCompletion(
+                    messages: [.user("test")], system: [], tools: [], modelId: "test-model"
+                ) {
+                }
+                XCTFail("Expected the local request echo response")
+            } catch ModelError.httpError(let statusCode, let body) {
+                XCTAssertEqual(statusCode, 400)
+                XCTAssertEqual(body, root + requestPath)
+                XCTAssertEqual(body, endpoint["request_url"]?.stringValue)
+            }
+        }
+    }
+
+    func testCurrentEndpointSanitizesCredentialsAndEncodedPathSecrets() async throws {
+        let cases: [(String, String?)] = [
+            ("https://fixture-user:fixture-password@example.com:8443/v1?token=fixture-query#fixture-fragment",
+             "https://example.com:8443/v1"),
+            ("https://example.com/fixture-api-key/v1", nil),
+            ("https://example.com/%66ixture-api-key/v1", nil),
+            ("https://example.com/%2566ixture-api-key/v1", nil),
+            ("https://example.com/fixture-header-secret/v1", nil),
+            ("https://example.com/%66ixture-header-secret/v1", nil)
+        ]
+        for (baseURL, expectedBase) in cases {
+            let provider = AnthropicProvider(
+                baseURL: baseURL,
+                apiKey: "fixture-api-key",
+                apiProtocol: .openaiResponses,
+                customHeaders: ["X-Fixture-Auth": "fixture-header-secret"],
+                models: [ModelSpec(id: "test-model")]
+            )
+            let agent = await endpointAgent(provider: provider)
+            let session = await agent.createSession()
+            let result = try await run(["op": .string("models")], on: session)
+            let endpoint = try XCTUnwrap(result["current_endpoint"])
+            XCTAssertEqual(endpoint["base_url"], expectedBase.map(JSONValue.string) ?? .null)
+            if expectedBase == nil {
+                XCTAssertEqual(endpoint["request_url"], .null)
+            } else {
+                XCTAssertEqual(endpoint["request_url"]?.stringValue, expectedBase)
+            }
+            let serialized = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+            for secret in ["fixture-api-key", "fixture-header-secret", "fixture-user",
+                           "fixture-password", "fixture-query", "fixture-fragment", "X-Fixture-Auth"] {
+                XCTAssertFalse(serialized.contains(secret), secret)
+            }
+            XCTAssertEqual(result["models"]?.arrayValue?.first?["endpoint"], endpoint)
+        }
+    }
+
+    func testCurrentEndpointHandlesDefaultsInvalidURLsAndUnsupportedProtocols() async throws {
+        let cases: [(String, APIProtocol, String?)] = [
+            ("", .anthropicMessages, "https://api.anthropic.com/v1/messages"),
+            ("", .openaiCompletions, "https://api.openai.com/v1/chat/completions"),
+            ("", .openaiResponses, "https://api.openai.com/v1/responses"),
+            ("relative/path", .openaiResponses, nil),
+            ("file:///tmp/fixture", .openaiResponses, nil),
+            ("https://example.com/v1", .googleGenerativeAI, nil)
+        ]
+        for (baseURL, apiProtocol, expectedURL) in cases {
+            let provider = AnthropicProvider(
+                baseURL: baseURL, apiKey: "fixture-api-key", apiProtocol: apiProtocol,
+                models: [ModelSpec(id: "test-model")]
+            )
+            let agent = await endpointAgent(provider: provider)
+            let session = await agent.createSession()
+            let result = try await run(["op": .string("models")], on: session)
+            XCTAssertEqual(
+                result["current_endpoint"]?["request_url"],
+                expectedURL.map(JSONValue.string) ?? .null
+            )
+            if baseURL.isEmpty || !baseURL.hasPrefix("https://") {
+                XCTAssertEqual(result["current_endpoint"]?["base_url"], .null)
+            }
+        }
+        let agent = await endpointAgent()
+        let session = await agent.createSession()
+        let result = try await run(["op": .string("models")], on: session)
+        XCTAssertEqual(result["current_endpoint"], .null)
+    }
+
+    func testCurrentEndpointDoesNotGuessCustomProviderRequestURL() async throws {
+        let agent = await endpointAgent(provider: EndpointCustomProvider())
+        let session = await agent.createSession()
+        let result = try await run(["op": .string("models")], on: session)
+        XCTAssertEqual(result["current_endpoint"]?["base_url"]?.stringValue, "https://example.com/custom")
+        XCTAssertEqual(result["current_endpoint"]?["request_url"], .null)
+    }
+
+    func testCurrentEndpointUsesSessionProviderAfterRegistryReplacementAndUpdate() async throws {
+        let provider = AnthropicProvider(
+            baseURL: "https://old.example.com/v1", apiKey: "fixture-old-key",
+            models: [ModelSpec(id: "test-model")]
+        )
+        let agent = await endpointAgent(provider: provider)
+        let session = await agent.createSession()
+        await agent.providerCentral.register(name: "endpoint", provider: EndpointCustomProvider())
+        provider.updateConfiguration(
+            baseURL: "https://new.example.com/v1", apiKey: "fixture-new-key",
+            apiProtocol: .openaiResponses, customHeaders: [:],
+            models: [ModelSpec(id: "test-model")]
+        )
+        let result = try await run(["op": .string("models")], on: session)
+        XCTAssertEqual(result["current_endpoint"]?["request_url"]?.stringValue,
+                       "https://new.example.com/v1/responses")
+        XCTAssertEqual(result["current_endpoint"]?["api_protocol"]?.stringValue,
+                       APIProtocol.openaiResponses.rawValue)
+        XCTAssertEqual(result["models"]?.arrayValue?.first?["endpoint"]?["request_url"], .null)
+    }
+
     func testClearRefusesToWipeHistory() async throws {
         let agent = await makeAgent()
         let s1 = await agent.createSession(title: "First")
@@ -246,7 +413,10 @@ final class SessionManageTests: XCTestCase {
                                              key: .number(number)], on: current)
                 XCTAssertNotNil(rejected["error"], "\(key): \(number)")
             }
-            let search = try await SessionSearchTool().execute(arguments: ["limit": .number(number)], session: current)
+            let search = try await SessionTool().execute(
+                arguments: ["op": .string("search"), "limit": .number(number)],
+                session: current
+            )
             guard case .error = search else { return XCTFail("Invalid search limit accepted: \(number)") }
         }
     }
@@ -381,7 +551,10 @@ final class SessionManageTests: XCTestCase {
         source.updateMessages([
             .init(role: .user, content: [.toolResult(.init(toolCallId: "call", content: "needle in tool output"))])
         ])
-        let output = try await SessionSearchTool().execute(arguments: ["query": .string("needle")], session: caller)
+        let output = try await SessionTool().execute(
+            arguments: ["op": .string("search"), "query": .string("needle")],
+            session: caller
+        )
         guard case .json(let result) = output else { return XCTFail("Expected search results") }
         XCTAssertEqual(result["count"]?.numberValue, 1)
         XCTAssertEqual(result["matches"]?.arrayValue?.first?["preview"]?.stringValue, "needle in tool output")
@@ -391,4 +564,53 @@ final class SessionManageTests: XCTestCase {
 /// 记录宿主收到的激活请求（闭包里不能直接改局部变量）。
 private final class ActivationBox: @unchecked Sendable {
     var requested: String?
+}
+
+/// Only intercepts this test's reserved hostname; no credentials or requests leave the process.
+private final class EndpointRequestEchoProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "endpoint-diagnostics.invalid"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url,
+              let response = HTTPURLResponse(
+                url: url, statusCode: 400, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/plain"]
+              ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(url.absoluteString.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {
+    }
+}
+
+private struct EndpointCustomProvider: ModelProvider {
+    let name = "custom"
+    let baseURL = "https://example.com/custom"
+    let apiKey = "fixture-custom-key"
+    let apiProtocol = APIProtocol.openaiResponses
+    let customHeaders: [String: String] = [:]
+    let models = [ModelSpec(id: "test-model")]
+    let requestTimeout: TimeInterval = 2
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: ModelError.invalidResponse)
+        }
+    }
 }

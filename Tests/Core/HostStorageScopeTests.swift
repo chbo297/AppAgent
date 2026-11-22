@@ -67,14 +67,29 @@ final class HostStorageScopeTests: XCTestCase {
     }
 
     private func file(
-        _ op: String, _ path: String, scope: String? = nil, session: AISession? = nil
+        _ op: String, _ path: String, scope: String? = nil, rawScope: JSONValue? = nil,
+        session: AISession? = nil
     ) async throws -> Tool.Output {
+        let uri = path.isEmpty || path == "."
+            ? "host://sandbox"
+            : "host://sandbox/" + path
         var args: [String: JSONValue] = [
-            "op": .string(op), "path": .string(path), "content": .string("replacement")
+            "op": .string(op), "uri": .string(uri), "content": .string("replacement")
         ]
         if let scope { args["scope"] = .string(scope) }
-        return try await AppSandboxFileTool(root: root).execute(
-            arguments: args, session: session ?? self.session()
+        if let rawScope { args["scope"] = rawScope }
+        let tool = FileTool(registry: FileResourceRegistry(hostResources: [
+            .host(
+                name: "sandbox",
+                summary: "Test host sandbox",
+                rootURL: root,
+                hostSandboxRootURL: root,
+                operations: Set(FileResourceOperation.allCases)
+            )
+        ]))
+        return try await tool.execute(
+            arguments: args,
+            session: session ?? self.session()
         )
     }
 
@@ -106,7 +121,7 @@ final class HostStorageScopeTests: XCTestCase {
         let entries = value["entries"]?.arrayValue ?? []
         XCTAssertEqual(value["count"]?.numberValue, Double(entries.count), file: file, line: line)
         XCTAssertEqual(Set(value.objectValue?.keys.map { $0 } ?? []),
-                       ["path", "count", "entries"], file: file, line: line)
+                       ["uri", "count", "entries"], file: file, line: line)
         return entries.compactMap { $0["name"]?.stringValue }
     }
 
@@ -207,10 +222,8 @@ final class HostStorageScopeTests: XCTestCase {
             "Documents/AppAgent/sessions/session.json", "Documents/AppAgent/memory/memory.json",
             "Documents/AppAgent/logs/run.log", "Documents/AppAgent/skills/example/SKILL.md",
             "Documents/AppAgent/futureInternal/data", "Documents/AppAgent/files-private/secret",
-            "Library/Caches/AppAgentMsgCapture/cap_test.jsonl", "Caches/AppAgentMsgCapture/data",
             "tmp/appagent-diagnostics-123.zip", "tmp/appagent-diagnostics-123/summary.txt",
-            "tmp/appagent-debug.log", "tmp/appagent-debug.json", "tmp/AppAgent/logs/fallback.log",
-            "tmp/AppAgentMsgCapture/fallback.jsonl"
+            "tmp/appagent-debug.log", "tmp/appagent-debug.json", "tmp/AppAgent/logs/fallback.log"
         ]
         for path in protected {
             try seed(path)
@@ -219,8 +232,7 @@ final class HostStorageScopeTests: XCTestCase {
             }
             XCTAssertEqual(try String(contentsOf: root.appendingPathComponent(path)), "private SDK marker")
         }
-        for directory in ["Documents/AppAgent/sessions", "Library/Caches/AppAgentMsgCapture",
-                          "tmp/appagent-diagnostics-123"] {
+        for directory in ["Documents/AppAgent/sessions", "tmp/appagent-diagnostics-123"] {
             assertError(try await file("list", directory))
         }
         let artifacts = [
@@ -232,7 +244,7 @@ final class HostStorageScopeTests: XCTestCase {
             let write = json(try await file("write", path))
             XCTAssertEqual(write["success"]?.boolValue, true)
             let read = json(try await file("read", path))
-            XCTAssertEqual(read["content"]?.stringValue, "replacement")
+            XCTAssertEqual(read["content"]?.stringValue, "1|replacement")
         }
         let sdkContainer = names(try await file("list", "Documents/AppAgent"))
         XCTAssertEqual(sdkContainer, ["files"])
@@ -246,6 +258,41 @@ final class HostStorageScopeTests: XCTestCase {
             let result = json(try await file("delete", path))
             XCTAssertEqual(result["success"]?.boolValue, true)
         }
+    }
+
+    func testHostSearchAndRevealHonorStoragePolicy() async throws {
+        try seed("Documents/AppAgent/sessions/session.json", content: "needle sdk")
+        try seed("Documents/AppAgent/files/work.txt", content: "needle work")
+        try seed("tmp/appagent-debug.log", content: "needle log")
+        try seed("Documents/host.txt", content: "needle host")
+        func search(_ target: String) async throws -> [String] {
+            let output = json(try await FileTool(registry: FileResourceRegistry(hostResources: [
+                .host(name: "sandbox", summary: "Test host sandbox", rootURL: root, hostSandboxRootURL: root)
+            ])).execute(arguments: [
+                "op": .string("search"), "uri": .string("host://sandbox"),
+                "pattern": .string(target == "files" ? "*" : "needle"), "target": .string(target)
+            ], session: session()))
+            return (output["matches"]?.arrayValue ?? []).compactMap {
+                $0.stringValue ?? $0["uri"]?.stringValue
+            }
+        }
+        let content = try await search("content")
+        XCTAssertEqual(Set(content), [
+            "host://sandbox/Documents/AppAgent/files/work.txt", "host://sandbox/Documents/host.txt"
+        ])
+        let filenames = try await search("files")
+        XCTAssertFalse(filenames.contains { $0.contains("sessions") || $0.contains("appagent-debug") })
+        assertError(try await file("reveal_path", "Documents/AppAgent/sessions/session.json"))
+    }
+
+    func testDeletingWorkspaceRootIsRejectedForEquivalentPaths() async throws {
+        let tool = FileTool(registry: FileResourceRegistry(agentWorkspaceURL: root))
+        for uri in ["agent://workspace", "agent://workspace/.", "agent://workspace/./."] {
+            assertError(try await tool.execute(
+                arguments: ["op": .string("delete"), "uri": .string(uri)], session: session()
+            ))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
     }
 
     func testFileScopesRequireApprovalAndAppAgentScopeExcludesHostArtifacts() async throws {
@@ -263,7 +310,7 @@ final class HostStorageScopeTests: XCTestCase {
         let allowed = session(Responder(.allowOnce))
         let sdkRead = json(try await file("read", "Documents/AppAgent/memory/memory.json",
                                          scope: "appagent", session: allowed))
-        XCTAssertEqual(sdkRead["content"]?.stringValue, "private SDK marker")
+        XCTAssertEqual(sdkRead["content"]?.stringValue, "1|private SDK marker")
         for path in ["Documents/host.txt", "Documents/AppAgent/files/work.txt"] {
             for op in ["read", "write", "delete"] {
                 assertError(try await file(op, path, scope: "appagent", session: allowed))
@@ -293,7 +340,6 @@ final class HostStorageScopeTests: XCTestCase {
     func testSharedAncestorsCannotBeOverwrittenOrDeletedEvenWithAllApproval() async throws {
         try seed("Documents/AppAgent/sessions/private.json")
         try seed("Documents/AppAgent/files/work.txt")
-        try seed("Library/Caches/AppAgentMsgCapture/private.jsonl")
         try seed("Library/Preferences/shared.plist")
         try seed("tmp/appagent-diagnostics-x.zip")
         try link("documents-alias", to: root.appendingPathComponent("Documents"))
@@ -316,8 +362,21 @@ final class HostStorageScopeTests: XCTestCase {
                                                 withIntermediateDirectories: true)
         try "secret".write(to: fake.appendingPathComponent("Documents/AppAgent"),
                            atomically: true, encoding: .utf8)
-        let out = try await AppSandboxFileTool(root: fake).execute(
-            arguments: ["op": .string("list"), "path": .string("Documents")], session: session()
+        let fakeTool = FileTool(registry: FileResourceRegistry(hostResources: [
+            .host(
+                name: "sandbox",
+                summary: "Test host sandbox",
+                rootURL: fake,
+                hostSandboxRootURL: fake,
+                operations: Set(FileResourceOperation.allCases)
+            )
+        ]))
+        let out = try await fakeTool.execute(
+            arguments: [
+                "op": .string("list"),
+                "uri": .string("host://sandbox/Documents")
+            ],
+            session: session()
         )
         XCTAssertEqual(names(out), [])
     }
@@ -341,9 +400,9 @@ final class HostStorageScopeTests: XCTestCase {
             XCTAssertFalse(listing.contains("Preferences"))
         }
         let ordinary = json(try await file("read", "Library/PreferencesOther/host.txt"))
-        XCTAssertEqual(ordinary["content"]?.stringValue, "ordinary")
+        XCTAssertEqual(ordinary["content"]?.stringValue, "1|ordinary")
         let read = json(try await file("read", "Documents/prefs.txt", scope: "all", session: allowed))
-        XCTAssertEqual(read["content"]?.stringValue, "<plist>host and SDK settings</plist>")
+        XCTAssertEqual(read["content"]?.stringValue, "1|<plist>host and SDK settings</plist>")
         let write = json(try await file("write", "Library/Preferences/com.example.host.plist",
                                         scope: "all", session: allowed))
         XCTAssertEqual(write["success"]?.boolValue, true)
@@ -389,7 +448,7 @@ final class HostStorageScopeTests: XCTestCase {
         XCTAssertEqual(workspace, ["unshared.txt"])
         assertError(try await file("read", "Documents/AppAgent/files/ordinary.txt"))
         let read = json(try await file("read", "Documents/alias.txt", scope: "all", session: allowed))
-        XCTAssertEqual(read["content"]?.stringValue, "private SDK marker")
+        XCTAssertEqual(read["content"]?.stringValue, "1|private SDK marker")
         assertError(try await file("read", "Documents/alias.txt", session: allowed))
         XCTAssertEqual(try String(contentsOf: outside.appendingPathComponent("secret.txt")), "outside")
         XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("new").path))
@@ -415,31 +474,67 @@ final class HostStorageScopeTests: XCTestCase {
             for path in ["../files-private/secret.txt", secret.path, "/etc/passwd", "..\\files-private\\secret.txt",
                          "escape.txt", "escape-dir/secret.txt", "escape-dir/new-dir/new.txt", "missing.txt"] {
                 XCTAssertNil(resolver.resolve(path), path)
-                assertError(try await FileReadTool(sandboxRoot: configuredRoot).execute(
-                    arguments: ["path": .string(path)], session: session
+                let tool = FileTool(registry: FileResourceRegistry(agentWorkspaceURL: configuredRoot))
+                assertError(try await tool.execute(
+                    arguments: [
+                        "op": .string("read"),
+                        "uri": .string("agent://workspace/" + path)
+                    ],
+                    session: session
                 ))
-                assertError(try await FileWriteTool(sandboxRoot: configuredRoot).execute(
-                    arguments: ["path": .string(path), "content": .string("changed")], session: session
+                assertError(try await tool.execute(
+                    arguments: [
+                        "op": .string("write"),
+                        "uri": .string("agent://workspace/" + path),
+                        "content": .string("changed")
+                    ],
+                    session: session
                 ))
             }
-            let search = FileSearchTool(sandboxRoot: configuredRoot)
-            let filenames = json(try await search.execute(
-                arguments: ["pattern": .string("*"), "target": .string("files")], session: session
+            let tool = FileTool(registry: FileResourceRegistry(agentWorkspaceURL: configuredRoot))
+            let filenames = json(try await tool.execute(
+                arguments: [
+                    "op": .string("search"),
+                    "uri": .string("agent://workspace"),
+                    "pattern": .string("*"),
+                    "target": .string("files")
+                ],
+                session: session
             ))
-            XCTAssertEqual(filenames["matches"]?.arrayValue, [.string("ordinary.txt")])
-            let content = json(try await search.execute(
-                arguments: ["pattern": .string("needle"), "target": .string("content")], session: session
+            XCTAssertEqual(filenames["matches"]?.arrayValue, [.string("agent://workspace/ordinary.txt")])
+            let content = json(try await tool.execute(
+                arguments: [
+                    "op": .string("search"),
+                    "uri": .string("agent://workspace"),
+                    "pattern": .string("needle"),
+                    "target": .string("content")
+                ],
+                session: session
             ))
             XCTAssertEqual(content["count"]?.numberValue, 1)
-            XCTAssertEqual(content["matches"]?.arrayValue?.first?["file"]?.stringValue, "ordinary.txt")
+            XCTAssertEqual(
+                content["matches"]?.arrayValue?.first?["uri"]?.stringValue,
+                "agent://workspace/ordinary.txt"
+            )
             XCTAssertEqual(content["matches"]?.arrayValue?.first?["content"]?.stringValue, "needle safe")
         }
-        let write = json(try await FileWriteTool(sandboxRoot: linkedRoot).execute(
-            arguments: ["path": .string("nested/new.txt"), "content": .string("created")], session: session
+        let linkedTool = FileTool(registry: FileResourceRegistry(agentWorkspaceURL: linkedRoot))
+        let write = json(try await linkedTool.execute(
+            arguments: [
+                "op": .string("write"),
+                "uri": .string("agent://workspace/nested/new.txt"),
+                "content": .string("created")
+            ],
+            session: session
         ))
         XCTAssertEqual(write["success"]?.boolValue, true)
-        let read = json(try await FileReadTool(sandboxRoot: workspace).execute(
-            arguments: ["path": .string("nested/new.txt")], session: session
+        let workspaceTool = FileTool(registry: FileResourceRegistry(agentWorkspaceURL: workspace))
+        let read = json(try await workspaceTool.execute(
+            arguments: [
+                "op": .string("read"),
+                "uri": .string("agent://workspace/nested/new.txt")
+            ],
+            session: session
         ))
         XCTAssertEqual(read["content"]?.stringValue, "1|created")
         XCTAssertEqual(try String(contentsOf: secret), "needle private")
@@ -458,7 +553,7 @@ final class HostStorageScopeTests: XCTestCase {
             withDestinationPath: "../sessions"
         )
         let read = json(try await file("read", "Documents/work-link/ordinary.txt"))
-        XCTAssertEqual(read["content"]?.stringValue, "work")
+        XCTAssertEqual(read["content"]?.stringValue, "1|work")
         assertError(try await file("write", "Documents/AppAgent/files/protected-link/new.json"))
         let removed = json(try await file("delete", "Documents/work-link"))
         XCTAssertEqual(removed["success"]?.boolValue, true)
@@ -483,10 +578,17 @@ final class HostStorageScopeTests: XCTestCase {
                                            scope: scope, session: allowed))
             }
         }
-        let matches = json(try await FileSearchTool(sandboxRoot: workspace).execute(
-            arguments: ["pattern": .string("*"), "target": .string("files")], session: allowed
+        let workspaceTool = FileTool(registry: FileResourceRegistry(agentWorkspaceURL: workspace))
+        let matches = json(try await workspaceTool.execute(
+            arguments: [
+                "op": .string("search"),
+                "uri": .string("agent://workspace"),
+                "pattern": .string("*"),
+                "target": .string("files")
+            ],
+            session: allowed
         ))
-        XCTAssertEqual(matches["matches"]?.arrayValue, [.string("ordinary.txt")])
+        XCTAssertEqual(matches["matches"]?.arrayValue, [.string("agent://workspace/ordinary.txt")])
     }
 
     func testRelocatedProtectedNamespacesCannotBeReadOrDeletedViaTheirBackingPaths() async throws {
@@ -554,7 +656,7 @@ final class HostStorageScopeTests: XCTestCase {
         let listing = names(try await file("list", "BACKING/session-store"))
         XCTAssertEqual(listing, ["private.json"])
         let hostRead = json(try await file("read", "BACKING/session-store/private.json"))
-        XCTAssertEqual(hostRead["content"]?.stringValue, "host data")
+        XCTAssertEqual(hostRead["content"]?.stringValue, "1|host data")
         let independent = [
             "BACKING/session-store/private.json", "BACKING/not-created/item.json",
             "documents/appagent/sessions/private.json", "tmp/APPAGENT-DIAGNOSTICS-X.zip"
@@ -562,7 +664,7 @@ final class HostStorageScopeTests: XCTestCase {
         for path in independent {
             assertSuccess(try await file("write", path))
             let read = json(try await file("read", path))
-            XCTAssertEqual(read["content"]?.stringValue, "replacement")
+            XCTAssertEqual(read["content"]?.stringValue, "1|replacement")
             assertSuccess(try await file("delete", path))
         }
         assertSuccess(try await file("delete", "BACKING"))
@@ -604,7 +706,7 @@ final class HostStorageScopeTests: XCTestCase {
             let allListing = names(try await file("list", parent, scope: "all", session: approved))
             XCTAssertEqual(allListing, [target.lastPathComponent])
             let allRead = json(try await file("read", physical, scope: "all", session: approved))
-            XCTAssertEqual(allRead["content"]?.stringValue, "private SDK marker")
+            XCTAssertEqual(allRead["content"]?.stringValue, "1|private SDK marker")
             if logical.hasPrefix("Documents/AppAgent/sessions/") {
                 // Session history is only mutable via recoverable session management,
                 // even after SDK/all inspection has been explicitly approved.
@@ -812,9 +914,7 @@ final class HostStorageScopeTests: XCTestCase {
             assertError(try await AppUserDefaultsTool(defaults: defaults).execute(
                 arguments: ["op": .string("list"), "scope": invalid], session: session(responder)
             ))
-            assertError(try await AppSandboxFileTool(root: root).execute(
-                arguments: ["op": .string("list"), "scope": invalid], session: session(responder)
-            ))
+            assertError(try await file("list", "", rawScope: invalid, session: session(responder)))
         }
         XCTAssertTrue(responder.requests.isEmpty)
         XCTAssertEqual(defaults.string(forKey: "host.theme"), "host")

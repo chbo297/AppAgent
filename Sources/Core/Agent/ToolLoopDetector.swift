@@ -8,7 +8,7 @@ import Foundation
 /// Detects when the model gets stuck in a tool-calling loop.
 ///
 /// Maintains a sliding window of recent tool calls and checks for:
-/// 1. **Exact repeat**: same (name, argsHash) called consecutively
+/// 1. **Exact repeat**: same name and JSON arguments called consecutively
 /// 2. **Ping-pong**: alternating A-B-A-B pattern
 ///
 /// Reference: openclaw `tool-loop-detection.ts`
@@ -48,9 +48,9 @@ public struct ToolLoopDetector: Sendable {
         }
     }
 
-    private struct Record: Sendable {
+    private struct Record: Sendable, Equatable {
         let name: String
-        let argsHash: Int
+        let arguments: [String: JSONValue]
     }
 
     private var history: [Record] = []
@@ -67,8 +67,9 @@ public struct ToolLoopDetector: Sendable {
     ///   - arguments: The arguments passed to the tool.
     /// - Returns: Detection result (ok, warning, or critical).
     public mutating func record(name: String, arguments: [String: JSONValue]) -> Result {
-        let hash = stableHash(arguments)
-        let record = Record(name: name, argsHash: hash)
+        // Compare JSON values directly: Dictionary equality ignores key order at
+        // every nesting level, unlike its diagnostic String representation.
+        let record = Record(name: name, arguments: arguments)
 
         history.append(record)
         if history.count > config.historySize {
@@ -101,7 +102,7 @@ public struct ToolLoopDetector: Sendable {
 
         var streak = 0
         for record in history.reversed() {
-            if record.name == last.name && record.argsHash == last.argsHash {
+            if record == last {
                 streak += 1
             } else {
                 break
@@ -137,17 +138,14 @@ public struct ToolLoopDetector: Sendable {
         let b = tail[tail.count - 1]
 
         // a and b must be different
-        guard a.name != b.name || a.argsHash != b.argsHash else { return nil }
+        guard a != b else { return nil }
 
         var pairs = 0
         var i = tail.count - 1
         while i >= 1 {
             let current = tail[i]
             let prev = tail[i - 1]
-            if (current.name == b.name && current.argsHash == b.argsHash &&
-                prev.name == a.name && prev.argsHash == a.argsHash) ||
-               (current.name == a.name && current.argsHash == a.argsHash &&
-                prev.name == b.name && prev.argsHash == b.argsHash) {
+            if current == b && prev == a {
                 pairs += 1
                 i -= 2
             } else {
@@ -165,16 +163,4 @@ public struct ToolLoopDetector: Sendable {
         return nil
     }
 
-    // MARK: - Hashing
-
-    /// Produce a stable hash of JSONValue arguments for comparison.
-    private func stableHash(_ arguments: [String: JSONValue]) -> Int {
-        // Sort keys for deterministic hashing
-        var hasher = Hasher()
-        for key in arguments.keys.sorted() {
-            hasher.combine(key)
-            hasher.combine(String(describing: arguments[key]!))
-        }
-        return hasher.finalize()
-    }
 }

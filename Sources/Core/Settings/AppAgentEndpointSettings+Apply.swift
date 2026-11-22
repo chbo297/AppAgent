@@ -65,22 +65,124 @@ public extension AppAgentEndpointSettings {
 
 public extension AIAgent {
     /// 应用一份接口设置：刷新本接口的 Provider 注册项，并把 `modelPolicy` 指向启用模型。
-    /// 旧的 AppAgent endpoint provider 会被移除，避免失效模型继续留在注册表里。
+    /// 空配置或无效配置取消所有会话的运行并清除模型选择，保留聊天历史和宿主注册项。
     func applyEndpointSettings(_ settings: AppAgentEndpointSettings) async {
-        // 注册入口统一校验并清理旧项；无效配置也必须清理同名 provider。
-        await providerCentral.register(settings: settings)
-        guard settings.isUsable else {
-            modelPolicy = nil
-            Logger.error(
-                "AIAgent",
-                "applyEndpointSettings: rejected unusable endpoint configuration"
+        await providerCentral.applyEndpointSettings(settings, to: self)
+    }
+}
+
+// A nil policy normally permits host defaults. Keep explicit endpoint ownership,
+// without retaining agents or credentials, and revoke leases captured by running loops.
+private struct EndpointRuntimeState: Sendable {
+    let agent: WeakLocked<AIAgent>
+    let revoked: Locked<Bool>
+}
+
+private let endpointRuntimeStates = Locked<[ObjectIdentifier: EndpointRuntimeState]>(wrappedValue: [:])
+
+extension AIAgent {
+    var isEndpointConfigurationCleared: Bool {
+        endpointRuntimeStates.mutate {
+            guard let state = $0[ObjectIdentifier(self)], state.agent.wrappedValue === self else {
+                return false
+            }
+            return state.revoked.wrappedValue
+        }
+    }
+
+    func endpointProviderForRun(_ provider: any ModelProvider) -> any ModelProvider {
+        endpointRuntimeStates.mutate {
+            guard let state = $0[ObjectIdentifier(self)], state.agent.wrappedValue === self else {
+                return provider
+            }
+            return EndpointRunProvider(base: provider, revoked: state.revoked)
+        }
+    }
+
+    fileprivate func setEndpointConfigurationCleared(_ cleared: Bool) {
+        endpointRuntimeStates.mutate { states in
+            states = states.filter {
+                $0.value.agent.wrappedValue != nil
+            }
+            let id = ObjectIdentifier(self)
+            if let state = states[id], state.agent.wrappedValue === self {
+                if cleared {
+                    state.revoked.wrappedValue = true
+                    return
+                }
+                if !state.revoked.wrappedValue {
+                    return
+                }
+            }
+            states[id] = EndpointRuntimeState(
+                agent: WeakLocked(wrappedValue: self),
+                revoked: Locked(wrappedValue: cleared)
             )
+        }
+    }
+}
+
+/// A loop may suspend after capturing its provider. Clearing revokes that captured lease,
+/// including after a subsequent valid save. Ordinary valid updates keep running leases alive.
+private struct EndpointRunProvider: ModelProvider {
+    let base: any ModelProvider
+    let revoked: Locked<Bool>
+
+    var name: String {
+        base.name
+    }
+    var baseURL: String {
+        base.baseURL
+    }
+    var apiKey: String {
+        base.apiKey
+    }
+    var apiProtocol: APIProtocol {
+        base.apiProtocol
+    }
+    var customHeaders: [String: String] {
+        base.customHeaders
+    }
+    var models: [ModelSpec] {
+        base.models
+    }
+    var requestTimeout: TimeInterval {
+        base.requestTimeout
+    }
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        guard !Task.isCancelled, !revoked.wrappedValue else {
+            return AsyncThrowingStream { continuation in
+                continuation.finish(throwing: AIAgentError.cancelled)
+            }
+        }
+        return base.streamCompletion(messages: messages, system: system, tools: tools, modelId: modelId)
+    }
+}
+
+extension ModelProviderCentral {
+    // Registration, resolution and publication share one actor turn with no suspension.
+    // An earlier valid apply cannot resume after a clear and republish its provider.
+    fileprivate func applyEndpointSettings(_ settings: AppAgentEndpointSettings, to agent: AIAgent) {
+        replaceEndpointProviders(settings)
+        agent.setEndpointConfigurationCleared(!settings.isUsable)
+        agent.modelPolicy = settings.modelPolicy
+        guard settings.isUsable else {
+            for session in agent.sessionManager.allSessions {
+                session.resetModelSelection()
+                session.cancel()
+            }
+            Logger.info("AIAgent", "applyEndpointSettings: model configuration cleared")
             return
         }
-        modelPolicy = settings.modelPolicy
         if let reference = settings.primaryModelRef,
-           let resolved = await providerCentral.resolve(modelReference: reference) {
-            _ = applyProviderUpdate(
+           let resolved = resolve(modelReference: reference) {
+            _ = agent.applyProviderUpdate(
                 provider: resolved.provider,
                 modelId: resolved.modelId,
                 reference: reference,
@@ -97,6 +199,12 @@ public extension AIAgent {
 public extension ModelProviderCentral {
     /// 替换 Settings 管理的 Provider；无效配置移除旧项，保留宿主自行注册的 Provider。
     func register(settings: AppAgentEndpointSettings) async {
+        replaceEndpointProviders(settings)
+    }
+}
+
+private extension ModelProviderCentral {
+    func replaceEndpointProviders(_ settings: AppAgentEndpointSettings) {
         let entries = settings.makeProviders()
         let desiredNames = Set(entries.map(\.name))
         let managedNames = Set(APIProtocol.allCases.map {

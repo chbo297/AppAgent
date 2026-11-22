@@ -8,6 +8,154 @@ import XCTest
 /// 静默」的假 provider 把那条链复现出来，断言 25s 级的看门狗把它变成一次可恢复的重试。
 final class StreamInterruptionTests: XCTestCase {
 
+    func testNetworkRetryExhaustionAndRecoveryShareOneTerminal() async throws {
+        for failures in [1, 4] {
+            let provider = failures == 1
+                ? NetworkFailureProvider(failures: failures, error: URLError(.networkConnectionLost))
+                : NetworkFailureProvider(failures: failures)
+            let fallback = NetworkFailureProvider(failures: 0)
+            let central = ModelProviderCentral()
+            await central.register(name: "p", provider: provider)
+            await central.register(name: "q", provider: fallback)
+            let agent = AIAgent(
+                id: "network-\(UUID().uuidString)",
+                profile: AIAgentProfile(autoPersist: false, registerBuiltInTools: false),
+                toolCentral: ToolCentral(), providerCentral: central,
+                modelPolicy: ModelPolicy(primary: "p/m", fallbacks: ["q/m"]),
+                memoryStorage: InMemoryMemoryStorage(), sessionStorage: InMemorySessionStorage()
+            )
+            let session = await agent.createSession(title: "网络终局")
+            let executor = LLMExecutor(
+                session: session,
+                retryPolicy: RetryPolicy(baseDelay: 0, jitterFactor: 0)
+            )
+            var terminals = 0
+            var finalError: Error?
+            for await event in executor.run("测试") {
+                switch event {
+                case .completed:
+                    terminals += 1
+                case .error(let error):
+                    terminals += 1
+                    finalError = error
+                default:
+                    break
+                }
+            }
+            XCTAssertEqual(terminals, 1)
+            XCTAssertEqual(provider.attempts, failures == 1 ? 2 : 4)
+            XCTAssertEqual(fallback.attempts, 0, "连接故障即使有半截正文也不探测其他模型")
+            let record = try XCTUnwrap(session.turnRecord(turnID: 1))
+            if failures == 1 {
+                XCTAssertNil(finalError)
+                XCTAssertNil(session.uiState.lastError)
+                XCTAssertNil(record.failureMessage)
+                XCTAssertEqual(record.outcome, .answered)
+                XCTAssertEqual(session.messages.filter {
+                    $0.role == .assistant
+                }.map(\.text), ["恢复成功"])
+            } else {
+                let message = try XCTUnwrap(finalError).localizedDescription
+                XCTAssertEqual(record.failureMessage, message)
+                let restored = try JSONDecoder().decode(
+                    AIAgentTurnRecord.self, from: JSONEncoder().encode(record)
+                )
+                XCTAssertEqual(restored.failureMessage, message)
+                XCTAssertEqual(session.uiState.lastError?.localizedDescription, message)
+                XCTAssertTrue(message.contains("Host: gateway.example"))
+                XCTAssertTrue(message.contains("找不到指定主机"))
+                XCTAssertTrue(message.contains("NSURLErrorDomain / -1003"))
+                XCTAssertTrue(message.hasSuffix("网络错误，请稍后重试。"))
+                XCTAssertEqual(record.failedStage, .streaming)
+            }
+        }
+    }
+
+    func testNetworkDetailsPreferFailingHostAndRedactSensitiveURLs() throws {
+        let address = "https://fixture-user:fixture'password@redirect.example/private-path?token=fixture-token&apiKey=fixture-key#fragment"
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost, userInfo: [
+            NSLocalizedDescriptionKey: "连接已中断：\(address)；请检查网络。",
+            NSURLErrorFailingURLErrorKey: URL(string: address)!,
+            "private-metadata": "must-not-display"
+        ])
+        let failure = try XCTUnwrap(ModelNetworkError(error, baseURL: "https://configured.example/v1"))
+        XCTAssertEqual(failure.host, "redirect.example")
+        XCTAssertEqual(failure.code, -1005)
+        XCTAssertTrue(failure.detail.contains("连接已中断"))
+        XCTAssertTrue(failure.detail.contains("请检查网络"))
+        for secret in ["fixture-user", "fixture'password", "private-path", "fixture-token",
+                       "fixture-key", "fragment", "must-not-display"] {
+            XCTAssertFalse(failure.localizedDescription.contains(secret))
+        }
+        let stringURL = NSError(domain: NSURLErrorDomain, code: -1003, userInfo: [
+            NSURLErrorFailingURLStringErrorKey: address,
+            NSLocalizedDescriptionKey: "无法解析服务器名称"
+        ])
+        XCTAssertEqual(ModelNetworkError(stringURL, baseURL: "")?.host, "redirect.example")
+        let plain = NSError(domain: NSURLErrorDomain, code: -1003, userInfo: [
+            NSLocalizedDescriptionKey: "无法解析服务器名称"
+        ])
+        let fallback = try XCTUnwrap(ModelNetworkError(
+            plain, baseURL: "https://fixture-user:fixture-password@configured.example/private?token=fixture-token"
+        ))
+        XCTAssertEqual(fallback.host, "configured.example")
+        XCTAssertEqual(fallback.detail, plain.localizedDescription)
+        let credentialError = NSError(domain: NSURLErrorDomain, code: -1003, userInfo: [
+            NSLocalizedDescriptionKey: "无法连接 fixture-api-key；请求头 fixture-header-secret"
+        ])
+        let redacted = try XCTUnwrap(ModelNetworkError(
+            credentialError, baseURL: "",
+            secrets: ["fixture-api-key", "fixture-header-secret"]
+        ))
+        XCTAssertEqual(redacted.detail, "无法连接 [已隐藏]；请求头 [已隐藏]")
+        XCTAssertNil(ModelNetworkError(
+            AIAgentError.toolExecutionFailed(toolName: "web_fetch", underlying: plain),
+            baseURL: "https://configured.example"
+        ), "工具网络失败不能变成模型网络失败")
+    }
+
+    func testCancellationIsNotNetworkFailureOrRetry() async throws {
+        let errors: [Error] = [
+            CancellationError(), AIAgentError.cancelled, URLError(.cancelled),
+            NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+        ]
+        for error in errors {
+            let classified = ErrorClassifier.classify(error)
+            XCTAssertFalse(classified.retryable)
+            XCTAssertFalse(classified.shouldFallback)
+            XCTAssertNotEqual(classified.reason, .transport)
+            XCTAssertNil(ModelNetworkError(error, baseURL: "https://configured.example"))
+        }
+        let provider = NetworkFailureProvider(failures: 4, error: URLError(.cancelled))
+        let central = ModelProviderCentral()
+        await central.register(name: "p", provider: provider)
+        let agent = AIAgent(
+            id: "network-cancel-\(UUID().uuidString)",
+            profile: AIAgentProfile(autoPersist: false, registerBuiltInTools: false),
+            toolCentral: ToolCentral(), providerCentral: central,
+            modelPolicy: ModelPolicy(primary: "p/m"),
+            memoryStorage: InMemoryMemoryStorage(), sessionStorage: InMemorySessionStorage()
+        )
+        let session = await agent.createSession()
+        let executor = LLMExecutor(session: session, retryPolicy: RetryPolicy(baseDelay: 0))
+        var terminals = 0
+        for await event in executor.run("取消") {
+            switch event {
+            case .error(let error):
+                terminals += 1
+                XCTAssertTrue(ErrorClassifier.isCancellation(error))
+            case .completed:
+                terminals += 1
+                XCTFail("取消不能标为回答完成")
+            default:
+                break
+            }
+        }
+        XCTAssertEqual(terminals, 1)
+        XCTAssertEqual(provider.attempts, 1)
+        XCTAssertEqual(session.turnRecord(turnID: 1)?.outcome, .cancelled)
+    }
+
     // MARK: - 看门狗本身
 
     func testIdleGuardTurnsSilenceIntoStreamStalled() async throws {
@@ -163,6 +311,49 @@ final class StreamInterruptionTests: XCTestCase {
 }
 
 // MARK: - Helpers
+
+private final class NetworkFailureProvider: ModelProvider, @unchecked Sendable {
+    let name = "network"
+    let baseURL = "https://gateway.example/v1"
+    let apiKey = ""
+    let apiProtocol: APIProtocol = .openaiCompletions
+    let customHeaders: [String: String] = [:]
+    let models = [ModelSpec(id: "m")]
+    let requestTimeout: TimeInterval = 5
+    let failures: Int
+    let error: Error
+    @Locked private(set) var attempts = 0
+
+    init(failures: Int, error: Error = NSError(
+        domain: NSURLErrorDomain, code: NSURLErrorCannotFindHost,
+        userInfo: [NSLocalizedDescriptionKey: "找不到指定主机"]
+    )) {
+        self.failures = failures
+        self.error = error
+    }
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        let attempt = $attempts.mutate {
+            $0 += 1
+            return $0
+        }
+        return AsyncThrowingStream { continuation in
+            if attempt <= failures {
+                continuation.yield(.textDelta("未完成正文"))
+                continuation.finish(throwing: error)
+            } else {
+                continuation.yield(.textDelta("恢复成功"))
+                continuation.yield(.done(stopReason: .endTurn))
+                continuation.finish()
+            }
+        }
+    }
+}
 
 /// 有界轮询：条件成立返回 true，超时返回 false。
 ///

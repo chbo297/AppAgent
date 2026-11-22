@@ -18,14 +18,22 @@ public enum AppAgentKeychain {
     @discardableResult
     public static func set(_ value: String?, account: String) -> Bool {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return delete(account: account) }
+        guard !trimmed.isEmpty else {
+            return delete(account: account)
+        }
 
-        var query = baseQuery(account: account)
-        // 先删再加，避免 duplicate item。
-        SecItemDelete(query as CFDictionary)
-        query[kSecValueData as String] = Data(trimmed.utf8)
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let query = baseQuery(account: account)
+        let attributes: [String: Any] = [
+            kSecValueData as String: Data(trimmed.utf8),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            let item = query.merging(attributes) { _, new in
+                new
+            }
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
         if status != errSecSuccess {
             Logger.error("AppAgentKeychain", "set failed: account=\(account), status=\(status)")
         }

@@ -53,17 +53,31 @@ enum AppAgentInputBarFramePolicy {
 
         let storedExpandedWidth: CGFloat?
         let storedCollapsedPlacement: CGPoint?
+
+        /// 展开态此刻要让出的宿主预留高度（≥ 0），叠加在系统安全区之上、不属于安全区；
+        /// 由控制器按对话面板收起进度折算（peek 让满、half 及以上为 0）。键盘避让时不叠加。
+        var hostReservedBottomLift: CGFloat = 0
+
+        /// 展开态的完整高度（输入栏按草稿行数给出，单行即 `barHeight`）。
+        var expandedBarHeight: CGFloat = AppAgentInputBarMetrics.barHeight
     }
 
     // MARK: - 可用区域
 
+    /// `avoidingKeyboard` 为 true 的是展开态口径：有键盘贴键盘，否则再让出宿主的底部高度；
+    /// 收起态胶囊（false）只避开安全区。
     static func availableFrame(in context: Context, avoidingKeyboard: Bool) -> CGRect {
         let bounds = context.bounds
         let safeInsets = context.safeAreaInsets
         let safeTop = safeInsets.top
-        let bottom = avoidingKeyboard && context.keyboardHeight > 0
-            ? bounds.height - context.keyboardHeight - keyboardSpacing
-            : bounds.height - safeInsets.bottom
+        let bottom: CGFloat
+        if avoidingKeyboard && context.keyboardHeight > 0 {
+            bottom = bounds.height - context.keyboardHeight - keyboardSpacing
+        } else if avoidingKeyboard {
+            bottom = bounds.height - safeInsets.bottom - max(0, context.hostReservedBottomLift)
+        } else {
+            bottom = bounds.height - safeInsets.bottom
+        }
         let x = safeInsets.left + horizontalInset
         let maxX = max(x, bounds.width - safeInsets.right - horizontalInset)
         return CGRect(
@@ -109,13 +123,35 @@ enum AppAgentInputBarFramePolicy {
     static func expandedFrame(width: CGFloat, context: Context) -> CGRect {
         let available = availableFrame(in: context, avoidingKeyboard: true)
         let clampedWidth = clampedExpandedWidth(width, context: context)
-        let x = available.midX - clampedWidth / 2
+        let height = expandedHeight(forWidth: clampedWidth, context: context)
         return CGRect(
-            x: x,
-            y: max(available.minY, available.maxY - AppAgentInputBarMetrics.barHeight),
+            x: available.midX - clampedWidth / 2,
+            y: expandedOriginY(height: height, available: available),
             width: clampedWidth,
-            height: AppAgentInputBarMetrics.barHeight
+            height: height
         )
+    }
+
+    /// 展开态在给定宽度下的高度：达到最小展开宽度即为完整的 `expandedBarHeight`；向收起宽度收窄时
+    /// 线性回到单行高度，与输入区的淡出同步，收起成胶囊时高度不跳变。
+    static func expandedHeight(forWidth width: CGFloat, context: Context) -> CGFloat {
+        let singleLineHeight = AppAgentInputBarMetrics.barHeight
+        let extraHeight = max(0, context.expandedBarHeight - singleLineHeight)
+        guard extraHeight > 0 else {
+            return singleLineHeight
+        }
+        let collapsedWidth = AppAgentInputBarMetrics.collapsedMinWidth
+        let progress = AppAgentGeometry.clamp(
+            (width - collapsedWidth) / (AppAgentInputBarMetrics.minimumExpandedWidth - collapsedWidth),
+            0,
+            1
+        )
+        return singleLineHeight + extraHeight * progress
+    }
+
+    /// 展开态贴可用区底边，向上长高；可用区不够高时顶在可用区顶部。
+    private static func expandedOriginY(height: CGFloat, available: CGRect) -> CGFloat {
+        max(available.minY, available.maxY - height)
     }
 
     static func clampedExpandedWidth(_ width: CGFloat, context: Context) -> CGFloat {
@@ -135,8 +171,9 @@ enum AppAgentInputBarFramePolicy {
         let minX = available.minX
         let maxX = max(available.minX, available.maxX - width)
         let x = AppAgentGeometry.clamp(proposedFrame.maxX - width, minX, maxX)
-        let y = max(available.minY, available.maxY - AppAgentInputBarMetrics.barHeight)
-        return CGRect(x: x, y: y, width: width, height: AppAgentInputBarMetrics.barHeight)
+        let height = expandedHeight(forWidth: width, context: context)
+        let y = expandedOriginY(height: height, available: available)
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 
     /// 拖拽 resize 期间约束展开 frame。
@@ -186,11 +223,12 @@ enum AppAgentInputBarFramePolicy {
         let rawWidth = displayedWidth > metrics.maximumWidth
             ? metrics.maximumWidth + rawRubberBandDistance(displayedWidth - metrics.maximumWidth)
             : displayedWidth
+        let height = expandedHeight(forWidth: rawWidth, context: context)
         return CGRect(
             x: metrics.rightEdge - rawWidth,
-            y: metrics.y,
+            y: expandedOriginY(height: height, available: metrics.available),
             width: rawWidth,
-            height: AppAgentInputBarMetrics.barHeight
+            height: height
         )
     }
 
@@ -217,11 +255,12 @@ enum AppAgentInputBarFramePolicy {
         } else {
             width = min(proposedWidth, metrics.maximumWidth)
         }
+        let height = expandedHeight(forWidth: width, context: context)
         return CGRect(
             x: metrics.rightEdge - width,
-            y: metrics.y,
+            y: expandedOriginY(height: height, available: metrics.available),
             width: width,
-            height: AppAgentInputBarMetrics.barHeight
+            height: height
         )
     }
 
@@ -229,7 +268,7 @@ enum AppAgentInputBarFramePolicy {
     private static func fixedRightEdgeExpandedResizeMetrics(
         rightEdge proposedRightEdge: CGFloat,
         context: Context
-    ) -> (rightEdge: CGFloat, maximumWidth: CGFloat, y: CGFloat) {
+    ) -> (rightEdge: CGFloat, maximumWidth: CGFloat, available: CGRect) {
         let available = availableFrame(in: context, avoidingKeyboard: true)
         let minimumWidth = AppAgentInputBarMetrics.collapsedMinWidth
         let rightEdge = AppAgentGeometry.clamp(
@@ -240,8 +279,7 @@ enum AppAgentInputBarFramePolicy {
         let widthToLeftBoundary = max(minimumWidth, rightEdge - available.minX)
         let preferredWidth = max(minimumWidth, preferredExpandedWidth(context))
         let maximumWidth = min(widthToLeftBoundary, preferredWidth)
-        let y = max(available.minY, available.maxY - AppAgentInputBarMetrics.barHeight)
-        return (rightEdge, maximumWidth, y)
+        return (rightEdge, maximumWidth, available)
     }
 
     /// 可持久化的展开宽度：仅宽屏且宽度有效时返回截断后的值，否则 nil。

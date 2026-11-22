@@ -21,6 +21,8 @@ public final class ChatMessageCell: UITableViewCell {
 
     private let rootStack = UIStackView()
     private let activityView = AppAgentActivityView()
+    /// 用户随提问发出的图片 / 文件，排在用户气泡上方、右对齐。
+    let attachmentRow = AppAgentAttachmentStripView()
     private let bubbleRow = UIView()
     private let bubbleView = UIView()
     /// 正文用非滚动 UITextView 承载，换取系统原生的长按选择 / 拷贝 / 全选菜单。
@@ -97,7 +99,11 @@ public final class ChatMessageCell: UITableViewCell {
         rootStack.axis = .vertical
         rootStack.spacing = 6
         rootStack.translatesAutoresizingMaskIntoConstraints = false
+        attachmentRow.alignsTrailing = true
+        attachmentRow.horizontalInset = 12
+        attachmentRow.isHidden = true
         rootStack.addArrangedSubview(activityView)
+        rootStack.addArrangedSubview(attachmentRow)
         rootStack.addArrangedSubview(bubbleRow)
         contentView.addSubview(rootStack)
 
@@ -228,11 +234,17 @@ public final class ChatMessageCell: UITableViewCell {
             activityView.isHidden = true
         }
 
+        let showsAttachments = message.role == .user && !message.attachments.isEmpty
+        attachmentRow.setAttachments(showsAttachments ? message.attachments : [])
+        attachmentRow.isHidden = !showsAttachments
+
         // 流式且还没有正文时，气泡先不占位，避免出现空的 "..." 泡。
         let hideEmptyStreamingBubble = message.status == .streaming
             && message.text.isEmpty
             && !activityView.isHidden
-        bubbleRow.isHidden = hideEmptyStreamingBubble
+        // 只发了图片 / 文件、没写字的提问：只留附件行，不画一个 "..." 文字泡。
+        let hideEmptyUserBubble = showsAttachments && message.text.isEmpty
+        bubbleRow.isHidden = hideEmptyStreamingBubble || hideEmptyUserBubble
     }
 
     /// agent 的回复按 markdown 渲染；用户自己的话保持原样，不做任何解释。

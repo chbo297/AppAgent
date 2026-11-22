@@ -170,9 +170,13 @@ extension AppAgentViewController {
         let records = session.turnRecords
         var displayedActivities: [Int: AppAgentActivityTimeline] = [:]
         for message in chatMessages where message.role == .assistant {
-            if let turnID = message.turnID, let activity = message.activity,
-               records[turnID]?.startedAt == activity.startedAt {
+            guard let turnID = message.turnID, let activity = message.activity else { continue }
+            if records[turnID]?.startedAt == activity.startedAt {
                 displayedActivities[turnID] = activity
+            } else if records[turnID] != nil || session.messages.isEmpty {
+                // 清历史后 turnID 会复用；旧轮次的展开选择不能套到新一次执行。
+                expandedActivityTurnIDs.remove(turnID)
+                collapsedActivityTurnIDs.remove(turnID)
             }
         }
         var assembled = ChatMessageAssembler.assemble(
@@ -272,11 +276,10 @@ extension AppAgentViewController {
     func bindUIState() {
         guard let session = currentSession else { return }
         bindInspectionScene(to: session)
-        let boundSessionId = session.id
-        session.uiState.onChange = { [weak self] key in
-            Task { @MainActor [weak self] in
-                guard self?.currentSessionId == boundSessionId else { return }
-                self?.handleUIStateChange(key: key)
+        session.uiState.onChange = { [weak self, weak session] key in
+            Task { @MainActor [weak self, weak session] in
+                guard let self, let session, self.currentSession === session else { return }
+                self.handleUIStateChange(key: key)
             }
         }
     }
@@ -380,6 +383,8 @@ extension AppAgentViewController {
         requestId: UUID,
         complete: @escaping (DecisionOutcome) -> Void
     ) -> Bool {
+        // responder 是进程级注册表；别把另一个 agent 的请求排进永远切不到的会话。
+        guard agent?.session(id: sessionId) != nil else { return false }
         let pending = AppAgentPendingDecision(id: requestId, request: request, complete: complete)
         pendingDecisions[sessionId, default: []].append(pending)
 
@@ -390,13 +395,8 @@ extension AppAgentViewController {
         // 前面还有没答完的：等那张答完自然会轮到它。
         if (pendingDecisions[sessionId]?.count ?? 0) > 1 { return true }
 
-        guard presentPendingDecision(for: sessionId) else {
-            pendingDecisions[sessionId]?.removeAll { $0.id == requestId }
-            if pendingDecisions[sessionId]?.isEmpty == true {
-                pendingDecisions.removeValue(forKey: sessionId)
-            }
-            return false
-        }
+        // 现在贴不出来（视图还没布局好）也照样收下：布局完成或切回会话时会再贴。
+        presentPendingDecision(for: sessionId)
         return true
     }
 
@@ -464,9 +464,11 @@ extension AppAgentViewController {
         return alert
     }
 
-    func sendMessage(text: String) {
+    func sendMessage(text: String, attachments: [AIAgentMessage.Attachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let session = currentSession else { return }
+        guard !trimmed.isEmpty || !attachments.isEmpty, let session = currentSession else {
+            return
+        }
         // 归档提交期间用户可能收起侧栏回来发送；不能先清草稿再被 Core 的生命周期闸门拒绝。
         guard sessionSidebarView.sessionListView.archivingSessionID != session.id else { return }
         bindInspectionScene(to: session)
@@ -507,7 +509,7 @@ extension AppAgentViewController {
         currentStreamTask?.cancel()
         currentStreamTask = nil
 
-        let userMessage = ChatMessage(role: .user, text: trimmed)
+        let userMessage = ChatMessage(role: .user, text: trimmed, attachments: attachments)
         // 过程区：本轮的思考 / 工具执行时间线，进行中默认展开（参考 Codex CLI / ChatGPT app）。
         var timeline = AppAgentActivityTimeline()
         let assistantMessage = ChatMessage(
@@ -528,13 +530,16 @@ extension AppAgentViewController {
 
         // 这一轮的过程区只能写进「发起它的那个会话」的列表里。切走再切回来时列表已经
         // 由 reloadFromSession 重建，旧 Task 若还在跑，写进去的是上一个会话的时间线。
-        let boundSessionId = session.id
-        let stream = session.sendMessage(trimmed)
+        let stream = session.sendMessage(trimmed, attachments: attachments)
         // `run` 同步就把任务挂上了，所以这里已经能读到「在跑」，输入栏立刻可以给出停止按钮。
         refreshInputBarRunState()
-        currentStreamTask = Task { @MainActor in
+        let consumerToken = UUID()
+        streamConsumerToken = consumerToken
+        currentStreamTask = Task { @MainActor [weak self, weak session] in
             for await event in stream {
-                guard !Task.isCancelled, self.currentSessionId == boundSessionId else { return }
+                guard !Task.isCancelled, let self, let session,
+                      self.streamConsumerToken == consumerToken,
+                      self.currentSession === session else { return }
                 switch event {
                 case .reasoningContent(let delta):
                     timeline.appendThinking(delta)
@@ -556,6 +561,10 @@ extension AppAgentViewController {
                     timeline.failTool(id: id, name: name, message: error.localizedDescription)
                     self.applyActivity(timeline)
 
+                case .notice(let text):
+                    timeline.appendNotice(text, index: timeline.noticeCount)
+                    self.applyActivity(timeline)
+
                 case .completed, .error:
                     // executor 已写回工具往返和 turnRecord。终局统一从记录重建，
                     // 避免 live timeline 与 isStreaming/runStage 的重建互相覆盖。
@@ -567,7 +576,8 @@ extension AppAgentViewController {
                 }
             }
             // 流提前断掉（取消 / 释放）时补一次收尾，但同样只在还属于这个会话时写。
-            guard !Task.isCancelled, self.currentSessionId == boundSessionId else { return }
+            guard !Task.isCancelled, let self, let session,
+                  self.currentSession === session else { return }
             // 流关闭发生在执行器摘掉任务之后：这是「已经不在跑了」最可靠的那一刻。
             self.refreshInputBarRunState()
             if timeline.isRunning {

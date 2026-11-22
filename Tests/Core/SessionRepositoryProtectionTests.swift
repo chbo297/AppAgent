@@ -203,14 +203,19 @@ final class SessionRepositoryProtectionTests: XCTestCase {
             try Data().write(to: trash.appendingPathComponent("\(index).json.purged"))
         }
         _ = FileSessionStorage(directory: repo)
-        // file_write/web_fetch/screenshot/skills all use this same mutation guard.
+        // file/web_fetch/screenshot/skills all use this same mutation guard.
         for path in ["Documents/AppAgent/files/note.txt", "Documents/download.txt",
                      "Documents/AppAgentScreenshots/capture.png", "Documents/AppAgent/skills/new/SKILL.md"] {
             XCTAssertNil(try denial(path), path)
             XCTAssertNil(try denial(path), "warm: \(path)")
         }
-        let output = try await FileWriteTool(sandboxRoot: root).execute(
-            arguments: ["path": .string("ordinary.txt"), "content": .string("ok")],
+        let file = FileTool(registry: FileResourceRegistry(agentWorkspaceURL: root))
+        let output = try await file.execute(
+            arguments: [
+                "op": .string("write"),
+                "uri": .string("agent://workspace/ordinary.txt"),
+                "content": .string("ok")
+            ],
             session: AISession(id: "large-repository", title: "Test")
         )
         guard case .json = output else { return XCTFail("Ordinary write rejected: \(output)") }
@@ -224,15 +229,23 @@ final class SessionRepositoryProtectionTests: XCTestCase {
     func testFileWriteCannotOverwriteRepositoryEvenWithBroadWorkspace() async throws {
         let target = try seed("custom/history/trash/entry.json")
         _ = FileSessionStorage(directory: root.appendingPathComponent("custom/history"))
-        let tool = FileWriteTool(sandboxRoot: root)
+        let tool = FileTool(registry: FileResourceRegistry(agentWorkspaceURL: root))
         let session = AISession(id: "file-test", title: "Test")
         let result = try await tool.execute(arguments: [
-            "path": .string("custom/history/trash/entry.json"), "content": .string("erase")
+            "op": .string("write"),
+            "uri": .string("agent://workspace/custom/history/trash/entry.json"),
+            "content": .string("erase")
         ], session: session)
         guard case .error = result else { return XCTFail("Expected repository denial: \(result)") }
         XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "keep")
-        let normal = try await tool.execute(arguments: ["path": .string("ordinary.txt"), "content": .string("ok")],
-                                            session: session)
+        let normal = try await tool.execute(
+            arguments: [
+                "op": .string("write"),
+                "uri": .string("agent://workspace/ordinary.txt"),
+                "content": .string("ok")
+            ],
+            session: session
+        )
         guard case .json = normal else { return XCTFail("Ordinary write rejected: \(normal)") }
     }
 

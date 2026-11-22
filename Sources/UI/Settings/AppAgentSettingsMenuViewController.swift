@@ -2,20 +2,29 @@
 //  AppAgentSettingsMenuViewController.swift
 //  AppAgentUI
 //
-//  设置落地页：先给两个入口——「模型配置」（进入现有的模型/API 设置页）与
-//  「总是显示思考过程」开关（旁边的 ⓘ 点开浮窗解释）。
+//  设置落地页：「模型配置」（进入现有的模型/API 设置页）、「语音识别」（打包了多个识别引擎时
+//  才出现，进入引擎切换页）与「总是显示思考过程」开关（旁边的 ⓘ 点开浮窗解释）。
 //
 
 #if canImport(UIKit)
 import UIKit
 
 final class AppAgentSettingsMenuViewController: UITableViewController {
-    /// 模型配置页保存后的回调（透传自宿主 VC：应用端点设置 + 新建会话生效）。
+    /// 保存或清除后的回调；清除时透传空配置，调用方仍须应用到运行时。
     var onModelSettingsSaved: ((AppAgentEndpointSettings) -> Void)?
     /// 「总是显示思考过程」开关变化后的回调（宿主据此重建当前会话列表）。
     var onAlwaysShowThinkingChanged: ((Bool) -> Void)?
 
-    private enum Row: Int, CaseIterable { case modelConfig, alwaysShowThinking }
+    private enum Row: Int, CaseIterable {
+        case modelConfig, voiceRecognition, alwaysShowThinking
+    }
+
+    /// 只打包了系统识别时没有可切换的引擎，「语音识别」入口不展示。
+    private var rows: [Row] {
+        Row.allCases.filter { row in
+            row != .voiceRecognition || AppAgentVoiceRecognitionCentral.default.engines.count > 1
+        }
+    }
 
     init() { super.init(style: .insetGrouped) }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -26,7 +35,12 @@ final class AppAgentSettingsMenuViewController: UITableViewController {
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .done, target: self, action: #selector(done)
         )
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // 从语音识别页返回时刷新右侧的当前引擎名。
+        tableView.reloadData()
     }
 
     @objc private func done() { dismiss(animated: true) }
@@ -34,34 +48,44 @@ final class AppAgentSettingsMenuViewController: UITableViewController {
     override func numberOfSections(in tableView: UITableView) -> Int { 1 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        Row.allCases.count
+        rows.count
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
+        let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
         cell.accessoryView = nil
         cell.accessoryType = .none
         cell.selectionStyle = .default
-        switch Row(rawValue: indexPath.row) {
+        switch rows[indexPath.row] {
         case .modelConfig:
             cell.textLabel?.text = "模型配置"
+            cell.accessoryType = .disclosureIndicator
+        case .voiceRecognition:
+            cell.textLabel?.text = "语音识别"
+            cell.detailTextLabel?.text = AppAgentVoiceRecognitionCentral.default.activeEngine.displayName
             cell.accessoryType = .disclosureIndicator
         case .alwaysShowThinking:
             cell.textLabel?.text = "总是显示思考过程"
             cell.selectionStyle = .none
             cell.accessoryView = makeThinkingAccessory()
-        case .none:
-            break
         }
         return cell
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard Row(rawValue: indexPath.row) == .modelConfig else { return }
-        let modelVC = AppAgentSettingsViewController()
-        modelVC.onSave = { [weak self] settings in self?.onModelSettingsSaved?(settings) }
-        navigationController?.pushViewController(modelVC, animated: true)
+        switch rows[indexPath.row] {
+        case .modelConfig:
+            let modelVC = AppAgentSettingsViewController()
+            modelVC.onSave = { [weak self] settings in
+                self?.onModelSettingsSaved?(settings)
+            }
+            navigationController?.pushViewController(modelVC, animated: true)
+        case .voiceRecognition:
+            navigationController?.pushViewController(AppAgentVoiceRecognitionSettingsViewController(), animated: true)
+        case .alwaysShowThinking:
+            break
+        }
     }
 
     // MARK: - 「总是显示思考过程」开关 + ⓘ 说明

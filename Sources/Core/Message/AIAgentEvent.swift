@@ -25,6 +25,9 @@ public enum AIAgentEvent: Sendable {
     case error(Error)
     /// Token usage update.
     case usage(inputTokens: Int, outputTokens: Int)
+    /// 执行过程中给用户看的一句说明（如「会话已压缩」「回复达到输出上限，正在继续」）。
+    /// 同时记在本轮 `AIAgentTurnRecord.notices`，重建界面后仍可见；不进消息历史。
+    case notice(String)
 }
 
 /// The final result of an agent run.

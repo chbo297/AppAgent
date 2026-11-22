@@ -33,6 +33,8 @@ public struct AppUserDefaultsTool: ToolProtocol, @unchecked Sendable {
         required: ["op"]
     )
     public let group = "host-storage"
+    /// 调试工具，按需加载（debug 组）。
+    public let deferredGroup: String? = ToolGroups.debug
     public let safetyLevel: Tool.SafetyLevel = .moderate
 
     public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {

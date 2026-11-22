@@ -1,4 +1,4 @@
-# 文件导航 + 完整文件清单
+# 文件职责导航
 
 > **什么时候读这份**：不确定某个能力落在哪个文件时。文件数会随开发变化，以实际目录为准，
 > 本清单只保证「职责描述」有效。
@@ -16,11 +16,11 @@
 | **改执行循环** | `Core/Session/LLMExecutor.swift` runLoop() + `Core/Agent/ToolLoopDetector.swift` + `Core/Agent/ContextCompressor.swift` |
 | **查「切后台回来不动 / 一直转圈」** | `Core/Foundation/StreamIdleGuard.swift` + `Core/Foundation/BackgroundActivity.swift` + `Core/Session/LLMExecutor.swift` 流消费段（先读 `docs/TurnLifecycle.md` → 打断与恢复） |
 | **改 provider/模型** | `Core/Model/ModelProvider.swift` 协议 + `Core/Providers/Anthropic/` 参考实现 + `Core/Model/ModelProviderCentral.swift` |
-| **改 UI** | `UI/ChatViewController.swift` + `Core/Session/SessionUIState.swift` |
+| **改 UI** | `UI/AppAgentOverlay.swift` + `UI/AppAgentViewController/` + `Core/Session/SessionUIState.swift`（先读 `docs/UILayer.md`） |
 | **改 memory 系统** | `Core/Memory/MemoryStore.swift` 协调 + `Core/Memory/MemoryStorage.swift` 协议 + `Core/Tools/MemoryTool.swift` LLM 接口 |
 | **加测试** | `Tests/Core/AppAgentCoreTests.swift`（用 InMemorySessionStorage / InMemoryMemoryStorage 隔离） |
 
-## 完整文件清单
+## 主要文件职责
 
 ### Core/Agent/ — 核心编排
 
@@ -46,6 +46,7 @@
 |------|------|
 | `AISession.swift` | 单次对话：持有 provider、modelId、messages、tools、uiState；sendMessage 创建 Executor 驱动对话；`requestDecision` 是「等用户拍板」的唯一入口 |
 | `AISessionManager.swift` | Session 生命周期管理：创建、删除、持久化、恢复 |
+| `AISession+Permission.swift` | 会话级权限授予（「在本会话中允许」）与撤销，随 `SessionSnapshot.permissionGrants` 落盘 |
 | `LLMExecutor.swift` | LLM ↔ tool 执行循环引擎：流式调用、工具执行、重试、上下文压缩 |
 | `SessionDecisionCenter.swift` | `DecisionRequest` / `DecisionOption` / `DecisionOutcome` / `DecisionResponder` + 进程级 `DecisionResponderCentral` 注册表 |
 | `SessionStorage.swift` | SessionStorage 协议 + InMemory/File 实现 + SessionSnapshot Codable |
@@ -71,12 +72,16 @@
 | `OpenAIResponsesMapper.swift` | `toInput(_:)`：映射到 Responses API input items；图片以追加的 user item + `input_image` 投递 |
 | `SSEParser.swift` | 逐行 SSE 解析器 |
 
+三种协议的工具输入 Schema 共用 `Core/Providers/ToolSchemaMapper.swift`，避免新增 Schema 字段时三处漂移。
+
 ### Core/Tool/ — 工具注册与协议
 
 | 文件 | 职责 |
 |------|------|
 | `ToolCentral.swift` | 工具注册中心 actor：共享实例 + ToolFactory；ToolPolicy 过滤；resolveTools |
 | `ToolTypes.swift` | Tool 命名空间 (Schema/SafetyLevel/Output) + ToolProtocol |
+| `ToolPermission.swift` | 按类别授权：`AppAgentPermission`、`ToolPermissionPolicy`、设备级「始终允许」`AppAgentPermissionStore` |
+| `ToolArgumentValues.swift` | 工具参数取值与校验（整数有限值、溢出、区间等） |
 
 ### Core/Tools/ — 内置工具实现
 
@@ -85,28 +90,28 @@
 | `ClarifyTool.swift` | 暂停执行向用户提问 |
 | `MemoryTool.swift` | 暴露持久记忆 (add/search/remove) 给 LLM |
 | `TodoTool.swift` | Session 级任务列表，存储在 uiState |
-| `FileReadTool.swift` | 沙箱内读取文本文件 |
-| `FileWriteTool.swift` | 沙箱内写入文本文件 |
-| `FileSearchTool.swift` | 沙箱内搜索文件内容或按名查找 |
-| `SkillsTool.swift` | 三合一：SkillsListTool / SkillViewTool / SkillManageTool |
+| `FileTool.swift` | 通过 agent:// / host:// 逻辑 URI 统一列目录、读写、搜索、删除和真实地址解析；host 资源的目标和每个列出/搜到的条目都过 `HostStoragePolicy` |
+| `FileResourceRegistry.swift` | 注册 AppAgent 内部资源和宿主资源目录，声明摘要、归属和允许的操作 |
+| `SkillsTool.swift` | 统一 Skill Tool：目录、分类展开、正文/资源加载和用户 Skill 管理 |
 | `TextToSpeechTool.swift` | AVSpeechSynthesizer 文字转语音 |
 | `DelegateTaskTool.swift` | 生成子 session 处理子任务 |
-| `SessionSearchTool.swift` | 搜索历史对话 |
+| `SessionTool.swift` | 统一会话搜索、浏览、读取、创建、切换、归档、恢复和合并 |
 | `ClipboardTool.swift` | 系统剪贴板读写 |
 | `HapticTool.swift` | 触觉反馈 |
 | `AppActionTool.swift` | 通过 AppActionProvider 执行宿主 app 业务动作 |
 | `AppNavigateTool.swift` | 通过 AppNavigationProvider 执行应用内导航 |
-| `AppStateTool.swift` | 通过 AppStateProvider 读取当前 app 状态 |
+| `AppStateTool.swift` | 现读会话装上的 `HostStateProvider`（`app_state` 工具） |
 | `WebSearchTool.swift` | 通过 WebSearchProvider 执行网络搜索 |
 | `WebFetchTool.swift` | 抓任意 http(s) URL：HTML→文本 / raw / head，可 save_as 落盘；SSRF 拦截 + 不可信栅栏 |
 | `ScreenshotTool.swift` | 截当前 window 或指定 path 视图：默认以 `Tool.Output.image` 内联给模型，`save_as_file` 才落盘（取代原 vision_analyze） |
 | `SandboxPathResolver.swift` | 安全路径解析，防止目录遍历攻击 |
-| `SessionManageTool.swift` | 会话管理：list/read/create/switch/rename/models/set_model；archive/delete 可恢复归档、archived/restore/merge；clear 禁用，模型无永久删除（见 `docs/SessionHistory.md`） |
-| `AppSandboxFileTool.swift` | 沙箱文件 list/read/write/delete（group host-storage） |
+| `SessionLifecycleExecutor.swift` | `session` 的生命周期分支：list/read/create/switch/rename/models/set_model；archive/delete 可恢复归档、archived/restore/merge；clear 禁用，模型无永久删除（见 `docs/SessionHistory.md`） |
+| `SessionSearchExecutor.swift` | `session` 的历史搜索分支 |
 | `AppUserDefaultsTool.swift` | UserDefaults read/write/remove/list（group host-storage） |
-| `AppDeviceInfoTool.swift` | 设备与运行环境：机型/系统/存储/内存/语言时区/电量（group host-runtime） |
+| `DeviceInfoTool.swift` | `device_info`：设备、系统、App、存储、内存、地区、电量分节读取 |
+| `HostInfoTool.swift` | 宿主 Bundle、版本、构建信息和宿主补充元数据（group host-runtime） |
 
-> 宿主能力工具另有 3 个（同在 `Core/Tools/`，协议与默认实现在 `Core/HostCapability/`）：`RuntimeInspectTool`（含 view_tree/view_info/view_set/view_invoke）、`HotfixTool`、`HookCaptureTool`。
+> 宿主能力工具（同在 `Core/Tools/`，协议与默认实现在 `Core/HostCapability/`）：`RuntimeInspectTool`（一个类型两种实例：`app_ui` 看界面和模拟操作，`app_runtime_inspect` 读内存对象与反射，后者在 debug 组）、`HotfixTool`、`WebInspectTool`。宿主工具命名与注册见 `Core/Tool/HostTools.swift`，按需加载见 `Core/Tools/LoadToolsTool.swift`，宿主页面名与用途（`app_ui` 怎么称呼页面）见 `Core/HostCapability/HostPageCatalog.swift`。
 
 ### Core/Tools/Protocols/ — 宿主 App Provider 协议
 
@@ -114,7 +119,6 @@
 |------|------|
 | `AppActionProvider.swift` | AppActionProvider 协议 + AppAction 数据结构 |
 | `AppNavigationProvider.swift` | AppNavigationProvider 协议 + AppRoute 数据结构 |
-| `AppStateProvider.swift` | AppStateProvider 协议 |
 
 > **注**: `WebSearchProvider` 协议直接定义在 `WebSearchTool.swift` 内，不在此目录。
 
@@ -144,6 +148,15 @@
 | `AIAgentEvent.swift` | 流式事件枚举 + AIAgentFinish 结果类型 |
 | `AIAgentError.swift` | AIAgentError + ModelError 错误枚举 |
 | `AIAgentTurnRecord.swift` | 一轮的持久状态：stage + outcome(.answered/.empty/.failed/.cancelled/.interrupted) + modelRef，随快照落盘，UI 的唯一状态来源 |
+| `AIAgentMessageAttachment.swift` | 用户附件（图片 / 文件）类型与 `AttachmentFileStaging`：拷进 `agent://workspace/attachments/<UUID>/`、移除时删除、启动清扫无引用目录 |
+
+### Core/HostContext/ — 宿主状态
+
+| 文件 | 职责 |
+|------|------|
+| `HostContextTypes.swift` | `HostState` / `HostStateChange` / `HostEvent`、`HostStateProvider` 协议、发给模型的帧格式 |
+| `HostStateStore.swift` | 宿主写字段与说明、发事件的现成存放处（OC 可用） |
+| `HostStateReporter.swift` | 每会话一个：请求模型前读宿主状态、按字段比对，产出完整 / 变化 / 事件帧 |
 
 ### Core/Foundation/ — 共享基础设施
 
@@ -166,16 +179,20 @@
 | 目录 / 文件 | 职责 |
 |------|------|
 | `UI/AppAgentOverlay.swift` + `AppAgentWindow.swift` | 宿主集成入口：穿透 overlay window（`windowLevel = .normal + 1`）+ 门面 |
-| `UI/AppAgentViewController/` (8 files) | 主控制器与其分片：ChatPanel、输入栏布局/委托、键盘、session 绑定与侧栏、语音输入 |
-| `UI/AppAgentInputBar.swift` + `AppAgentInputBarFramePolicy.swift` + `AppAgentMenuButton/TextField` | 底部胶囊输入栏：布局压缩阶段、pan 手势、扩大后的输入命中区、右侧动作槽（加号/发送/停止） |
-| `UI/ChatPanel/` (11 files) | BODragScroll 面板：coordinator、几何/detent、消息列表、导航栏、过程区（timeline + view）、决策卡片（`AppAgentDecisionCardView` + `AppAgentDecisionPresenter`） |
+| `UI/AppAgentViewController/` | 主控制器与其分片：ChatPanel、输入栏布局/委托、键盘、session 绑定与侧栏、语音输入 |
+| `UI/AppAgentInputBar.swift` + `AppAgentInputBarFramePolicy.swift` + `AppAgentMenuButton` + `AppAgentTextView` | 底部胶囊输入栏：多行草稿、布局压缩阶段、pan 手势、扩大后的输入命中区、右侧动作槽（加号/发送/停止） |
+| `UI/AppAgentAttachmentPicker.swift` + `AppAgentAttachmentViews.swift` | 输入栏加号面板：图片 / 文件选择、附件缩略图行 |
+| `UI/AppAgentPageToggleButton.swift` | 公开的配套页面开关控件（顶栏与宿主页面共用） |
+| `UI/ChatPanel/` | BODragScroll 面板：coordinator、几何/detent、消息列表、导航栏、过程区（timeline + view）、决策卡片（`AppAgentDecisionCardView` + `AppAgentDecisionOptionRow` + `AppAgentDecisionPresenter`） |
 | `UI/ChatMessage.swift` + `ChatMessageCell.swift` | 展示层消息模型与气泡 cell（正文为可选中 UITextView，附过程区） |
 | `UI/ChatMessageAssembler.swift` | 把 wire 记录组装成用户视角的对话列表（按 turnID 归属，工具往返收进过程区） |
 | `UI/AppAgentMarkdown.swift` | agent 回复的 markdown 渲染（块级规整 + 系统解析器 + 字号派生） |
-| `UI/SessionSidebar/` (3 files) | 会话列表侧栏 |
+| `UI/SessionSidebar/` | 会话列表与废纸篓 |
 | `UI/Settings/AppAgentSettingsViewController.swift` | 模型设置：探查、拖拽优先级、可用性实测 |
-| `UI/Debug/` (4 files) | 模型调用调试窗口 + 响应区域调试窗口（👻 悬浮按钮） |
+| `UI/Settings/AppAgentSessionPermissionsViewController.swift` | 会话设置：列出当前会话的权限状态，可修改或撤销 |
+| `UI/Debug/` | 模型调用调试窗口 + 响应区域调试窗口（👻 悬浮按钮） |
 | `UI/VoiceInputOverlay/` + `AppAgentVoiceRecognitionManager.swift` | 按住说话浮层与识别 |
+| `UI/VoiceInput/AppAgentVoiceRecognitionCentral.swift` + `UI/Settings/AppAgentVoiceRecognitionSettingsViewController.swift` | 识别引擎注册 / 选择与设置页切换 |
 
 ### Tests/
 

@@ -26,6 +26,8 @@ public enum DecisionRequest: Sendable, Equatable {
     case clarification(question: String, choices: [String])
     /// Explicit SDK access; an approval is capped to this turn, not the session.
     case appAgentInspection(scope: HostInspectionScope, isMutation: Bool)
+    /// 调用需要宿主登记的一项权限（如「修改 App 运行时」）。可以单次、本会话或始终允许。
+    case permission(AppAgentPermission, tool: String, detail: String?)
 
     /// 卡片标题，UI 不必自己 switch。
     public var title: String {
@@ -34,6 +36,8 @@ public enum DecisionRequest: Sendable, Equatable {
         case .toolAuthorization(let tool, _, _): return "允许执行 \(tool)？"
         case .clarification: return "需要你确认"
         case .appAgentInspection: return "允许检查 AppAgent 自身？"
+        case .permission(let permission, _, _):
+            return "允许「\(permission.title)」？"
         }
     }
 
@@ -51,6 +55,9 @@ public enum DecisionRequest: Sendable, Equatable {
             let operation = isMutation ? "读取或修改" : "读取"
             let target = scope == .all ? "宿主及 AppAgent" : "AppAgent"
             return "本轮将\(operation)\(target)的内部内容，可能包含聊天界面、设置或诊断数据。仅在你要求检查 SDK 本身时允许；读取授权不会授权修改。"
+        case .permission(let permission, let tool, let detail):
+            let why = detail.map { "\n原因：\($0)" } ?? ""
+            return "\(permission.summary)\n本次操作：\(tool)\(why)\n「始终允许」对本设备的所有会话生效，可在对话页设置中撤销。"
         }
     }
 
@@ -64,19 +71,35 @@ public enum DecisionRequest: Sendable, Equatable {
                 DecisionOption(id: "deny", label: "拒绝", style: .destructive)
             ]
         case .clarification(_, let choices):
-            if choices.isEmpty {
-                return [DecisionOption(id: "dismiss", label: "跳过", style: .normal)]
+            // 最后一项永远是「自己输入」：模型给的选项未必覆盖用户真实想法。
+            // 没有 choices 时只剩这一项，即开放式提问。
+            let listed = choices.enumerated().map { index, choice in
+                DecisionOption(id: "choice_\(index)", label: choice, style: .normal)
             }
-            return choices.enumerated().map { index, choice in
-                DecisionOption(id: "choice_\(index)", label: choice,
-                               style: index == 0 ? .primary : .normal)
-            }
+            return listed + [
+                DecisionOption(id: DecisionOption.customAnswerID, label: "其他（自己输入）", style: .normal)
+            ]
         case .appAgentInspection:
             return [
                 DecisionOption(id: "allow_once", label: "仅本轮允许", style: .primary),
                 DecisionOption(id: "deny", label: "拒绝", style: .destructive)
             ]
+        case .permission:
+            return [
+                DecisionOption(id: "allow_once", label: "允许单次", style: .primary),
+                DecisionOption(id: "allow_session", label: "在本会话中允许", style: .normal),
+                DecisionOption(id: "allow_always", label: "始终允许", style: .normal),
+                DecisionOption(id: "deny", label: "拒绝", style: .destructive)
+            ]
         }
+    }
+
+    /// 是否允许用户跳过不答。授权类必须在有效选项里选一个，提问类可以跳过。
+    public var isSkippable: Bool {
+        if case .clarification = self {
+            return true
+        }
+        return false
     }
 }
 
@@ -85,6 +108,9 @@ public struct DecisionOption: Sendable, Equatable {
     public enum Style: Sendable, Equatable {
         case primary, normal, destructive
     }
+    /// 「自己输入」选项的 id。选中它时卡片展开输入框，结果是用户输入的文本。
+    public static let customAnswerID = "custom"
+
     public let id: String
     public let label: String
     public let style: Style
@@ -100,6 +126,8 @@ public struct DecisionOption: Sendable, Equatable {
 public enum DecisionOutcome: Sendable, Equatable {
     case allowOnce
     case allowForSession
+    /// 本设备上始终允许。只对 `.permission` 请求有意义；其它请求按本会话允许处理。
+    case allowAlways
     case deny
     /// 澄清类问题的回答；`nil` = 用户跳过。
     case answer(String?)

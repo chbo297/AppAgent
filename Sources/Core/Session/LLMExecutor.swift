@@ -20,6 +20,23 @@ import Foundation
 /// - Tool loop detection
 public final class LLMExecutor: @unchecked Sendable {
 
+    /// 发给模型的历史里最多保留几个带图的工具结果（截图等）的原图。
+    static let recentToolImageLimit = 2
+
+    /// 单次回复撞到输出上限（max_tokens）后，每轮最多自动续写几次。
+    static let maxOutputContinuations = 3
+
+    /// 续写时插给模型的指令（不展示）。措辞参照 Claude Code 的同类恢复提示；
+    /// 有调用被截断时点名，否则模型常常原样再写一遍同样长的参数（实测 Kimi K3）。
+    static func outputLimitResumeNote(discardedTools: [String]) -> String {
+        var note = "[Output token limit hit. Resume directly from where you stopped: no apology, no recap. If the cut happened mid-sentence, continue mid-sentence. Break remaining work into smaller pieces.]"
+        if !discardedTools.isEmpty {
+            let names = discardedTools.map { "`\($0)`" }.joined(separator: ", ")
+            note += "\n[Your call to \(names) was cut off by the output limit and was NOT executed. Call it again with arguments several times smaller; split long content across multiple calls.]"
+        }
+        return note
+    }
+
     // MARK: - Dependencies (set once at init)
 
     private weak var session: AISession?
@@ -67,7 +84,10 @@ public final class LLMExecutor: @unchecked Sendable {
     ///
     /// Integrates the full lifecycle: adds the user message, resolves the provider,
     /// manages UI state, drives the LLM ↔ tool loop, and updates the session on completion.
-    public func run(_ text: String) -> AsyncStream<AIAgentEvent> {
+    public func run(
+        _ text: String,
+        attachments: [AIAgentMessage.Attachment] = []
+    ) -> AsyncStream<AIAgentEvent> {
         let (outputStream, outputContinuation) = AsyncStream<AIAgentEvent>.makePair()
         let runID = UUID()
 
@@ -108,7 +128,7 @@ public final class LLMExecutor: @unchecked Sendable {
             defer {
                 if let session = self.session {
                     Task { [weak session] in
-                        await session?.hostStateMirror.endRun(runID)
+                        await session?.hostStateReporter.endRun(runID)
                     }
                 }
                 // 顺序要紧：先兜底补终止事件（这时 runID 还是 active，UI 状态才清得掉），
@@ -123,15 +143,24 @@ public final class LLMExecutor: @unchecked Sendable {
                 return
             }
 
-            guard self.isActiveRun(runID) else { return }
-            await session.hostStateMirror.startRun(runID)
+            guard self.isActiveRun(runID), !Task.isCancelled else {
+                journal.failed(AIAgentError.cancelled)
+                return
+            }
 
-            // 先把 UI 拨到「刚开始」，这样早期失败也能在界面上显示出来。
+            // 先把 UI 拨到「刚开始」、落用户消息，再去等宿主状态：宿主慢的时候，
+            // 用户至少看得到自己的话和「处理中」，也能按停止。
             journal.prepareUI()
 
-            let turnID = session.addUserMessage(text)
+            let turnID = session.addUserMessage(text, attachments: attachments)
             journal.openTurn(turnID: turnID)
-            Logger.info("LLMExecutor", "run: sessionId=\(session.id), text=\"\(text.prefix(100))\(text.count > 100 ? "..." : "")\", messageCount=\(session.messages.count)")
+            Logger.info("LLMExecutor", "run: sessionId=\(session.id), text=\"\(text.prefix(100))\(text.count > 100 ? "..." : "")\", attachments=\(attachments.count), messageCount=\(session.messages.count)")
+
+            await session.hostStateReporter.startRun(runID)
+            guard self.isActiveRun(runID), !Task.isCancelled else {
+                journal.failed(AIAgentError.cancelled)
+                return
+            }
 
             // Resolve provider from session
             guard let mask = session.agentMask, let agent = mask.agent else {
@@ -208,10 +237,13 @@ public final class LLMExecutor: @unchecked Sendable {
             let task = _runTask
             _runTask = nil
             _activeRunID = nil
+            // An old output stream can be cancelled after its replacement started.
+            // Only the admitted cancellation may touch the current run's UI, and
+            // clear it before another run can claim the executor.
+            session?.uiState.setStreaming(false)
             return task
         }
         task?.cancel()
-        session?.uiState.setStreaming(false)
     }
 
     private func isActiveRun(_ runID: UUID) -> Bool {
@@ -312,6 +344,9 @@ public final class LLMExecutor: @unchecked Sendable {
             let toolSection = "# Using your tools\n\n" + matchedToolPrompts.joined(separator: "\n\n")
             result.append(.content(SystemPrompt(toolSection)))
         }
+        if let sources = await session.agentMask?.toolCentral.toolSourcesPrompt() {
+            result.append(.content(SystemPrompt(sources)))
+        }
 
         // 4. Cache break
         result.append(.cacheControl)
@@ -356,8 +391,19 @@ public final class LLMExecutor: @unchecked Sendable {
             }
         }
 
-        // Filter: only enabled tools
-        let filtered = allTools.values.filter { $0.enabled }
+        // Filter: only enabled tools; on-demand groups only after `load_tools` in this session.
+        let loadedGroups = session.loadedToolGroups(groupOf: { name in
+            allTools[name]?.deferredGroup
+        })
+        let filtered = allTools.values.filter { tool in
+            guard tool.enabled else {
+                return false
+            }
+            guard let group = tool.deferredGroup else {
+                return true
+            }
+            return loadedGroups.contains(group)
+        }
 
         // Stable sort by name for cache friendliness
         return StableSort.byName(filtered) { $0.name }
@@ -502,6 +548,52 @@ public final class LLMExecutor: @unchecked Sendable {
         }
     }
 
+    // MARK: - Context Compaction (主动 / 报错后两处共用)
+
+    /// 发给模型的估算长度超过窗口的这个比例就主动压缩。
+    static let compactionTriggerRatio = 0.85
+
+    /// 压缩目标：窗口的这个比例。留足余量，避免下一两次工具往返又顶到阈值。
+    static let compactionTargetRatio = 0.4
+
+    /// 把 `state.providerMessages` 压到窗口的 `compactionTargetRatio`。
+    ///
+    /// 压缩会把旧的宿主快照和工具结果（连同附在后面的使用手册）一起截掉，所以要让宿主基线失效、
+    /// 下次强制重拍快照，并清空已下发的工具手册记录。返回 false = 没有压缩器或不知道窗口大小。
+    private func compactProviderMessages(
+        state: inout RunLoopState,
+        session: AISession,
+        reason: String
+    ) async -> Bool {
+        guard let compressor = self.compressor,
+              let contextWindow = state.provider.modelSpec(for: state.modelId)?.contextWindow else {
+            return false
+        }
+        let estimatedTokens = compressor.estimateTokens(messages: state.providerMessages)
+        let targetTokens = Int(Double(contextWindow) * Self.compactionTargetRatio)
+        let beforeCount = state.providerMessages.count
+        state.providerMessages = await compressor.compress(
+            messages: state.providerMessages,
+            targetTokens: targetTokens
+        )
+        await session.hostStateReporter.invalidateModelBaseline()
+        state.forceFullHostStateNextRequest = true
+        session.deliveredToolGuides = []
+        Logger.info("LLMExecutor", "context compressed (\(reason)): ~\(estimatedTokens) → target ~\(targetTokens) tokens, messages: \(beforeCount) → \(state.providerMessages.count)")
+        // 压缩会改变模型看到的内容，诊断包里必须看得到，否则「答非所问」只能拼原始请求去查。
+        AppAgentDebugLog.shared.record(
+            .info,
+            message: "上下文压缩（\(reason)）：估算 ~\(estimatedTokens) tokens，目标 ~\(targetTokens)（窗口 \(contextWindow)），消息 \(beforeCount) → \(state.providerMessages.count) 条",
+            sessionId: session.id,
+            provider: state.provider.name,
+            apiProtocol: state.provider.apiProtocol.rawValue,
+            modelId: state.modelId,
+            iteration: state.iteration,
+            reason: "context_compressed"
+        )
+        return true
+    }
+
     // MARK: - Model Switch (两处共用)
 
     /// 换下一个还没试过的模型，重跑这一轮。
@@ -538,8 +630,15 @@ public final class LLMExecutor: @unchecked Sendable {
         state.triedModelKeys.formUnion(fallback.attemptedKeys)
         guard let next = fallback.next else { return .noCandidateLeft }
 
-        state.forceHostSnapshotNextRequest = true
-        state.providerMessages = state.currentMessages
+        state.forceFullHostStateNextRequest = true
+        // 换模型要从完整历史重建「发给模型的视图」，而不是直接用原始历史：否则会带回已剔除的
+        // 孤儿轮（Anthropic 连续 user 报错）、丢掉中断说明和最新请求上的上下文包装。
+        state.providerMessages = await self.prepareMessagesForProvider(
+            state.currentMessages,
+            session: context.session,
+            turnID: context.turnID,
+            isFirstIteration: true
+        )
         let from = "\(state.modelId)@\(state.provider.apiProtocol.rawValue)"
         state.provider = next.provider
         state.modelId = next.modelId
@@ -615,7 +714,7 @@ public final class LLMExecutor: @unchecked Sendable {
             guard let preparation else {
                 return
             }
-            await session.hostStateMirror.discard(preparation)
+            await session.hostStateReporter.discard(preparation)
         }
 
         func commitPreparedHostContext(_ preparation: PreparedHostContext?) async -> Bool {
@@ -623,14 +722,14 @@ public final class LLMExecutor: @unchecked Sendable {
                 return true
             }
             do {
-                try await session.hostStateMirror.commit(preparation)
+                try await session.hostStateReporter.commit(preparation)
                 return true
             } catch {
                 Logger.warning(
                     "LLMExecutor",
                     "host context commit rejected; forcing a fresh snapshot: \(error)"
                 )
-                await session.hostStateMirror.invalidateModelBaseline()
+                await session.hostStateReporter.invalidateModelBaseline()
                 return false
             }
         }
@@ -694,46 +793,46 @@ public final class LLMExecutor: @unchecked Sendable {
                 toolSegments: toolSegments
             )
 
-            // 4. Context compression
+            // 4. Build the provider-only view once; the complete historical view
+            // remains unchanged for UI, persistence and every terminal path.
+            if state.iteration == 1 {
+                state.providerMessages = await self.prepareMessagesForProvider(
+                    state.currentMessages,
+                    session: session,
+                    turnID: turnID,
+                    isFirstIteration: true
+                )
+            }
+            // 旧截图每轮都整批重发会把请求撑到几 MB；只给模型留最近两张，用户附图只留当前轮的。
+            state.providerMessages = SimpleContextCompressor.retainingRecentImages(
+                state.providerMessages,
+                keep: Self.recentToolImageLimit,
+                currentTurnID: turnID
+            )
             if let compressor = self.compressor,
-               let contextWindow = state.provider.modelSpec(for: state.modelId)?.contextWindow {
-                let estimatedTokens = compressor.estimateTokens(messages: state.currentMessages)
-                let threshold = Int(Double(contextWindow) * 0.85)
-                if estimatedTokens > threshold {
-                    let targetTokens = Int(Double(contextWindow) * 0.6)
-                    state.currentMessages = await compressor.compress(messages: state.currentMessages, targetTokens: targetTokens)
-                    state.providerMessages = state.currentMessages
-                    await session.hostStateMirror.invalidateModelBaseline()
-                    state.forceHostSnapshotNextRequest = true
-                    Logger.info("LLMExecutor", "context compressed: ~\(estimatedTokens) → ~\(targetTokens) tokens, messages: \(state.currentMessages.count)")
+               let contextWindow = state.provider.modelSpec(for: state.modelId)?.contextWindow,
+               compressor.estimateTokens(messages: state.providerMessages)
+                   > Int(Double(contextWindow) * Self.compactionTriggerRatio) {
+                if await self.compactProviderMessages(state: &state, session: session, reason: "接近窗口上限") {
+                    journal.notice("对话接近长度上限，已自动压缩较早的内容")
                 }
             }
 
             // 5. Stream completion from provider
             let preparedHostContext: PreparedHostContext?
             do {
-                preparedHostContext = try await session.hostStateMirror.prepare(
+                preparedHostContext = try await session.hostStateReporter.prepare(
                     runID: runID,
-                    forceSnapshot: state.forceHostSnapshotNextRequest
+                    forceFullState: state.forceFullHostStateNextRequest
                 )
             } catch {
                 Logger.error("LLMExecutor", "host context preparation failed: \(error)")
                 finishWithError(error, messages: state.currentMessages)
                 return
             }
-            state.forceHostSnapshotNextRequest = false
+            state.forceFullHostStateNextRequest = false
 
-            var messagesForProvider: [AIAgentMessage]
-            if state.iteration == 1 {
-                messagesForProvider = await self.prepareMessagesForProvider(
-                    state.currentMessages,
-                    session: session,
-                    turnID: turnID,
-                    isFirstIteration: true
-                )
-            } else {
-                messagesForProvider = state.providerMessages
-            }
+            var messagesForProvider = state.providerMessages
             if let preparedHostContext {
                 messagesForProvider.append(preparedHostContext.message(turnID: turnID))
             }
@@ -783,6 +882,7 @@ public final class LLMExecutor: @unchecked Sendable {
             // Consume the stream
             var assistantText = ""
             var toolCalls: [AIAgentMessage.ToolCall] = []
+            var discardedToolNames: [String] = []
             var stopReason: ProviderStreamEvent.StopReason = .endTurn
             var receivedStopReason = false
 
@@ -803,6 +903,9 @@ public final class LLMExecutor: @unchecked Sendable {
                         setStage(.streaming)
                         continuation.yield(.toolCallStarted(call))
 
+                    case .discardedToolCall(let name):
+                        discardedToolNames.append(name.isEmpty ? "tool" : name)
+
                     case .done(let reason):
                         stopReason = reason
                         receivedStopReason = true
@@ -819,7 +922,7 @@ public final class LLMExecutor: @unchecked Sendable {
                         finishWithError(error, messages: state.currentMessages)
                         return
                     }
-                    state.forceHostSnapshotNextRequest = true
+                    state.forceFullHostStateNextRequest = true
                     let error = ModelError.providerError(
                         "Provider stream ended without a stop reason."
                     )
@@ -858,7 +961,7 @@ public final class LLMExecutor: @unchecked Sendable {
                     )
                 }
                 state.retryCount = 0
-            } catch is CancellationError {
+            } catch where Task.isCancelled || ErrorClassifier.isCancellation(error) {
                 await discardPreparedHostContext(preparedHostContext)
                 let error = AIAgentError.cancelled
                 Logger.info("LLMExecutor", "streamCancelled: iteration=\(state.iteration)")
@@ -866,9 +969,13 @@ public final class LLMExecutor: @unchecked Sendable {
                 return
             } catch {
                 await discardPreparedHostContext(preparedHostContext)
-                state.forceHostSnapshotNextRequest = true
+                state.forceFullHostStateNextRequest = true
+                let error: Error = ModelNetworkError(
+                    error, baseURL: state.provider.baseURL,
+                    secrets: [state.provider.apiKey] + Array(state.provider.customHeaders.values)
+                ) ?? error
                 let classified = ErrorClassifier.classify(error)
-                Logger.error("LLMExecutor", "streamError: iteration=\(state.iteration), reason=\(classified.reason), retryable=\(classified.retryable), retryCount=\(state.retryCount)/\(retryPolicy.maxRetries), error=\(error)")
+                Logger.error("LLMExecutor", "streamError: iteration=\(state.iteration), reason=\(classified.reason), retryable=\(classified.retryable), retryCount=\(state.retryCount)/\(retryPolicy.maxRetries), error=\(error.localizedDescription)")
                 AppAgentDebugLog.shared.record(
                     .failure,
                     message: classified.message,
@@ -883,7 +990,16 @@ public final class LLMExecutor: @unchecked Sendable {
                     durationMs: Int(Date().timeIntervalSince(streamStart) * 1000)
                 )
 
-                if classified.retryable && state.retryCount < retryPolicy.maxRetries {
+                // 上下文超长：原样重发必然再失败。压缩一次再试；本轮已经压过还超，就不再重试。
+                if classified.shouldCompress {
+                    if !state.didReactiveCompaction,
+                       await self.compactProviderMessages(state: &state, session: session, reason: "模型报上下文超长") {
+                        state.didReactiveCompaction = true
+                        journal.attemptDiscarded()
+                        journal.notice("对话超出模型长度上限，已自动压缩较早的内容后重试")
+                        continue
+                    }
+                } else if classified.retryable && state.retryCount < retryPolicy.maxRetries {
                     state.retryCount += 1
                     let delay = retryPolicy.delay(for: state.retryCount - 1)
                     Logger.info("LLMExecutor", "retrying in \(String(format: "%.1f", delay))s (attempt \(state.retryCount)/\(retryPolicy.maxRetries))")
@@ -915,7 +1031,7 @@ public final class LLMExecutor: @unchecked Sendable {
                 // 部分正文或工具调用，即使是 5xx 中断也应切换，避免把半截响应
                 // 作为最终结果暴露给用户。
                 let hasPartialOutput = !assistantText.isEmpty || !toolCalls.isEmpty
-                if classified.shouldFallback || hasPartialOutput {
+                if classified.shouldFallback || (hasPartialOutput && !(error is ModelNetworkError)) {
                     guard state.iteration < maxIterations else {
                         finishWithError(
                             AIAgentError.maxIterationsReached(limit: maxIterations),
@@ -968,7 +1084,7 @@ public final class LLMExecutor: @unchecked Sendable {
             // 并据此认为「这个问题我已经答过了」。
             if stopReason == .toolUse, toolCalls.isEmpty {
                 await discardPreparedHostContext(preparedHostContext)
-                state.forceHostSnapshotNextRequest = true
+                state.forceFullHostStateNextRequest = true
                 Logger.error(
                     "LLMExecutor",
                     "stopReason=toolUse 但没有解析到任何工具调用；model=\(state.modelId)@\(state.provider.apiProtocol.rawValue), textLength=\(assistantText.count)"
@@ -1021,7 +1137,7 @@ public final class LLMExecutor: @unchecked Sendable {
 
             if stopReason == .unknown {
                 await discardPreparedHostContext(preparedHostContext)
-                state.forceHostSnapshotNextRequest = true
+                state.forceFullHostStateNextRequest = true
                 let error = ModelError.providerError(
                     "Provider returned an unknown stop reason."
                 )
@@ -1046,14 +1162,15 @@ public final class LLMExecutor: @unchecked Sendable {
             }
 
             // The model has produced a complete, protocol-valid response. Only now
-            // advance the mirror's model-seen cursor. Tool execution may still fail,
+            // record what host state the model has seen. Tool execution may still fail,
             // but the provider did receive this host context successfully.
             let committedHostContext = await commitPreparedHostContext(preparedHostContext)
             if committedHostContext {
                 state.providerMessages = messagesForProvider
             } else {
-                state.providerMessages = state.currentMessages
-                state.forceHostSnapshotNextRequest = true
+                // 只丢掉这次没提交成功的宿主上下文：providerMessages 本来就不含它，
+                // 保留已整理（剔孤儿轮、上下文包装、压缩）的视图，下一请求强制重发快照。
+                state.forceFullHostStateNextRequest = true
             }
 
             // 6. Build assistant message
@@ -1072,8 +1189,11 @@ public final class LLMExecutor: @unchecked Sendable {
                 state.providerMessages.append(assistantMessage)
             }
 
-            // 7. If tool_use, execute tools and loop
-            if stopReason == .toolUse, !toolCalls.isEmpty {
+            // 7. If tool_use, execute tools and loop.
+            // 撞到单次输出上限（max_tokens）时，已经完整收到的工具调用照常执行；
+            // 写到一半的那个调用 mapper 已经丢掉，模型看到结果后会自己重发。
+            if stopReason == .toolUse || stopReason == .maxTokens, !toolCalls.isEmpty {
+                state.continuedText = ""
                 // 工具阶段：卡在这里要么是工具自己慢/挂住，要么是在等用户拍板。
                 setStage(.tooling)
                 let (toolResultParts, terminalError) = await executeToolsConcurrently(
@@ -1103,9 +1223,51 @@ public final class LLMExecutor: @unchecked Sendable {
                 continue
             }
 
-            // 8. Done — emit result
-            let result = AIAgentFinish(text: assistantText, updatedMessages: state.currentMessages)
-            Logger.info("LLMExecutor", "completed: iteration=\(state.iteration), textLength=\(assistantText.count), totalMessages=\(state.currentMessages.count)")
+            // 8. 撞到单次输出上限、又没有可执行的工具调用：保留已输出的部分，让模型接着写。
+            // 做法参照 Claude Code：插一句不展示的指令「直接接着写、别道歉别复述」，
+            // 每轮最多续 `maxOutputContinuations` 次，超过就带着已有内容收尾。
+            if stopReason == .maxTokens {
+                // 实测（2026-11）：GLM-5.3 / MiniMax-M3 续写时 300 tokens 全花在思考上、正文为空。
+                // 再续多半一样，连续两次「既没正文也没被截断的调用」就停。被截断的调用不算空：模型要拆小重发。
+                let producedNothing = assistantText.isEmpty && discardedToolNames.isEmpty
+                state.emptyOutputLimitHits = producedNothing ? state.emptyOutputLimitHits + 1 : 0
+                if state.outputContinuations < Self.maxOutputContinuations,
+                   state.emptyOutputLimitHits < 2,
+                   state.iteration < maxIterations {
+                    state.outputContinuations += 1
+                    state.continuedText = AIAgentMessage.joiningContinuation(state.continuedText, assistantText)
+                    let note = AIAgentMessage.agentNote(
+                        Self.outputLimitResumeNote(discardedTools: discardedToolNames),
+                        turnID: turnID
+                    )
+                    state.currentMessages.append(note)
+                    state.providerMessages.append(note)
+                    Logger.info("LLMExecutor", "maxTokens: auto-continue \(state.outputContinuations)/\(Self.maxOutputContinuations), partialTextLength=\(assistantText.count)")
+                    AppAgentDebugLog.shared.record(
+                        .retry,
+                        message: "回复达到单次输出上限，自动续写（\(state.outputContinuations)/\(Self.maxOutputContinuations)）",
+                        sessionId: session.id,
+                        requestId: requestID,
+                        provider: state.provider.name,
+                        apiProtocol: state.provider.apiProtocol.rawValue,
+                        modelId: state.modelId,
+                        iteration: state.iteration,
+                        attempt: state.outputContinuations,
+                        reason: "max_tokens"
+                    )
+                    journal.notice("回复达到单次输出上限，正在接着输出…")
+                    continue
+                }
+                Logger.warning("LLMExecutor", "maxTokens: stop continuing (continuations=\(state.outputContinuations), emptyHits=\(state.emptyOutputLimitHits))")
+                journal.notice(state.emptyOutputLimitHits >= 2
+                    ? "模型的思考过程连续占满了单次输出上限，已停止续写；可以调高单次输出上限后重试"
+                    : "回复多次达到单次输出上限，已停止续写，下面是目前的内容")
+            }
+
+            // 9. Done — emit result
+            let finalText = AIAgentMessage.joiningContinuation(state.continuedText, assistantText)
+            let result = AIAgentFinish(text: finalText, updatedMessages: state.currentMessages)
+            Logger.info("LLMExecutor", "completed: iteration=\(state.iteration), textLength=\(finalText.count), totalMessages=\(state.currentMessages.count)")
 
             // Update session state + 终局（三层门控、去重与事件都在 TurnJournal 里）
             journal.answered(result)
@@ -1239,7 +1401,33 @@ public final class LLMExecutor: @unchecked Sendable {
     /// Execute a single tool call with safety check and timeout.
     ///
     /// This is a static method to safely capture in TaskGroup child tasks.
+    /// 同一会话里第一次调用带 `usageGuide` 的工具时，不论成败都把手册附在结果后面：
+    /// 第一次调错参数正是最需要手册的时候。
     private static func executeSingleTool(
+        call: AIAgentMessage.ToolCall,
+        session: AISession,
+        toolTimeout: TimeInterval
+    ) async -> (String, AIAgentMessage.Content, AIAgentEvent?) {
+        let outcome = await runSingleTool(call: call, session: session, toolTimeout: toolTimeout)
+        guard let guide = session.tool(named: call.name)?.usageGuide,
+              case .toolResult(let result) = outcome.1,
+              session.claimToolGuide(call.name) else {
+            return outcome
+        }
+        let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
+            toolCallId: result.toolCallId,
+            content: result.content + Self.toolGuideSuffix(name: call.name, guide: guide),
+            images: result.images,
+            isError: result.isError
+        ))
+        return (outcome.0, content, outcome.2)
+    }
+
+    static func toolGuideSuffix(name: String, guide: String) -> String {
+        "\n\n--- \(name) usage guide (sent once per conversation; follow it for later calls) ---\n\(guide)"
+    }
+
+    private static func runSingleTool(
         call: AIAgentMessage.ToolCall,
         session: AISession,
         toolTimeout: TimeInterval
@@ -1310,9 +1498,36 @@ public final class LLMExecutor: @unchecked Sendable {
             // Preflight and the gate can suspend. Disabled tools must not prompt.
             try requireEnabled(tool)
 
+            // 宿主登记的权限（如「修改 App 运行时」）。已授权直接放行，否则弹权限卡；
+            // 权限卡已经覆盖了这次调用，下面的安全级别卡不再重复问。
+            var coveredByPermission = false
+            if let permission = session.requiredPermission(for: tool, arguments: toolArguments) {
+                if let rejection = await session.authorizePermission(
+                    permission, tool: call.name, detail: justification
+                ) {
+                    let err = AIAgentError.toolExecutionDenied(call.name)
+                    let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
+                        toolCallId: call.id, content: "Error: \(rejection)", isError: true
+                    ))
+                    return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
+                }
+                if Task.isCancelled {
+                    Logger.info("LLMExecutor", "toolAbandonedAfterPermission: name=\(call.name), id=\(call.id)")
+                    let err = AIAgentError.toolExecutionDenied(call.name)
+                    let content = AIAgentMessage.Content.toolResult(AIAgentMessage.ToolCallResult(
+                        toolCallId: call.id,
+                        content: "Error: Run was cancelled while waiting for permission of '\(call.name)'",
+                        isError: true
+                    ))
+                    return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
+                }
+                try requireEnabled(tool)
+                coveredByPermission = true
+            }
+
             // Safety level check：统一走 session 的决策中心，由 AppAgent 自己的面板
             // 呈现（宿主策略可先行定夺），没人能回答时兜底拒绝。
-            if level == .sensitive || level == .dangerous {
+            if !coveredByPermission && (level == .sensitive || level == .dangerous) {
                 let opKey = Self.approvalKey(tool: call.name, arguments: toolArguments)
                 let remembered: [String] = session.uiState.get("approvedToolOps") ?? []
                 if !remembered.contains(opKey) {
@@ -1328,7 +1543,7 @@ public final class LLMExecutor: @unchecked Sendable {
                             isError: true
                         ))
                         return (call.id, content, .toolCallFailed(toolCallId: call.id, name: call.name, error: err))
-                    case .allowForSession:
+                    case .allowForSession, .allowAlways:
                         // 原子追加：两个并发的授权不能互相覆盖（见 appendUnique 注释）。
                         session.uiState.appendUnique(opKey, forKey: "approvedToolOps")
                         Logger.info("LLMExecutor", "toolApprovedForSession: \(opKey)")
@@ -1360,9 +1575,12 @@ public final class LLMExecutor: @unchecked Sendable {
                     try requireEnabled(tool)
                     return try await tool.execute(arguments: toolArguments, session: session)
                 }
-                group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(toolTimeout * 1_000_000_000))
-                    throw AIAgentError.toolExecutionTimedOut(toolName: call.name)
+                // 等用户作答的工具由卡片倒计时收尾；用户关掉倒计时后必须一直等，不能被这里掐断。
+                if !tool.waitsForUser {
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: UInt64(toolTimeout * 1_000_000_000))
+                        throw AIAgentError.toolExecutionTimedOut(toolName: call.name)
+                    }
                 }
                 let first = try await group.next()!
                 group.cancelAll()
@@ -1505,6 +1723,10 @@ public final class LLMExecutor: @unchecked Sendable {
     ///
     /// 判据只用 Core 打的 `turnID`，不靠位置猜：这一轮有 assistant 消息就留下。正在跑的那一轮
     /// （`keeping`）永远保留——它的 assistant 消息还没写进历史。旧快照没有编号，无从判断，一律留下。
+    ///
+    /// 例外：**紧挨在当前轮之前**的那个孤儿轮，用户往往是在补充或纠正它。真机上「移除写着册的
+    /// 按钮」被打断后用户补了一句「测试的测」（纠正语音识别），整轮丢掉后模型把它当成连通测试。
+    /// 这一轮只留用户原话，后面补一条说明，user / assistant 依旧交替。
     static func strippingOrphanTurns(
         _ messages: [AIAgentMessage],
         keeping currentTurnID: Int?
@@ -1513,13 +1735,58 @@ public final class LLMExecutor: @unchecked Sendable {
         for message in messages where message.role == .assistant {
             if let turnID = message.turnID { turnsWithAssistant.insert(turnID) }
         }
-        return messages.filter { message in
-            guard let turnID = message.turnID else { return true }
-            return turnID == currentTurnID || turnsWithAssistant.contains(turnID)
+        let carriedTurnID = precedingOrphanTurn(
+            messages,
+            currentTurnID: currentTurnID,
+            turnsWithAssistant: turnsWithAssistant
+        )
+        var result: [AIAgentMessage] = []
+        var carried: [AIAgentMessage] = []
+        for message in messages {
+            guard let turnID = message.turnID else {
+                result.append(message)
+                continue
+            }
+            if turnID == currentTurnID || turnsWithAssistant.contains(turnID) {
+                if turnID == currentTurnID, !carried.isEmpty {
+                    result.append(contentsOf: carried)
+                    result.append(AIAgentMessage(
+                        role: .assistant,
+                        content: [.text("[This request was interrupted before any reply was produced. The user's next message may refine or correct it.]")],
+                        turnID: carriedTurnID,
+                        messageType: .assistant,
+                        source: .agent,
+                        displayPolicy: .hidden
+                    ))
+                    carried.removeAll()
+                }
+                result.append(message)
+            } else if turnID == carriedTurnID, message.role == .user, message.source == .user {
+                carried.append(message)
+            }
         }
+        return result
     }
 
-    private func prepareMessagesForProvider(
+    private static func precedingOrphanTurn(
+        _ messages: [AIAgentMessage],
+        currentTurnID: Int?,
+        turnsWithAssistant: Set<Int>
+    ) -> Int? {
+        guard let currentTurnID,
+              let firstCurrent = messages.firstIndex(where: { message in
+                  message.turnID == currentTurnID
+              }),
+              firstCurrent > 0,
+              let previous = messages[firstCurrent - 1].turnID,
+              previous != currentTurnID,
+              !turnsWithAssistant.contains(previous) else {
+            return nil
+        }
+        return previous
+    }
+
+    func prepareMessagesForProvider(
         _ rawMessages: [AIAgentMessage],
         session: AISession,
         turnID: Int,
@@ -1534,11 +1801,16 @@ public final class LLMExecutor: @unchecked Sendable {
         }
         guard isFirstIteration else { return messages }
 
-        // Find the last user message that contains .text (not .toolResult)
+        // Find the last genuine user request: text or user attachments (an image-only
+        // message has no .text part), never a tool result.
         guard let lastIndex = messages.lastIndex(where: { msg in
-            msg.role == .user && msg.content.contains(where: {
-                if case .text = $0 { return true }
-                return false
+            msg.role == .user && !msg.isAgentNote && msg.content.contains(where: { part in
+                switch part {
+                case .text, .attachment:
+                    return true
+                default:
+                    return false
+                }
             })
         }) else {
             return messages
@@ -1585,13 +1857,23 @@ public final class LLMExecutor: @unchecked Sendable {
                 wrappedContent.append(part)
             }
         }
+        if !textReplaced {
+            // Attachment-only request: carry the context as a leading text part.
+            wrappedContent.insert(.text(wrappedText), at: 0)
+        }
 
         let wrappedMsg = AIAgentMessage(
             id: lastMsg.id,
             role: lastMsg.role,
             content: wrappedContent,
             createdAt: lastMsg.createdAt,
-            turnID: lastMsg.turnID
+            turnID: lastMsg.turnID,
+            messageType: lastMsg.messageType,
+            source: lastMsg.source,
+            displayPolicy: lastMsg.displayPolicy,
+            trigger: lastMsg.trigger,
+            eventId: lastMsg.eventId,
+            causedByToolCallId: lastMsg.causedByToolCallId
         )
 
         var result = messages

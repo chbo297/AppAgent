@@ -2,8 +2,8 @@
 //  HotfixProvider.swift
 //  AppAgent — 宿主能力层
 //
-//  宿主 app 实现后，向 app agent 暴露命名 JS 补丁槽的应用、开关和列举能力。
-//  默认关闭，需宿主显式打开（HostToolset 的 hotfixEnabled）。
+//  AppAgent 提供通用的 JS 补丁槽执行核心；宿主可通过 HostToolset 注入
+//  自己的目标解析或桥接实现。默认关闭，需宿主显式打开。
 //
 
 import Foundation

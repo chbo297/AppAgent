@@ -23,9 +23,8 @@ Thank you for your interest in contributing to AppAgent! This document provides 
 ## Development Setup
 
 ### Prerequisites
-- Xcode 15.0+
-- Swift 5.9+
-- iOS 15.0+ deployment target
+- Xcode 16.0+ with Swift 6.0+
+- iOS / Mac Catalyst 15.0+ or native macOS 12.0+ deployment target
 
 ### Running the Demo App
 1. Copy the config template:
@@ -33,7 +32,7 @@ Thank you for your interest in contributing to AppAgent! This document provides 
    cp Examples/iOS/Resources/config.json.example Examples/iOS/Resources/config.json
    ```
 2. Edit `Examples/iOS/Resources/config.json` with your API key and settings
-3. Open `Package.swift` in Xcode, select the `AppAgentDemoApp` scheme
+3. Open `Examples/iOS/AppAgentDemo.xcodeproj` in Xcode, select the `AppAgentDemo` scheme
 4. Build and run on a simulator or device
 
 ## Making Changes
@@ -49,17 +48,17 @@ Thank you for your interest in contributing to AppAgent! This document provides 
 - Keep internal implementation details `private` or `internal`
 
 ### Adding a New LLM Provider
-See [docs/Providers.md](docs/Providers.md) for a guide on implementing the `LLMProvider` protocol.
+See [docs/Providers.md](docs/Providers.md) for a guide on implementing the `ModelProvider` protocol.
 
 ### Adding a New Tool
-See [docs/Tools.md](docs/Tools.md) for a guide on implementing the `Tool` protocol.
+See [docs/Tools.md](docs/Tools.md) for a guide on implementing the `ToolProtocol` protocol.
 
 ## Pull Request Process
 
 1. Ensure your code compiles without warnings
 2. Run tests: `swift test`
 3. Update documentation if you changed public APIs
-4. Update `CHANGELOG.md` with your changes under `[Unreleased]`
+4. Update `CHANGELOG.md` in the current unreleased version section
 5. Submit a pull request with a clear description of the changes
 
 ## Reporting Issues

@@ -52,6 +52,12 @@ public struct AIAgentProfile: Sendable {
     /// inherited by delegated sessions, and never serialized into session storage.
     public var toolExecutionGate: (any ToolExecutionGate)?
 
+    /// 宿主登记的权限类别与「哪次调用需要哪项权限」。nil 表示不使用权限卡，只按安全级别询问。
+    public var toolPermissionPolicy: (any ToolPermissionPolicy)?
+
+    /// 「始终允许」的设备级记录。测试可注入独立实例。
+    public var permissionStore: AppAgentPermissionStore = .shared
+
     /// Publicly discoverable default loop budget.
     public static let defaultMaxIterations = AIAgentExecutionPolicy.defaultMaxIterations
 
@@ -119,8 +125,8 @@ public struct AIAgentProfile: Sendable {
     /// Names of built-in tools to disable (e.g., ["clipboard", "haptic"]).
     public var disabledBuiltInTools: Set<String>
 
-    /// Root directory for file tools (sandbox). Default: Documents/AppAgent/files/.
-    public var sandboxRoot: URL?
+    /// Logical resources exposed through the unified `file` tool.
+    public var fileResources: FileResourceRegistry
 
     // MARK: - Built-in Tool Prompt Defaults
 
@@ -141,29 +147,27 @@ public struct AIAgentProfile: Sendable {
             Ask the user a question when you need clarification or feedback before proceeding.
             Do NOT use for simple yes/no — prefer making a reasonable default choice.
             """,
-        "file_read": """
-            Read text in the agent workspace (default Documents/AppAgent/files). Use offset and limit for large files.
-            Do NOT use for binary files — only text content.
+        "file": """
+            Access logical file resources. Start with op='catalog', then use URIs such as
+            agent://workspace or host://docs. Read and search by default; write and delete
+            only when the resource explicitly allows them. Use reveal_path only when a
+            native host integration needs the physical address.
             """,
-        "file_write": """
-            Write text in the agent workspace (default Documents/AppAgent/files). Overwrites the entire file.
-            Use with care — creates parent directories automatically.
-            """,
-        "skills_list": """
-            List available skills (name + description only). Use skill_view(name) to load full content.
-            Scan skills before replying — if one matches your task, load and follow it.
+        "skill": """
+            Discover and load skills progressively. Start with op='catalog', expand a category with
+            op='list', then load only the selected skill with op='load'. Read linked resources only
+            when the loaded skill requires them.
             """,
         "delegate_task": """
             Spawn a sub-agent for reasoning-heavy subtasks or tasks that would flood your context.
             Pass ALL relevant info via context — the sub-agent knows nothing about your conversation.
             """,
-        "session_search": """
-            Search AppAgent conversation history only when needed for the current request.
-            Do not preload other sessions' histories.
-            """,
-        "session_manage": """
-            Manage AppAgent conversations: list/read/create/merge/archive/restore, as available in the current tool schema.
-            'delete' means archive. No permanent deletion via tools; only the user can purge in the UI.
+        "session": """
+            Search and manage AppAgent conversations only when needed. Use op='search' for
+            past content, op='list' or op='read' for inspection, and lifecycle operations
+            only when the user request requires them. Do not preload other session histories.
+            'delete' means archive; there is no permanent deletion via tools, and only the
+            user can purge in the UI.
             """,
         "app_navigate": """
             Navigate to pages within the app. Call with no arguments to list available routes first.
@@ -173,6 +177,13 @@ public struct AIAgentProfile: Sendable {
             Routine actions that simulate user interaction or use the app's public OpenAPI are allowed \
             by default; execute them without asking for additional permission. \
             Follow the app's normal business validation and confirmation flow.
+            """,
+        "screenshot": """
+            Look before you report a visible change. After drawing, editing a page or changing the UI, \
+            capture the result and check it before telling the user it is done: a successful tool call \
+            only means the change was submitted. Use screenshot for UIKit content; for content rendered \
+            by a map or GPU layer that screenshots cannot capture, use the host's own snapshot operation. \
+            If the result is wrong, fix it, or tell the user exactly what did not work.
             """
     ]
 
@@ -189,16 +200,18 @@ public struct AIAgentProfile: Sendable {
         toolOutputMaxBytes: Int = AIAgentExecutionPolicy.defaultToolOutputMaxBytes,
         toolMutationPolicy: Tool.MutationPolicy = AIAgentExecutionPolicy.defaultToolMutationPolicy,
         toolExecutionGate: (any ToolExecutionGate)? = nil,
+        toolPermissionPolicy: (any ToolPermissionPolicy)? = nil,
         memoryConfig: MemoryConfig = MemoryConfig(),
         registerBuiltInTools: Bool = true,
         disabledBuiltInTools: Set<String> = [],
-        sandboxRoot: URL? = nil
+        fileResources: FileResourceRegistry = FileResourceRegistry()
     ) {
         self.promptBuilders = promptBuilders
         self.identity = ""
         self.toolPrompts = toolPrompts
         self.messageContextProviders = messageContextProviders
         self.toolExecutionGate = toolExecutionGate
+        self.toolPermissionPolicy = toolPermissionPolicy
         self.executionPolicy = AIAgentExecutionPolicy(
             maxIterations: maxIterations,
             toolTimeout: toolTimeout,
@@ -209,7 +222,7 @@ public struct AIAgentProfile: Sendable {
         self.memoryConfig = memoryConfig
         self.registerBuiltInTools = registerBuiltInTools
         self.disabledBuiltInTools = disabledBuiltInTools
-        self.sandboxRoot = sandboxRoot
+        self.fileResources = fileResources
     }
 
     // MARK: - Convenience Init
@@ -239,10 +252,11 @@ public struct AIAgentProfile: Sendable {
         toolOutputMaxBytes: Int = AIAgentExecutionPolicy.defaultToolOutputMaxBytes,
         toolMutationPolicy: Tool.MutationPolicy = AIAgentExecutionPolicy.defaultToolMutationPolicy,
         toolExecutionGate: (any ToolExecutionGate)? = nil,
+        toolPermissionPolicy: (any ToolPermissionPolicy)? = nil,
         memoryConfig: MemoryConfig = MemoryConfig(),
         registerBuiltInTools: Bool = true,
         disabledBuiltInTools: Set<String> = [],
-        sandboxRoot: URL? = nil
+        fileResources: FileResourceRegistry = FileResourceRegistry()
     ) {
         let resolvedIdentity = identity.isEmpty
             ? Self.defaultIdentity(assistantName: assistantName, hostAppName: hostAppName)
@@ -260,10 +274,11 @@ public struct AIAgentProfile: Sendable {
             toolOutputMaxBytes: toolOutputMaxBytes,
             toolMutationPolicy: toolMutationPolicy,
             toolExecutionGate: toolExecutionGate,
+            toolPermissionPolicy: toolPermissionPolicy,
             memoryConfig: memoryConfig,
             registerBuiltInTools: registerBuiltInTools,
             disabledBuiltInTools: disabledBuiltInTools,
-            sandboxRoot: sandboxRoot
+            fileResources: fileResources
         )
         self.identity = resolvedIdentity
     }

@@ -12,63 +12,41 @@ import Foundation
 public struct WebInspectTool: ToolProtocol {
     public let name = "app_web_inspect"
     public let description = """
-        Inspect H5 pages running inside the app's WKWebView containers. The native view tree stops \
-        at WKWebView — this tool is the only way \
-        to see the DOM. Queries are read-only and run in an isolated content world, so page \
-        JavaScript is not affected. Choose an 'op':
-        - 'targets': list live web containers (id, url, title, frame, visibility). Start here when \
-        unsure which container the user means.
-        - 'dom_summary': the map of what the page renders. Only meaningful nodes (text, interactive, \
-        has id, large enough); big subtrees collapse to "⊞ N nodes" plus the 'path' to expand. \
-        Optional 'path' to start elsewhere, 'maxNodes' (default 120).
-        - 'dom_query': one node in detail via 'selector' (preferred) or 'path' — box model \
-        (content/padding/border/margin), key computed styles, scrollWidth vs clientWidth, ancestor \
-        chain and the ancestor that constrains the width. This answers "why is it not full width".
-        - 'why_hidden': why an element is not visible — display/visibility/opacity/zero size/clipped \
-        by an ancestor/outside viewport/covered by another element. Use this before guessing.
-        - 'probe': hit-test a screen point ('x','y' in points, view coordinates) and return the node.
-        - 'highlight' / 'clear_highlight': show/remove a native, touch-transparent red outline for \
-        a node selected by 'selector' or 'path'. Does not modify DOM. Automatically clears on navigation \
-        or when the container becomes hidden/offscreen. Use this instead of eval for marking nodes.
-        - 'page_source': 'kind'="html" (serialized live DOM, truncated) or "resources" (loaded \
-        resources plus failures). Note the live DOM, not the original HTML, is what matters for \
-        rendering bugs.
-        - 'eval': run arbitrary JS and return the JSON-serializable result. Runs in the isolated \
-        world unless 'pageWorld'=true (needed to touch the page's own globals). Requires sensitive \
-        operation approval; permission to inspect DOM does not authorize arbitrary JS or DOM writes.
-        - 'console_start' / 'console_read' / 'console_stop': capture console.log/info/warn/error, \
-        window 'error' and 'unhandledrejection' events. Nothing is injected until you start it, and \
-        only logs produced after starting are captured — start it, reproduce the problem, then read. \
-        'console_read' takes 'limit' (default 100) and 'sinceSeq'.
-        Typical flow for a rendering bug: 'targets' → 'dom_summary' → 'why_hidden' / 'dom_query'.
-        Typical flow for a bridge bug: 'console_start' → ask the user to retry → 'console_read', \
-        and cross-check with app_hook_capture using the host-defined channels for that bridge.
+        Look inside H5 pages shown in the app's WKWebView containers; the native view tree stops at \
+        the WKWebView. Use it when the question is about web content: what an H5 page shows, why an \
+        element is missing, hidden, clipped or the wrong size, which node is at a screen point, what \
+        the page logged or failed to load, or a JS-bridge problem (console capture). Reads run in an \
+        isolated JS world and do not affect the page; 'eval' runs arbitrary JS and asks the user first. \
+        The first call returns the full usage guide.
         """
+    public let usageGuide: String? = Self.guide
     public let parameters = Tool.Schema(
         properties: [
-            "op": .string(description: "Operation.",
+            "op": .string(description: "Operation; see the usage guide for what each one needs.",
                           enumValues: ["targets", "dom_summary", "dom_query", "why_hidden", "probe",
                                        "highlight", "clear_highlight", "page_source", "eval",
                                        "console_start", "console_read", "console_stop"]),
             "scope": HostInspectionScope.parameter,
-            "webviewId": .string(description: "Target container id from 'targets'. Omitted = the visible container with the largest area."),
-            "selector": .string(description: "CSS selector for dom_query / why_hidden / highlight. In the root selected by path if supplied, otherwise the top document."),
-            "path": .string(description: "Child element indices from document.body, e.g. '0/2/1'. 'frame' enters a same-origin iframe body; 'shadow' enters an open shadow root, e.g. '0/frame/1/shadow/0'. Cross-origin frames and closed shadow roots are unsupported."),
-            "maxNodes": .integer(description: "Node budget for dom_summary (default 120).", minimum: 10, maximum: 1000),
-            "x": .number(description: "X in points (view coordinates) for probe."),
-            "y": .number(description: "Y in points (view coordinates) for probe."),
-            "kind": .string(description: "For page_source: 'html' (default) or 'resources'.",
+            "webviewId": .string(description: "Container id from 'targets'. Omit to use the largest visible container."),
+            "selector": .string(description: "CSS selector for dom_query / why_hidden / highlight, searched inside 'path' when both are given."),
+            "path": .string(description: "Element child indexes from document.body, e.g. \"0/2/1\". \"frame\" enters a same-origin iframe, \"shadow\" an open shadow root: \"0/frame/1/shadow/0\"."),
+            "maxNodes": .integer(description: "dom_summary node budget (default 120).", minimum: 10, maximum: 1000),
+            "x": .number(description: "probe only: x in points, web view coordinates."),
+            "y": .number(description: "probe only: y in points, web view coordinates."),
+            "kind": .string(description: "page_source only: 'html' (live DOM, default) or 'resources' (loaded and failed resources).",
                             enumValues: ["html", "resources"],
                             defaultValue: .string("html")),
-            "maxBytes": .integer(description: "Truncation budget for page_source (default 65536).", minimum: 1024, maximum: 524288),
-            "script": .string(description: "JavaScript source for eval."),
-            "pageWorld": .boolean(description: "For eval: run in the page's own world instead of the isolated one (default false)."),
-            "limit": .integer(description: "For console_read: how many records (default 100).", minimum: 1, maximum: 1000),
-            "sinceSeq": .integer(description: "For console_read: only records with a larger seq.", minimum: 0)
+            "maxBytes": .integer(description: "page_source truncation budget (default 65536).", minimum: 1024, maximum: 524288),
+            "script": .string(description: "eval only: JavaScript whose result must be JSON-serializable."),
+            "pageWorld": .boolean(description: "eval only: run in the page's own JS world to reach its globals (default false)."),
+            "limit": .integer(description: "console_read only: max records (default 100).", minimum: 1, maximum: 1000),
+            "sinceSeq": .integer(description: "console_read only: return records with a larger seq.", minimum: 0)
         ],
         required: ["op"]
     )
     public let group = "host-runtime"
+    /// 调试工具，按需加载（debug 组）。
+    public let deferredGroup: String? = ToolGroups.debug
     public let safetyLevel: Tool.SafetyLevel = .sensitive
 
     /// 原生标注是可逆的 UI 修改；任意 JS 不继承 DOM 读取或标注的权限。
@@ -249,4 +227,44 @@ public struct WebInspectTool: ToolProtocol {
             return .error("unknown op: \(op)")
         }
     }
+}
+
+extension WebInspectTool {
+    static let guide = """
+        FIND THE PAGE
+        - targets: live web containers (id, url, title, frame, visibility). Start here when unsure \
+        which container the user means; other ops default to the largest visible one.
+
+        SEE WHAT IT RENDERS
+        - dom_summary (path?, maxNodes?): meaningful nodes only (text, interactive, has id, large \
+        enough); big subtrees collapse to "⊞ N nodes" with the path to expand.
+        - dom_query (selector | path): one node in detail: box model, key computed styles, scrollWidth \
+        vs clientWidth, ancestor chain and the ancestor that limits the width ("why is it not full \
+        width").
+        - why_hidden (selector | path): display / visibility / opacity / zero size / clipped by an \
+        ancestor / outside the viewport / covered by another element. Use it before guessing.
+        - probe (x, y): the node at a point, in points in web view coordinates.
+        - highlight (selector | path) / clear_highlight: native red outline that ignores touches and \
+        does not touch the DOM; cleared on navigation or when the container hides. Use it instead of \
+        eval to mark nodes.
+        - page_source (kind?, maxBytes?): 'html' is the live DOM (what actually renders), 'resources' \
+        lists loaded resources and failures.
+        - Cross-origin iframes and closed shadow roots cannot be entered.
+
+        RUN JS
+        - eval (script, pageWorld?): returns the JSON-serializable result. Runs in the isolated world \
+        unless pageWorld=true (needed for the page's own globals). Always asks the user; approval for \
+        DOM reads does not cover JS or DOM writes.
+
+        CONSOLE AND BRIDGE PROBLEMS
+        - console_start / console_read (limit?, sinceSeq?) / console_stop: captures console.log / \
+        info / warn / error, window 'error' and 'unhandledrejection'. Nothing is injected before \
+        console_start and only later logs are captured: start, have the user retry, then read.
+        - For a JS-bridge problem, also check the host app's own bridge-message capture tool if it \
+        provides one; the native side of a bridge is not visible from the page.
+
+        TYPICAL FLOW
+        - Rendering bug: targets → dom_summary → why_hidden / dom_query.
+        - Bridge bug: console_start → user retries → console_read (+ the host's bridge capture, if any).
+        """
 }

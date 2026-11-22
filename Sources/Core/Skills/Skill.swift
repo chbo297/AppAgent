@@ -5,24 +5,44 @@
 
 import Foundation
 
-/// A skill definition loaded from a SKILL.md file.
-///
-/// Skills are markdown-based instruction documents that teach the agent
-/// how to handle specific task types. Reference: hermes-agent skills system.
-public struct Skill: Sendable {
-    /// Unique skill name (directory name).
+/// Metadata discovered without loading the skill body or linked resources.
+public struct SkillMetadata: Sendable {
     public let name: String
-    /// Short description from frontmatter.
     public let description: String
-    /// Optional category for grouping.
     public let category: String?
-    /// Full SKILL.md content (markdown body).
+    public let linkedFiles: [String]
+
+    public init(
+        name: String,
+        description: String,
+        category: String? = nil,
+        linkedFiles: [String] = []
+    ) {
+        self.name = name
+        self.description = description
+        self.category = category
+        self.linkedFiles = linkedFiles
+    }
+}
+
+/// A fully loaded skill definition.
+///
+/// `SkillsManager.listSkills` returns `SkillMetadata`, so this type is only
+/// created after the runtime explicitly selects one skill to load.
+public struct Skill: Sendable {
+    public let name: String
+    public let description: String
+    public let category: String?
     public let content: String
-    /// Linked files: references/, templates/, scripts/, assets/.
     public let linkedFiles: [String: String]
 
-    public init(name: String, description: String, category: String? = nil,
-                content: String, linkedFiles: [String: String] = [:]) {
+    public init(
+        name: String,
+        description: String,
+        category: String? = nil,
+        content: String,
+        linkedFiles: [String: String] = [:]
+    ) {
         self.name = name
         self.description = description
         self.category = category

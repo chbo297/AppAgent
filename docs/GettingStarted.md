@@ -4,9 +4,9 @@ This guide follows the current package shape: one SwiftPM product, one Swift mod
 
 ## Prerequisites
 
-- Xcode 15 or later
-- Swift 5.10 or later
-- iOS 13+, native macOS 12+, or Mac Catalyst 13.1+
+- Xcode 16 or later
+- Swift 6.0 or later
+- iOS 15+, native macOS 12+, or Mac Catalyst 15+
 - An LLM API key if you use the built-in `AnthropicProvider`
 
 ## Installation
@@ -95,6 +95,13 @@ for await event in events {
 
     case .streamingContent(let delta):
         print(delta, terminator: "")
+
+    case .reasoningContent:
+        // 模型的思考过程，按需展示。
+        break
+
+    case .notice(let text):
+        print("\nNotice: \(text)")
 
     case .toolCallStarted(let call):
         print("\nTool call: \(call.name)")

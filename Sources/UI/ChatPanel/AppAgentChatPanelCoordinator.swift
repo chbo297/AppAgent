@@ -74,11 +74,15 @@ final class AppAgentChatPanelCoordinator: NSObject {
     /// 调用方 `applyChatPanelContainerLayout` 在本方法之后紧接着提交容器布局，尺寸由那一次写入给出。
     func updateLayout(
         bounds: CGRect,
-        safeAreaInsets: UIEdgeInsets
+        safeAreaInsets: UIEdgeInsets,
+        inputBarHeight: CGFloat = AppAgentInputBarMetrics.barHeight,
+        hostReservedBottomHeight: CGFloat = 0
     ) {
         guard let newGeometry = AppAgentChatPanelGeometry(
             bounds: bounds,
-            safeAreaInsets: safeAreaInsets
+            safeAreaInsets: safeAreaInsets,
+            inputBarHeight: inputBarHeight,
+            hostReservedBottomHeight: hostReservedBottomHeight
         ) else { return }
 
         guard geometry != newGeometry else {
@@ -87,6 +91,14 @@ final class AppAgentChatPanelCoordinator: NSObject {
         }
 
         let isFirstGeometry = geometry == nil
+        // 静止停在 peek 时 peek 高度变了（宿主底部预留高度、输入栏高度）要跟着落到新的 peek，
+        // 否则 BODragScroll 保留旧展示高度，面板比输入栏高出一截。拖拽、减速中不打断。
+        let restsAtPeek = geometry.map { oldGeometry in
+            abs(oldGeometry.peekHeight - newGeometry.peekHeight) > 0.5
+                && abs(dragScrollView.displayHeight - oldGeometry.peekHeight) <= 0.5
+                && !dragScrollView.isDragging
+                && !dragScrollView.isDecelerating
+        } ?? false
         geometry = newGeometry
         updateLatestReplyInitialHeight(for: newGeometry)
         if isFirstGeometry {
@@ -107,6 +119,10 @@ final class AppAgentChatPanelCoordinator: NSObject {
 
         dragScrollView.setNeedsLayout()
         dragScrollView.layoutIfNeeded()
+        if restsAtPeek {
+            // 不用 BODragScroll 自带动画：调用方若在 UIView 动画块里，这次写入与输入栏共用同一条曲线。
+            dragScrollView.scroll(toDisplayHeight: newGeometry.peekHeight, animated: false)
+        }
         applyDisplayHeightState(dragScrollView.displayHeight)
     }
 
@@ -230,7 +246,8 @@ final class AppAgentChatPanelCoordinator: NSObject {
         panelView.updateDisplayHeight(
             displayHeight,
             minimumDisplayHeight: geometry.peekHeight,
-            compactTransitionStartDisplayHeight: geometry.halfHeight
+            compactTransitionStartDisplayHeight: geometry.halfHeight,
+            compactHeight: geometry.inputBarHeight
         )
     }
 }

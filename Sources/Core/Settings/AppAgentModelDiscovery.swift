@@ -158,13 +158,15 @@ public enum AppAgentModelDiscovery {
         let settings = AppAgentEndpointSettings(
             baseURL: baseURL,
             apiKey: apiKey,
-            enabledModels: [AppAgentModelRef(modelId: candidate.modelId, apiProtocol: candidate.apiProtocol)]
+            enabledModels: [AppAgentModelRef(modelId: candidate.modelId, apiProtocol: candidate.apiProtocol)],
+            contextWindow: contextWindow,
+            maxTokens: maxTokens
         ).normalized
         guard settings.isUsable else {
             return AppAgentModelAvailability(
                 candidate: candidate,
                 isAvailable: false,
-                failureReason: "接口地址、API Key 或模型 id 无效"
+                failureReason: "接口地址、API Key、模型 id 或 token 上限无效"
             )
         }
         let modelId = settings.enabledModels[0].modelId
@@ -365,10 +367,14 @@ public enum AppAgentModelDiscovery {
         _ seconds: TimeInterval,
         _ body: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
+        guard seconds.isFinite, seconds > 0,
+              let nanoseconds = UInt64(exactly: (seconds * 1_000_000_000).rounded(.up)) else {
+            throw DiscoveryError.timeout
+        }
+        return try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask { try await body() }
             group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                try await Task.sleep(nanoseconds: nanoseconds)
                 throw DiscoveryError.timeout
             }
             defer { group.cancelAll() }

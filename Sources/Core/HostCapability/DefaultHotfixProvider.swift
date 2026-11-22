@@ -5,7 +5,7 @@
 //  基于 JavaScriptCore 的通用 HotfixProvider 默认实现：把一段 JS 当作「运行时补丁」执行，
 //  JS 里通过 `appagent` 桥直接读改运行时（视图树寻址、改 frame/颜色/文本、反射调用、KVC 读写）。
 //  补丁按名字存放在槽位里，可开关、可列举、可移除；开关后重新 eval 已启用的槽位。
-//  能力很强，宿主需显式注册 HotfixTool 才会暴露给模型。
+//  宿主只需要显式选择目标范围和开关，是否能使用由 AppAgent 的安全边界统一控制。
 //
 
 #if canImport(UIKit) && canImport(JavaScriptCore)

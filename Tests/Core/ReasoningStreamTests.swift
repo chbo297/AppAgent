@@ -5,13 +5,13 @@ import XCTest
 /// LLMExecutor 转成 AIAgentEvent.reasoningContent 并累计到 uiState。
 final class ReasoningStreamTests: XCTestCase {
 
-    func testOpenAIReasoningContentBecomesReasoningDelta() {
+    func testOpenAIReasoningContentBecomesReasoningDelta() throws {
         var active: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let event = SSEEvent(
             event: "",
             data: #"{"choices":[{"delta":{"reasoning_content":"先看设置页"},"finish_reason":null}]}"#
         )
-        let events = OpenAIChatCompletionsMapper.parseSSEEvent(event, activeToolCalls: &active)
+        let events = try OpenAIChatCompletionsMapper.parseSSEEvent(event, activeToolCalls: &active)
         guard case .reasoningDelta(let text)? = events.first else {
             return XCTFail("expected reasoningDelta, got \(events)")
         }
@@ -19,10 +19,10 @@ final class ReasoningStreamTests: XCTestCase {
     }
 
     /// 部分网关用 `reasoning` 而不是 `reasoning_content`。
-    func testOpenAIReasoningAliasIsAccepted() {
+    func testOpenAIReasoningAliasIsAccepted() throws {
         var active: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let event = SSEEvent(event: "", data: #"{"choices":[{"delta":{"reasoning":"思路 A"}}]}"#)
-        let events = OpenAIChatCompletionsMapper.parseSSEEvent(event, activeToolCalls: &active)
+        let events = try OpenAIChatCompletionsMapper.parseSSEEvent(event, activeToolCalls: &active)
         guard case .reasoningDelta(let text)? = events.first else {
             return XCTFail("expected reasoningDelta, got \(events)")
         }
@@ -30,23 +30,23 @@ final class ReasoningStreamTests: XCTestCase {
     }
 
     /// 正文与思考互不串台。
-    func testOpenAIContentStaysTextDelta() {
+    func testOpenAIContentStaysTextDelta() throws {
         var active: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let event = SSEEvent(event: "", data: #"{"choices":[{"delta":{"content":"最终答案"}}]}"#)
-        let events = OpenAIChatCompletionsMapper.parseSSEEvent(event, activeToolCalls: &active)
+        let events = try OpenAIChatCompletionsMapper.parseSSEEvent(event, activeToolCalls: &active)
         guard case .textDelta(let text)? = events.first else {
             return XCTFail("expected textDelta, got \(events)")
         }
         XCTAssertEqual(text, "最终答案")
     }
 
-    func testAnthropicThinkingDeltaBecomesReasoningDelta() {
+    func testAnthropicThinkingDeltaBecomesReasoningDelta() throws {
         var active: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
         let event = SSEEvent(
             event: "content_block_delta",
             data: #"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"我在推理"}}"#
         )
-        let events = AnthropicMapper.parseSSEEvent(event, activeToolCalls: &active)
+        let events = try AnthropicMapper.parseSSEEvent(event, activeToolCalls: &active)
         guard case .reasoningDelta(let text)? = events.first else {
             return XCTFail("expected reasoningDelta, got \(events)")
         }

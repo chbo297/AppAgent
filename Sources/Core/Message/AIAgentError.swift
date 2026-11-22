@@ -5,6 +5,64 @@
 
 import Foundation
 
+/// 模型请求边界保存的安全网络诊断；工具错误不经过此类型。
+struct ModelNetworkError: Error, LocalizedError, Sendable {
+    let host: String
+    let detail: String
+    let domain: String
+    let code: Int
+
+    init?(_ error: Error, baseURL: String, secrets: [String] = []) {
+        let underlying = error as NSError
+        guard underlying.domain == NSURLErrorDomain,
+              underlying.code != NSURLErrorCancelled else {
+            return nil
+        }
+        let failingURL = underlying.userInfo[NSURLErrorFailingURLErrorKey] as? URL
+        let failingURLString = underlying.userInfo[NSURLErrorFailingURLStringErrorKey] as? String
+        host = Self.hostOnly(failingURL?.absoluteString)
+            ?? Self.hostOnly(failingURLString)
+            ?? Self.hostOnly(baseURL)
+            ?? "未知 Host"
+        detail = Self.redact(underlying.localizedDescription, secrets: secrets)
+        domain = underlying.domain
+        code = underlying.code
+    }
+
+    var errorDescription: String? {
+        "模型请求失败（Host: \(host)）\n\(detail)\n\(domain) / \(code)\n网络错误，请稍后重试。"
+    }
+
+    private static func hostOnly(_ value: String?) -> String? {
+        guard let value, let host = URLComponents(string: value)?.host, !host.isEmpty,
+              host.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\@?#%")
+                .union(.whitespacesAndNewlines)) == nil else {
+            return nil
+        }
+        return host
+    }
+
+    private static func redact(_ description: String, secrets: [String]) -> String {
+        var result = description
+        // 仅保留 URL 的 Host；包括重定向地址，不能把路径、凭据或查询参数带入历史。
+        let pattern = #"(?i)(?:[a-z][a-z0-9+.-]*://|//)[^\s<>"“”‘’；。，！？（）]+"#
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+            for match in matches.reversed() {
+                guard let range = Range(match.range, in: result) else {
+                    continue
+                }
+                let replacement = hostOnly(String(result[range])) ?? "[URL 已隐藏]"
+                result.replaceSubrange(range, with: replacement)
+            }
+        }
+        for secret in secrets where !secret.isEmpty {
+            result = result.replacingOccurrences(of: secret, with: "[已隐藏]")
+        }
+        return result
+    }
+}
+
 /// Errors from the agent execution layer.
 public enum AIAgentError: Error, LocalizedError, Sendable {
     case maxIterationsReached(limit: Int)
@@ -55,6 +113,9 @@ public enum ModelError: Error, LocalizedError, Sendable {
     case invalidResponse
     case httpError(statusCode: Int, body: String)
     case decodingError(String)
+    /// 模型这次吐出的工具调用残缺（参数不是 JSON 对象 / 缺名称）。还没有任何工具执行，
+    /// 重发同一请求通常就能拿到完整调用，所以和 `decodingError` 分开归类为可重试。
+    case malformedToolCall(String)
     case providerError(String)
     /// HTTP 200 流中携带的上游错误。兼容网关会把这类错误包装成 SSE 数据返回。
     case upstreamError(type: String?, code: String? = nil, message: String)
@@ -72,6 +133,8 @@ public enum ModelError: Error, LocalizedError, Sendable {
             return "模型服务请求失败（HTTP \(code)）\n服务端返回：\(body)"
         case .decodingError(let msg):
             return "Decoding error: \(msg)"
+        case .malformedToolCall(let msg):
+            return "模型返回的工具调用不完整：\(msg)"
         case .providerError(let msg):
             return "Provider error: \(msg)"
         case .upstreamError(let type, let code, let message):

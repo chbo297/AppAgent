@@ -11,6 +11,8 @@
 //  - run-logs/          Logger 落盘的运行日志（AppAgentRunLog，跨启动保留）
 //  - sessions/          会话快照（含每轮的工具往返，能复原对话时间线）
 //  - memory/            长期记忆
+//  - host/<name>/       宿主用 registerHostDirectory 登记的排查目录（各自限额，新的优先），
+//                       以及 registerHostContributor 在导出时机写入的关键信息
 //
 //  zip 不引第三方：用 `NSFileCoordinator` 的 `.forUploading` 读意图，系统会给一个
 //  目录的临时 zip 副本，拷出来即可。整个过程是阻塞的，所以只在后台队列跑。
@@ -104,7 +106,28 @@ public enum AppAgentDiagnostics {
         )
         manifest.append("memory/ — 记忆文件 \(copiedMemory) 个")
 
-        // 5) 概要放最后写，好把上面的计数写进去。
+        // 5) 宿主登记的排查目录：只拷最新的一部分，诊断包不被历史记录撑大。
+        for directory in hostDirectories() {
+            let copied = copyRecentFiles(
+                directory.url,
+                to: root.appendingPathComponent("host/\(directory.name)", isDirectory: true),
+                maxBytes: directory.maxBytes
+            )
+            manifest.append("host/\(directory.name)/ — 宿主登记目录，最近 \(copied.copied)/\(copied.total) 个文件")
+        }
+        // 宿主在导出时机补充的关键信息：每个补充方拿到自己的 host/<name>/ 目录自行写入。
+        for contributor in hostContributors() {
+            let dest = root.appendingPathComponent("host/\(contributor.name)", isDirectory: true)
+            do {
+                try fm.createDirectory(at: dest, withIntermediateDirectories: true)
+                let note = try contributor.contribute(dest)
+                manifest.append("host/\(contributor.name)/ — \(note ?? "宿主补充的诊断信息")")
+            } catch {
+                manifest.append("host/\(contributor.name)/ — 宿主补充失败：\(error.localizedDescription)")
+            }
+        }
+
+        // 6) 概要放最后写，好把上面的计数写进去。
         try write(
             summaryText(now: now, events: events, runLogFiles: logFiles, manifest: manifest),
             to: root.appendingPathComponent("summary.txt")
@@ -115,6 +138,76 @@ public enum AppAgentDiagnostics {
         let attributes = try? fm.attributesOfItem(atPath: zipURL.path)
         let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
         return Bundle(url: zipURL, byteCount: size, manifest: manifest)
+    }
+
+    // MARK: - Host directories
+
+    /// 宿主登记、要随诊断包导出的排查目录（如宿主自己的网络请求记录）。
+    /// 导出时拷到 `host/<name>/`，按修改时间从新到旧拷，累计超过 `maxBytes` 就停。
+    public struct HostDirectory: Sendable, Equatable {
+        public let name: String
+        public let url: URL
+        public let maxBytes: Int
+    }
+
+    private static let hostDirectoryStore = Locked<[HostDirectory]>(wrappedValue: [])
+    private static let hostContributorStore = Locked<[HostContributor]>(wrappedValue: [])
+
+    /// 宿主在导出时机补充关键信息（当前开关、计数、状态摘要等）：导出时在后台队列调用 `contribute`，
+    /// 传入该宿主自己的 `host/<name>/` 目录，宿主把要带上的内容写进去；返回值作为清单说明，nil 用默认文案。
+    public struct HostContributor: Sendable {
+        public let name: String
+        public let contribute: @Sendable (URL) throws -> String?
+    }
+
+    /// 只保留字母、数字、`.`、`_`、`-`；全是点的名字（`.`、`..`）会解析到诊断包的 host 目录本身或上级。
+    private static func safeHostName(_ name: String) -> String? {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+        let safeName = String(name.unicodeScalars.map { scalar in
+            allowed.contains(scalar) && scalar.isASCII ? Character(scalar) : "_"
+        })
+        let hasNonDot = safeName.contains { character in
+            character != "."
+        }
+        guard !safeName.isEmpty, hasNonDot else {
+            return nil
+        }
+        return safeName
+    }
+
+    /// 登记一个随诊断包导出的目录；同名再登记会替换。`name` 只保留字母、数字、`.`、`_`、`-`。
+    public static func registerHostDirectory(name: String, url: URL, maxBytes: Int = 64 * 1024 * 1024) {
+        guard let safeName = safeHostName(name), maxBytes > 0 else {
+            return
+        }
+        let entry = HostDirectory(name: safeName, url: url, maxBytes: maxBytes)
+        hostDirectoryStore.mutate { current in
+            current.removeAll { $0.name == safeName }
+            current.append(entry)
+        }
+    }
+
+    public static func hostDirectories() -> [HostDirectory] {
+        hostDirectoryStore.wrappedValue
+    }
+
+    /// 登记一个导出时调用的补充方；同名再登记会替换。可与同名的 registerHostDirectory 共用一个目录。
+    public static func registerHostContributor(
+        name: String,
+        contribute: @escaping @Sendable (URL) throws -> String?
+    ) {
+        guard let safeName = safeHostName(name) else {
+            return
+        }
+        let entry = HostContributor(name: safeName, contribute: contribute)
+        hostContributorStore.mutate { current in
+            current.removeAll { $0.name == safeName }
+            current.append(entry)
+        }
+    }
+
+    public static func hostContributors() -> [HostContributor] {
+        hostContributorStore.wrappedValue
     }
 
     // MARK: - Pieces
@@ -184,6 +277,43 @@ public enum AppAgentDiagnostics {
         info.append(("osVersion", ProcessInfo.processInfo.operatingSystemVersionString))
         info.append(("locale", Locale.current.identifier))
         return info
+    }
+
+    /// 把 `source` 下的普通文件按修改时间从新到旧拷进 `dest`，累计超过 `maxBytes` 就停。
+    /// 单个文件本身超过上限时也拷（只拷这一个），保证最新的一条一定在包里。
+    @discardableResult
+    static func copyRecentFiles(_ source: URL?, to dest: URL, maxBytes: Int) -> (copied: Int, total: Int) {
+        guard let source else {
+            return (0, 0)
+        }
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        let files = ((try? fm.contentsOfDirectory(at: source, includingPropertiesForKeys: keys)) ?? [])
+            .compactMap { url -> (url: URL, size: Int, date: Date)? in
+                guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                      values.isRegularFile == true else {
+                    return nil
+                }
+                return (url, values.fileSize ?? 0, values.contentModificationDate ?? .distantPast)
+            }
+            .sorted { $0.date > $1.date }
+        guard !files.isEmpty else {
+            return (0, 0)
+        }
+        try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+        var copied = 0
+        var bytes = 0
+        for file in files {
+            if copied > 0, bytes + file.size > maxBytes {
+                break
+            }
+            let target = dest.appendingPathComponent(file.url.lastPathComponent)
+            if (try? fm.copyItem(at: file.url, to: target)) != nil {
+                copied += 1
+                bytes += file.size
+            }
+        }
+        return (copied, files.count)
     }
 
     /// 把 `source` 下匹配后缀的文件拷进 `root/name/`，返回拷了几个。

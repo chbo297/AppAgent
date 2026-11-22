@@ -44,16 +44,16 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         // 2) SDK chat UI – mounted in its own independent overlay window.
         Task { @MainActor in
-            // AppAgent 默认接口为 OneAPI；用户可在会话列表右上角的「设置」里填写自己的 API Key、
-            // 拉取并勾选模型。已保存过设置则用保存值，否则回落到 OneAPI 默认（apiKey 为空）。
+            // 用户在会话列表的「设置」里填写自己的接口地址、API Key 并选择模型。
+            // 未保存配置时保持为空，由 SDK 的统一校验拒绝未完成的配置。
             let settings = AppAgentSettingsStore.loadOrDefault()
             await ModelProviderCentral.`default`.register(settings: settings)
 
-            if !settings.hasUsableAPIKey, !isSelfCheck, !showsSampleConversation, let presenter = host.rootViewController {
+            if !settings.isUsable, !isSelfCheck, !showsSampleConversation, let presenter = host.rootViewController {
                 showAlert(
                     on: presenter,
-                    title: "尚未配置 API Key",
-                    message: "AppAgent 默认使用 OneAPI 接口。请点开对话面板会话列表右上角的「设置」填写 API Key、拉取并勾选模型后即可开始对话。"
+                    title: "尚未完成模型配置",
+                    message: "请打开对话面板会话列表的「设置」，填写接口地址和 API Key，拉取并勾选模型后即可开始对话。"
                 )
             }
 

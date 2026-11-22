@@ -122,14 +122,122 @@ public actor ToolCentral {
 
     private var sharedTools: [String: any ToolProtocol] = [:]
     private var toolFactories: [String: any ToolFactory] = [:]
+    /// 已注册的宿主工具集，按 namespace 索引；同一 namespace 再次注册即整组替换。
+    private var hostSets: [String: HostToolSet] = [:]
+    /// 按需加载组：组名 → 一句话用途。SDK 的 debug 组预置，宿主工具不必等内置工具注册完才能加入。
+    private var deferredGroups: [String: String] = [ToolGroups.debug: ToolGroups.debugSummary]
 
     public init() {}
 
     // MARK: - Registration
 
-    /// Register a shared tool instance (used by all sessions).
+    /// Register an SDK-defined tool instance (used by all sessions). The name is exposed as-is.
+    /// Host business tools go through `registerHost(_:)` so they get a namespace prefix.
     public func register(_ tool: any ToolProtocol) {
         sharedTools[tool.name] = tool
+    }
+
+    /// 注册宿主工具集：工具以 `<namespace>_<name>` 暴露给模型，与已注册工具重名时整组失败、不做任何改动。
+    /// 同一 namespace 再次注册会先移除上一组，便于宿主在配置变化后重建。
+    public func registerHost(_ set: HostToolSet) throws {
+        guard ToolNaming.isValidNamespace(set.namespace) else {
+            throw ToolRegistrationError.invalidNamespace(set.namespace)
+        }
+        let previous = hostSets[set.namespace]
+        let previousNames = Set((previous?.tools ?? []).map { tool in
+            HostTool(base: tool, namespace: set.namespace).name
+        })
+        let builtInNames = Set(sharedTools.keys).union(toolFactories.keys).subtracting(previousNames).filter { name in
+            !(sharedTools[name] is HostTool)
+        }
+        guard !ToolNaming.reservedNamespaces(builtInNames: builtInNames).contains(set.namespace) else {
+            throw ToolRegistrationError.reservedNamespace(set.namespace)
+        }
+        var wrapped: [HostTool] = []
+        var seen: Set<String> = []
+        for tool in set.tools {
+            let hostTool = HostTool(base: tool, namespace: set.namespace)
+            guard ToolNaming.isValidToolName(tool.name), ToolNaming.isValidToolName(hostTool.name) else {
+                throw ToolRegistrationError.invalidToolName(hostTool.name)
+            }
+            let taken = (sharedTools[hostTool.name] != nil || toolFactories[hostTool.name] != nil)
+                && !previousNames.contains(hostTool.name)
+            guard !taken, seen.insert(hostTool.name).inserted else {
+                throw ToolRegistrationError.duplicateToolName(hostTool.name)
+            }
+            if let group = tool.deferredGroup, deferredGroups[group] == nil, set.deferredGroups[group] == nil {
+                throw ToolRegistrationError.unknownDeferredGroup(tool: hostTool.name, group: group)
+            }
+            wrapped.append(hostTool)
+        }
+        for name in previousNames {
+            sharedTools.removeValue(forKey: name)
+        }
+        for tool in wrapped {
+            sharedTools[tool.name] = tool
+        }
+        for (group, summary) in set.deferredGroups {
+            deferredGroups[group] = summary
+        }
+        hostSets[set.namespace] = set
+    }
+
+    /// 已注册的宿主工具集（按 namespace 排序）。
+    public func hostToolSets() -> [HostToolSet] {
+        hostSets.keys.sorted().compactMap { namespace in
+            hostSets[namespace]
+        }
+    }
+
+    /// 登记按需加载组。工具通过 `deferredGroup` 加入；同名再次登记只更新用途说明。
+    public func registerDeferredGroup(_ name: String, summary: String) {
+        deferredGroups[name] = summary
+    }
+
+    /// 已登记、且至少有一个工具的按需加载组：组名 → 用途。
+    public func deferredGroupSummaries() -> [String: String] {
+        var used: Set<String> = []
+        for tool in sharedTools.values {
+            if let group = tool.deferredGroup {
+                used.insert(group)
+            }
+        }
+        for factory in toolFactories.values {
+            if let group = factory.deferredGroup {
+                used.insert(group)
+            }
+        }
+        return deferredGroups.filter { entry in
+            used.contains(entry.key)
+        }
+    }
+
+    /// 系统提示词里的工具来源与按需加载说明；没有宿主工具集、也没有按需组时返回 nil。
+    /// 文字固定，不随会话是否已加载某组变化，便于提示词缓存。
+    public func toolSourcesPrompt() -> String? {
+        var lines: [String] = []
+        let sets = hostToolSets()
+        if !sets.isEmpty {
+            lines.append("# Tool sources")
+            for set in sets {
+                lines.append("- Tools named `\(set.namespace)_*` are provided by \(set.displayName): \(set.summary)")
+            }
+            lines.append("- Other tools are App Agent built-ins. Just use each tool as its description says; "
+                         + "the source matters only when debugging.")
+        }
+        let groups = deferredGroupSummaries()
+        if !groups.isEmpty {
+            if !lines.isEmpty {
+                lines.append("")
+            }
+            lines.append("# Tools loaded on demand")
+            for name in groups.keys.sorted() {
+                lines.append("- \(name): \(groups[name] ?? "")")
+            }
+            lines.append("Call `\(LoadToolsTool.toolName)` with the group name before using these; "
+                         + "they stay available for the rest of this conversation.")
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     /// Register a tool factory (creates per-session instances).

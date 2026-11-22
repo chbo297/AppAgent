@@ -39,7 +39,7 @@ struct HostStoragePolicy: Sendable {
         self.enumeratedEntryCount = index.enumeratedEntries
     }
 
-    // Settings, input-bar layout and the host message-capture contract all live here.
+    // Settings and input-bar layout live here.
     // Reserve the namespaces, not just today's keys, so a newly introduced key is safe.
     static func isAppAgentDefaultsKey(_ key: String) -> Bool {
         ["com.appagent", "appagent"].contains {
@@ -147,15 +147,13 @@ struct HostStoragePolicy: Sendable {
             if isWithin(path, "Documents/AppAgent") {
                 return !isWithin(path, "Documents/AppAgent/files")
             }
-            if isWithin(path, "Library/Caches/AppAgentMsgCapture")
-                || isWithin(path, "Caches/AppAgentMsgCapture") { return true }
             for temporary in ["tmp", "temp"] where isWithin(path, temporary) {
                 let parts = path.split(separator: "/")
                 guard parts.count > 1 else { continue }
                 let parent = root.appendingPathComponent(String(parts[0]))
                 let child = String(parts[1])
                 if isDiagnostic(child, in: parent) { return true }
-                if ["appagent-debug.log", "appagent-debug.json", "AppAgentMsgCapture", "AppAgent"]
+                if ["appagent-debug.log", "appagent-debug.json", "AppAgent"]
                     .contains(where: { SandboxPathResolver.namesEqual(child, $0, in: parent) }) { return true }
             }
             return false
@@ -212,18 +210,17 @@ struct HostStoragePolicy: Sendable {
             let fixed = [
                 "Documents", "Documents/AppAgent", "Documents/AppAgent/sessions",
                 "Documents/AppAgent/memory", "Documents/AppAgent/logs", "Documents/AppAgent/skills",
-                "Library", "Library/Preferences", "Library/Caches", "Library/Caches/AppAgentMsgCapture",
-                "Caches", "Caches/AppAgentMsgCapture", "tmp", "temp",
-                "tmp/AppAgent", "tmp/AppAgentMsgCapture", "temp/AppAgent", "temp/AppAgentMsgCapture",
+                "Library", "Library/Preferences", "Library/Caches",
+                "Caches", "tmp", "temp",
+                "tmp/AppAgent", "temp/AppAgent",
                 "tmp/appagent-debug.log", "tmp/appagent-debug.json",
                 "temp/appagent-debug.log", "temp/appagent-debug.json"
             ]
             for name in fixed { addNamespace(name) }
             pending = [
                 ("Documents/AppAgent", .appAgentTree), ("Library/Preferences", .preferences),
-                ("Library/Caches/AppAgentMsgCapture", .sdk), ("Caches/AppAgentMsgCapture", .sdk),
-                ("tmp/AppAgent", .sdk), ("tmp/AppAgentMsgCapture", .sdk),
-                ("temp/AppAgent", .sdk), ("temp/AppAgentMsgCapture", .sdk)
+                ("tmp/AppAgent", .sdk),
+                ("temp/AppAgent", .sdk)
             ]
             // Dynamic diagnostic file and staging-directory names are not fixed roots.
             for temporary in ["tmp", "temp"] {

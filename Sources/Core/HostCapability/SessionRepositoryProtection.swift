@@ -6,7 +6,7 @@ import Foundation
 /// not use this guard: only its manual-UI purge API may permanently remove data.
 enum SessionRepositoryProtection {
     static let deniedMessage =
-        "Session repositories are read-only to file tools. Use session_manage to archive or restore; permanent deletion requires the user's Trash UI."
+        "Session repositories are read-only to file tools. Use session to archive or restore; permanent deletion requires the user's Trash UI."
     static let unverifiedMessage = "Session repository protection could not be verified; write denied."
 
     // Keep the original registration forever. In addition, retain paths observed

@@ -6,7 +6,7 @@ iOS/macOS AIAgent SDK，为应用提供嵌入式 AI AIAgent 能力。Core 零第
 > **边界（长期生效）**：AppAgent 只做**通用机制与协议**。任何业务/领域能力（某个 App 的后台服务客户端、
 > 地图能力、业务面板等）都由**宿主**实现并经 `ToolCentral.register(_:)` / `ModelProviderCentral.register`
 > / `DecisionResponderCentral` / Skills 注册进来；AppAgent 不感知、不引用、不依赖具体宿主。
-> `Sources/Core/HostCapability/` 放的是宿主能力的**协议 + 默认实现 + 装配**（运行时内省 / 热修复 / 消息捕获），
+> `Sources/Core/HostCapability/` 放的是宿主能力的**协议 + 默认实现 + 装配**（运行时内省 / 热修复 / 网页内省），
 > 通用；`Sources/Core/Model/EndpointProviderFactory.swift` 按端点参数造 Provider，也不绑定任何宿主配置类型。
 
 ## 构建 & 测试
@@ -90,17 +90,31 @@ AIAgent.init 接收两者作为参数（默认 `.default`），AISession 通过 
 
 ## 内置工具
 
-**自动注册（`AIAgent.registerBuiltInTools()`，21 个）**：clarify, memory, todo, file_read, file_write,
-file_search, skills_list, skill_view, skill_manage, text_to_speech, delegate_task, session_search,
-session_manage, clipboard, haptic, web_fetch, app_user_defaults, app_sandbox_file, app_device_info,
-app_runtime_inspect, screenshot（最后两个仅在 `canImport(UIKit)` 时注册）。
+**自动注册（`AIAgent.registerBuiltInTools()`）**：clarify, memory, todo, file, skill,
+text_to_speech, delegate_task, session, clipboard, haptic, web_fetch, app_user_defaults,
+device_info, host_info, load_tools, app_ui, app_runtime_inspect, screenshot
+（最后三个仅在 `canImport(UIKit)` 时注册）。
 
-**需宿主注入 Provider / 自行注册**：app_action, app_navigate, app_state, web_search。
+**默认宿主桥接**：app_action 由宿主注入 `AppActionProvider` 后自动注册；host file resources
+通过 `FileResourceRegistry` 注入。其他业务 Provider 仍由宿主自行注册。
 
-**宿主能力工具（`Core/HostCapability/HostToolset.swift` 按可用 provider 装配，4 个）**：
-`app_runtime_inspect`（看：view_tree / view_info；改：view_set；模拟用户操作：view_activate /
-page_navigate / page_scroll；反射：view_invoke）、`app_hotfix`、
-`app_hook_capture`、`app_web_inspect`。协议与默认实现都在 `Core/HostCapability/`。
+**宿主能力工具（`Core/HostCapability/HostToolset.swift` 按可用 provider 装配）**：
+`app_ui`（看：ui_hierarchy / view_tree / view_info；模拟用户操作：view_activate / page_navigate / page_scroll，常驻）、
+`app_runtime_inspect`（内存对象读取、类/方法反射、view_set / invoke，debug 组）、`app_hotfix`、`app_web_inspect`。
+两个运行时工具共用一个 `RuntimeInspectProvider`。`ui_hierarchy` / `view_tree` / `view_info` 两边都有，呈现不同：
+`app_ui` 按产品说页面名、用途和控件文字，类名只在页面没有任何说明时兜底；`app_runtime_inspect` 给类名并附页面说明
+（`HostInspectionContext.presentation`）。页面名和用途由宿主经 `HostPageCatalog.describer` 提供。
+其余 op 只属于一边，调错工具直接报错。协议与默认实现都在 `Core/HostCapability/`。
+H5 / 桥消息采集不在 SDK：由宿主自己实现并作为宿主工具注册。
+
+**宿主业务工具与命名**：SDK 内置工具用 `ToolCentral.register(_:)`，名字原样给模型；宿主业务工具打包成
+`HostToolSet`，经 `ToolCentral.registerHost(_:)` 注册：宿主只写本地短名，模型看到 `<namespace>_<name>`
+（如 `bdmap_route`），重名、非法名或占用内置名前缀的 namespace 整组失败。宿主的权限与边界策略按
+`tool.localName` 判断，来源看 `tool.origin`。见 `Core/Tool/HostTools.swift`。
+
+**按需加载组**：工具 `deferredGroup` 非空时平时不发给模型，系统提示词里每组只占一行；模型调
+`load_tools(group:)` 后本会话才带上完整定义（会话历史里调过就算已加载）。SDK 预置 `debug` 组
+（`ToolGroups.debug`），宿主调试工具可直接加入。
 
 「让界面动起来」优先用 `page_navigate` / `view_activate`，不要用反射硬凑：真机上一次
 「切到 profile 页」因为没有这两个 op，模型绕着 `view_invoke` 试了 9 轮、烧掉 231 秒。
@@ -117,17 +131,17 @@ page_navigate / page_scroll；反射：view_invoke）、`app_hotfix`、
 - 存储: `FileMemoryStorage` (JSON 文件) / `InMemoryMemoryStorage`
 
 ### Skills
-- `SkillsManager` actor: 从 Bundle + Documents 加载技能 (markdown + YAML frontmatter)
-- 三个工具暴露给 LLM: skills_list → skill_view → skill_manage
+- `SkillsManager` actor: 先扫描 metadata，再按需加载 markdown 和 linked resources
+- 一个 `skill` 工具按 catalog → list → load 渐进式暴露能力
 
-### Provider (Anthropic)
-- `AnthropicProvider`: 唯一实现。SSE 流式统一走 `URLSession.bytes`（最低 iOS 15 / macOS 12，原来的 iOS 13/14 `URLSessionDataDelegate` 降级路径已删除）
+### Provider
+- `AnthropicProvider`: 内置实现，支持 Anthropic Messages、OpenAI Chat Completions 与 Responses。SSE 流式统一走 `URLSession.bytes`（最低 iOS 15 / macOS 12）。
 - `AnthropicMapper`: 双向映射 (AIAgentMessage ↔ Anthropic wire format)
 - `SSEParser`: 逐行 SSE 解析
 - `ConcurrencyLimiter`: actor FIFO 并发控制 (默认 limit=5)
 
 ### UI
-- `ChatViewController` (UIKit): 即插即用聊天界面，通过 `session.uiState.onChange` 响应式更新
+- `AppAgentOverlay` / `AppAgentViewController` (UIKit): overlay 聊天界面，通过 `session.uiState.onChange` 响应式更新；控制器只作为 `AppAgentWindow` 的 root 使用
 - `ChatMessage` / `ChatMessageCell`: 气泡样式消息
 
 ## 怎么汇报
@@ -162,7 +176,7 @@ AGENTS.md 只留**跨模块、违反就出事**的约定和导航。下面每份
   改 `Sources/UI/` 就读它。
 - `docs/TurnLifecycle.md` — `AIAgentTurnRecord`、阶段推进、「每轮恰好一个终止事件」契约。
   改 `LLMExecutor` / 排查「一直转圈」就读它。
-- `docs/ToolSafety.md` — 工具输出预算、op 级授权、范围判定、运行时内省 / 热修复 / 抓包 / `web_fetch`。
+- `docs/ToolSafety.md` — 工具输出预算、op 级授权、范围判定、运行时内省 / 热修复 / `web_fetch`。
   加改工具就读它。
 - `docs/Decisions.md` — `requestDecision` 责任链与决策卡片，continuation 不许漏。
 - `docs/Diagnostics.md` — 落盘日志、诊断包、模拟器能力自检（工具回归的主力手段）。

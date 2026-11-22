@@ -144,6 +144,7 @@ The overlay window is the only supported way to mount AppAgent's chat UI; `AppAg
 | [Providers](docs/Providers.md) | `ModelProvider`, `ModelSpec`, provider stream events |
 | [Tools](docs/Tools.md) | `ToolProtocol`, schemas, outputs, tool registration |
 | [UI Customization](docs/UICustomization.md) | Overlay UI and custom UI built on `AISession` |
+| [Maintenance audit](docs/OptimizationPlan.md) | Verified fixes, validation results and remaining work |
 
 ## Example App
 

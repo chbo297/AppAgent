@@ -194,7 +194,7 @@ final class HostToolsTests: XCTestCase {
         XCTAssertNotNil(errorText(out))
     }
 
-    // MARK: - AppSandboxFileTool
+    // MARK: - Unified file tool
 
     func testSandboxFileLifecycle() async throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -202,22 +202,50 @@ final class HostToolsTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let tool = AppSandboxFileTool(root: root)
+        let tool = FileTool(registry: FileResourceRegistry(hostResources: [
+            .host(
+                name: "sandbox",
+                summary: "Test host sandbox",
+                rootURL: root,
+                hostSandboxRootURL: root,
+                operations: Set(FileResourceOperation.allCases)
+            )
+        ]))
         let session = makeSession()
 
         let write = try await tool.execute(arguments: [
-            "op": .string("write"), "path": .string("notes/todo.txt"), "content": .string("buy milk")
+            "op": .string("write"),
+            "uri": .string("host://sandbox/notes/todo.txt"),
+            "content": .string("buy milk")
         ], session: session)
         XCTAssertEqual(json(write)?["success"]?.boolValue, true)
 
-        let read = try await tool.execute(arguments: ["op": .string("read"), "path": .string("notes/todo.txt")], session: session)
-        XCTAssertEqual(json(read)?["content"]?.stringValue, "buy milk")
+        let read = try await tool.execute(
+            arguments: [
+                "op": .string("read"),
+                "uri": .string("host://sandbox/notes/todo.txt")
+            ],
+            session: session
+        )
+        XCTAssertEqual(json(read)?["content"]?.stringValue, "1|buy milk")
 
-        let list = try await tool.execute(arguments: ["op": .string("list"), "path": .string("notes")], session: session)
+        let list = try await tool.execute(
+            arguments: [
+                "op": .string("list"),
+                "uri": .string("host://sandbox/notes")
+            ],
+            session: session
+        )
         let names = json(list)?["entries"]?.arrayValue?.compactMap { $0["name"]?.stringValue } ?? []
         XCTAssertEqual(names, ["todo.txt"])
 
-        let del = try await tool.execute(arguments: ["op": .string("delete"), "path": .string("notes/todo.txt")], session: session)
+        let del = try await tool.execute(
+            arguments: [
+                "op": .string("delete"),
+                "uri": .string("host://sandbox/notes/todo.txt")
+            ],
+            session: session
+        )
         XCTAssertEqual(json(del)?["success"]?.boolValue, true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("notes/todo.txt").path))
     }
@@ -227,13 +255,33 @@ final class HostToolsTests: XCTestCase {
             .appendingPathComponent("aa-sandbox-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let tool = AppSandboxFileTool(root: root)
+        let tool = FileTool(registry: FileResourceRegistry(hostResources: [
+            .host(
+                name: "sandbox",
+                summary: "Test host sandbox",
+                rootURL: root,
+                hostSandboxRootURL: root,
+                operations: Set(FileResourceOperation.allCases)
+            )
+        ]))
         let session = makeSession()
 
-        let escape = try await tool.execute(arguments: ["op": .string("read"), "path": .string("../../etc/passwd")], session: session)
+        let escape = try await tool.execute(
+            arguments: [
+                "op": .string("read"),
+                "uri": .string("host://sandbox/../../etc/passwd")
+            ],
+            session: session
+        )
         XCTAssertNotNil(errorText(escape))
 
-        let absolute = try await tool.execute(arguments: ["op": .string("read"), "path": .string("/etc/passwd")], session: session)
+        let absolute = try await tool.execute(
+            arguments: [
+                "op": .string("read"),
+                "uri": .string("host://sandbox//etc/passwd")
+            ],
+            session: session
+        )
         XCTAssertNotNil(errorText(absolute))
     }
 
@@ -242,18 +290,20 @@ final class HostToolsTests: XCTestCase {
     func testGroupPolicyFiltersByGroup() async {
         let central = ToolCentral()
         await central.register(AppUserDefaultsTool())      // host-storage
-        await central.register(AppSandboxFileTool())       // host-storage
+        await central.register(FileTool())                 // file
         await central.register(TodoTool())                 // core
 
         // allowedGroups keeps only host-storage
-        let allowStorage = ToolCentral.ToolPolicy(allowedGroups: [ToolGroups.hostStorage])
+        let allowStorage = ToolCentral.ToolPolicy(
+            allowedGroups: [ToolGroups.hostStorage, ToolGroups.file]
+        )
         let onlyStorage = await central.resolveTools(policies: [allowStorage])
-        XCTAssertEqual(Set(onlyStorage.keys), ["app_user_defaults", "app_sandbox_file"])
+        XCTAssertEqual(Set(onlyStorage.keys), ["app_user_defaults", "file"])
 
         // excludedGroups drops host-storage
         let excludeStorage = ToolCentral.ToolPolicy(excludedGroups: [ToolGroups.hostStorage])
         let noStorage = await central.resolveTools(policies: [excludeStorage])
-        XCTAssertEqual(Set(noStorage.keys), ["todo"])
+        XCTAssertEqual(Set(noStorage.keys), ["file", "todo"])
     }
 
     func testGroupPolicyApplyIgnoresGroupsWithoutResolver() {
@@ -279,10 +329,10 @@ final class HostToolsTests: XCTestCase {
         XCTAssertNil(agent.toolPolicy?.excludedGroups)
     }
 
-    // MARK: - app_device_info
+    // MARK: - device_info
 
     func testDeviceInfoAllSectionsPresent() async throws {
-        let tool = AppDeviceInfoTool()
+        let tool = DeviceInfoTool()
         let output = try await tool.execute(arguments: [:], session: makeSession())
         guard let object = json(output)?.objectValue else {
             return XCTFail("expected json object, got \(output)")
@@ -294,7 +344,7 @@ final class HostToolsTests: XCTestCase {
     }
 
     func testDeviceInfoSingleSectionOnly() async throws {
-        let tool = AppDeviceInfoTool()
+        let tool = DeviceInfoTool()
         let output = try await tool.execute(arguments: ["section": .string("storage")], session: makeSession())
         guard let object = json(output)?.objectValue else {
             return XCTFail("expected json object, got \(output)")
@@ -310,23 +360,23 @@ final class HostToolsTests: XCTestCase {
     }
 
     func testDeviceInfoRejectsUnknownSection() async throws {
-        let tool = AppDeviceInfoTool()
+        let tool = DeviceInfoTool()
         let output = try await tool.execute(arguments: ["section": .string("cpu")], session: makeSession())
         XCTAssertTrue(errorText(output)?.contains("Unknown section") ?? false, "\(output)")
     }
 
     func testDeviceInfoReadsMachineAndFootprint() {
         // sysctl + mach lookups are the two non-Foundation reads; make sure they work here.
-        XCTAssertNotNil(AppDeviceInfoTool.sysctlString("hw.machine") ?? AppDeviceInfoTool.sysctlString("hw.model"))
-        XCTAssertNil(AppDeviceInfoTool.sysctlString("no.such.sysctl.key"))
-        let footprint = AppDeviceInfoTool.appFootprintBytes()
+        XCTAssertNotNil(DeviceInfoTool.sysctlString("hw.machine") ?? DeviceInfoTool.sysctlString("hw.model"))
+        XCTAssertNil(DeviceInfoTool.sysctlString("no.such.sysctl.key"))
+        let footprint = DeviceInfoTool.appFootprintBytes()
         XCTAssertNotNil(footprint)
         XCTAssertGreaterThan(footprint ?? 0, 0)
     }
 
     func testDeviceInfoIsRegisteredAsSafeHostRuntimeTool() async {
-        let tool = AppDeviceInfoTool()
-        XCTAssertEqual(tool.name, "app_device_info")
+        let tool = DeviceInfoTool()
+        XCTAssertEqual(tool.name, "device_info")
         XCTAssertEqual(tool.group, ToolGroups.hostRuntime)
         XCTAssertEqual(tool.safetyLevel, .safe)
 
@@ -335,6 +385,6 @@ final class HostToolsTests: XCTestCase {
         let resolved = await central.resolveTools(
             policies: [ToolCentral.ToolPolicy(allowedGroups: [ToolGroups.hostRuntime])]
         )
-        XCTAssertEqual(Set(resolved.keys), ["app_device_info"])
+        XCTAssertEqual(Set(resolved.keys), ["device_info"])
     }
 }

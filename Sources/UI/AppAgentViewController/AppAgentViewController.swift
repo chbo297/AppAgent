@@ -25,6 +25,17 @@ public class AppAgentViewController: UIViewController {
     public var agent: AIAgent? {
         didSet {
             if oldValue !== agent {
+                if let currentSessionId {
+                    oldValue?.session(id: currentSessionId)?.uiState.onChange = nil
+                }
+                detachStreamConsumer()
+                // 旧 agent 的请求不结束、不替用户拍板：只是不再由这块面板展示，回到 presenter 挂着，
+                // 等能展示那个会话的面板（或换绑回来）再贴出来。
+                pendingDecisions.removeAll()
+                if isViewLoaded { dismissDecisionCard() }
+                if decisionPresenterAttached {
+                    decisionPresenter.releaseDecisions(of: self)
+                }
                 // 不等旧归档 await 返回就解除 UI 锁；旧 completion 必须匹配自己的 token。
                 archiveOperationToken = nil
                 sessionSidebarView.sessionListView.finishArchiving()
@@ -32,7 +43,7 @@ public class AppAgentViewController: UIViewController {
             // 绑定了真实 agent 就走真实 session/模型；未绑定时回落到本地固定回复，
             // 让纯 UI 调试无需模型配置也能跑。
             usesFixedDebugReply = (agent == nil)
-            // 让 session_manage 的 'switch' 能真正切换当前展示的会话（核心不认识 current session）。
+            // 让 session 的 'switch' 能真正切换当前展示的会话（核心不认识 current session）。
             oldValue?.activateSessionHandler = nil
             agent?.activateSessionHandler = { [weak self] sessionId in
                 DispatchQueue.main.async { self?.switchSession(to: sessionId) }
@@ -46,7 +57,11 @@ public class AppAgentViewController: UIViewController {
     /// UI 层展示事件（会话切换、面板显隐、展示几何与遮挡区域）的宿主回调。与核心 `AIAgentDelegate`
     /// 分离：「当前展示的是哪个会话 / 面板是否可见 / 挡住了什么」是纯 UI 概念，核心 `AIAgent` 不应依赖 UI 层。
     public weak var presentationDelegate: AppAgentPresentationDelegate? {
-        didSet { notifyPresentationChangeIfNeeded(reason: .layout) }
+        didSet {
+            if oldValue !== presentationDelegate { lastReportedPresentationState = nil }
+            invalidateHostReservedBottomHeight()
+            notifyPresentationChangeIfNeeded(reason: .layout)
+        }
     }
 
     /// 上一次报给宿主的展示状态，用来判等去重。
@@ -72,8 +87,7 @@ public class AppAgentViewController: UIViewController {
     /// Switch to a different session.
     public func switchSession(to sessionId: String) {
         let old = currentSessionId
-        currentStreamTask?.cancel()
-        currentStreamTask = nil
+        detachStreamConsumer()
         currentSession?.uiState.onChange = nil
         currentSessionId = sessionId
         // 展开态是「这个会话里用户点开了哪些轮」，换会话就不再适用。
@@ -101,10 +115,11 @@ public class AppAgentViewController: UIViewController {
 
     /// 宿主主动展开 / 收起输入栏（收起态即那颗悬浮球胶囊）。
     ///
-    /// 视图尚未加载时先记到 `startsInputBarCollapsed`，等首帧布局时落位；已加载则即时切换。
+    /// 输入栏还没做过第一次布局时（视图未加载，或已加载但尚未布局）先记到 `startsInputBarCollapsed`，
+    /// 由首帧布局按它落位；否则首帧布局会按默认的展开态覆盖掉这次请求。已布局过则即时切换。
     /// 供「常驻悬浮入口」形态下从收起态显式展开成完整面板（如分享回流唤起）用。
     public func setInputBarCollapsed(_ collapsed: Bool, animated: Bool) {
-        guard isViewLoaded else {
+        guard hasLaidOutInputBar else {
             startsInputBarCollapsed = collapsed
             return
         }
@@ -122,11 +137,10 @@ public class AppAgentViewController: UIViewController {
     let chatPanelContainer = AppAgentChatPanelContainerView()
     let chatPanelCoordinator = AppAgentChatPanelCoordinator()
 
-    /// 决策卡片的呈现者（强持有；注册表里是弱引用）。
-    ///
-    /// `nonisolated(unsafe)`：`deinit` 要读它来结清在飞的请求，而 deinit 永远是
-    /// 非隔离的。只在 `viewDidLoad` 写、在 `deinit` 读，两处都在主线程，安全。
-    nonisolated(unsafe) private var decisionPresenter: AppAgentDecisionPresenter?
+    /// 决策请求的登记处。进程内一份（`.shared`），等待挂在它那里，面板只负责展示；
+    /// 面板释放后请求继续等，下一个面板 attach 时接着展示。测试可注入独立实例。
+    var decisionPresenter: AppAgentDecisionPresenter = .shared
+    private(set) var decisionPresenterAttached = false
     /// 独立诊断页面在加载视图前关闭注册，不能抢走宿主会话的授权请求。
     var registersDecisionPresenter = true
     let sessionSidebarView = AppAgentSessionSidebarView()
@@ -151,6 +165,8 @@ public class AppAgentViewController: UIViewController {
     /// 后面，不能覆盖掉前一个（那会把它的 continuation 永远挂住）。
     var pendingDecisions: [String: [AppAgentPendingDecision]] = [:]
     var currentStreamTask: Task<Void, Never>?
+    /// 当前消费者的身份。面板不再展示那一轮时只换掉它，旧消费者在下一个事件上自己退出。
+    var streamConsumerToken: UUID?
     /// 用户已经按过停止的那一轮（会话 id + turnID）。
     ///
     /// executor 可能还卡在工具里没走到取消检查点，`turnRecord` 也就还没关；按钮不该
@@ -184,6 +200,52 @@ public class AppAgentViewController: UIViewController {
     /// delegate 决定，改这个值不会二次生效。
     public var startsInputBarCollapsed = false
 
+    /// 宿主底部预留高度（pt）：宿主在屏幕底部有自己的控件（如 tab 栏、工具条）会盖住这一段，
+    /// 要求输入栏在对话面板收起时让出来。
+    ///
+    /// 值来自 `presentationDelegate.appAgentHostReservedBottomHeight()`：设置 delegate 时取一次，
+    /// 之后宿主页面切换导致底部遮挡变化时调用 `invalidateHostReservedBottomHeight()` 重新取。
+    /// SDK 不感知任何具体页面概念。配套页面展开（`navigationAccessory.isActive`）期间输入栏不让出这段高度，
+    /// 收起后恢复，见 `effectiveHostReservedBottomHeight`。
+    ///
+    /// 这不是安全区：系统底部安全区（`view.safeAreaInsets.bottom`）由 SDK 自己避让，本值叠加在它之上，
+    /// 只表达宿主的遮挡需求。只在对话面板收在 peek 时完整生效；面板向半屏展开的过程中，输入栏随面板底部
+    /// 延伸同步回到安全区位置，半屏及以上面板铺到屏幕底部、不再让出。键盘弹起时输入栏仍贴键盘，不叠加此值；
+    /// 收起态胶囊不受影响。默认 0。负值、非有限值按 0 处理。
+    public internal(set) var hostReservedBottomHeight: CGFloat = 0 {
+        didSet {
+            guard hostReservedBottomHeight != oldValue else {
+                return
+            }
+            relayoutForHostReservedBottomChange()
+        }
+    }
+
+    /// 宿主底部遮挡变了（页面切换、底栏显隐）时调用：SDK 向 `presentationDelegate` 重新取预留高度，
+    /// 值有变化才重排输入栏，宿主不必自己判等。没有 delegate 时按 0 处理。
+    public func invalidateHostReservedBottomHeight() {
+        let height = presentationDelegate?.appAgentHostReservedBottomHeight() ?? 0
+        hostReservedBottomHeight = height.isFinite ? max(0, height) : 0
+    }
+
+    /// 最近一次输入栏布局所用的预留高度让出量；面板收起进度变化导致它变了，才需要重排输入栏。
+    var appliedHostReservedBottomLift: CGFloat = 0
+
+    /// 宿主挂在对话面板顶栏（会话设置按钮左侧）的配套页面开关，例如展开 / 收起宿主为当前会话生成的页面。
+    /// 状态由宿主维护：切会话或页面展开 / 收起后重新赋值；nil 隐藏按钮。点按回调见 `onNavigationAccessoryTapped`。
+    /// `isActive` 为 true 表示配套页面正盖在宿主页面上，此时输入栏不做宿主底部预留。
+    public var navigationAccessory: AppAgentNavigationAccessory? {
+        didSet {
+            chatPanelView.navigationBar.accessory = navigationAccessory
+            if navigationAccessory?.isActive != oldValue?.isActive {
+                relayoutForHostReservedBottomChange()
+            }
+        }
+    }
+
+    /// 用户点了 `navigationAccessory` 按钮。SDK 不改按钮状态，由宿主切换页面后再更新 `navigationAccessory`。
+    public var onNavigationAccessoryTapped: (() -> Void)?
+
     /// inputBar 布局偏好的持久化存储；frame 策略本身在 AppAgentInputBarFramePolicy。
     let inputBarLayoutStore: AppAgentInputBarLayoutStoring = AppAgentUserDefaultsInputBarLayoutStore()
 
@@ -195,12 +257,18 @@ public class AppAgentViewController: UIViewController {
     /// 展开 resize 跨越最终状态分界线时使用的触觉发生器。
     lazy var expandedResizeDecisionHapticGenerator = makeExpandedResizeDecisionHapticGenerator()
 
+    /// 加号面板「图片 / 文件」背后的系统选择器，选完放回输入栏。
+    lazy var attachmentPicker = makeAttachmentPicker()
+
+    /// 打开选择器时所在的会话；异步读完回来时会话变了就丢弃，不放进别的会话。
+    var attachmentPickSessionId: String?
+
     var effectiveKeyboardHeight: CGFloat {
         shouldInputBarAvoidKeyboard ? observedKeyboardHeight : 0
     }
 
     var shouldInputBarAvoidKeyboard: Bool {
-        inputBar.inputSource == .keyboard && inputBar.textField.isFirstResponder
+        inputBar.inputSource == .keyboard && inputBar.textView.isFirstResponder
     }
 
     /// 是否允许展开态 resize 自定义宽度：开启后左侧触边仍可向右扩展，并可持久化新的首选展开宽度。
@@ -236,22 +304,28 @@ public class AppAgentViewController: UIViewController {
     }
 
     deinit {
-        // 两件容易想歪的事：
-        // 1. 不用手动从 `DecisionResponderCentral` 注销 —— 注册表存的是弱引用，
-        //    presenter 跟着 self 一起走，register/unregister 都会顺手清掉空位。
-        // 2. 在飞的授权/澄清请求必须就地结清：continuation 归 presenter 所有，
-        //    面板只拿到 `complete` 闭包；面板一死那些闭包就没了，而等待的 executor
-        //    还强持着 presenter 挂在那儿——所以由这里发信号、presenter 自己结清。
-        //    → docs/Decisions.md
+        // 不结清在等的授权/澄清请求：它们挂在 presenter 上继续等用户，presenter 只弱引用面板，
+        // 面板没了它们自动回到「没人展示」，下一个面板 attach 时再贴出来。→ docs/Decisions.md
+        // 也不取消流消费者（见 `detachStreamConsumer`）：它只弱引用面板，下一个事件到达时自己退出。
         NotificationCenter.default.removeObserver(self)
-        decisionPresenter?.settlePendingDecisions()
+    }
+
+    /// 面板不再展示正在跑的那一轮（切会话、换绑 agent）。
+    ///
+    /// 不取消消费者 Task：取消会顺着流的 `onTermination` 把这一轮停掉，等用户拍板的卡片也跟着
+    /// 被结清。这一轮继续在 Core 里跑（或挂起等用户），停止只走 `stopCurrentRun()`。
+    func detachStreamConsumer() {
+        currentStreamTask = nil
+        streamConsumerToken = nil
     }
 
     /// 把「等用户拍板」的呈现权拿到 AppAgent 自己手上：卡片在对话面板内弹，
     /// 宿主 app 不需要实现任何异步回调。
     private func registerDecisionPresenter() {
         guard registersDecisionPresenter else { return }
-        let presenter = AppAgentDecisionPresenter(
+        decisionPresenterAttached = true
+        decisionPresenter.attach(
+            self,
             present: { [weak self] request, sessionId, requestId, complete in
                 guard let self else { return false }
                 return self.enqueueDecision(request, sessionId: sessionId,
@@ -262,8 +336,6 @@ public class AppAgentViewController: UIViewController {
                 self?.cancelDecision(requestId: requestId)
             }
         )
-        decisionPresenter = presenter
-        DecisionResponderCentral.default.register(presenter)
     }
 
 #if DEBUG
@@ -304,6 +376,11 @@ public class AppAgentViewController: UIViewController {
         sessionSidebarView.bo_setFrame(view.bounds)
         voiceInputOverlayView.bo_setFrame(view.bounds)
         view.bringSubviewToFront(voiceInputOverlayView)
+        // 收下请求时视图可能还没布局好（面板刚创建、刚 attach 就接到挂着的请求）：布局好了补贴。
+        if chatPanelView.decisionCard.isHidden, let sessionId = currentSessionId,
+           pendingDecisions[sessionId]?.isEmpty == false {
+            presentPendingDecision(for: sessionId)
+        }
     }
 }
 

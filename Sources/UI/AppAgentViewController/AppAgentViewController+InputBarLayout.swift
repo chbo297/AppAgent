@@ -70,15 +70,69 @@ struct AppAgentCollapsedInputBarMoveTracking {
 
 extension AppAgentViewController {
 
-    /// 当前布局决策的环境快照。
+    /// 当前布局决策的环境快照。展开高度按展开宽度下的草稿行数取（输入栏内部缓存测量结果）。
     var inputBarLayoutContext: AppAgentInputBarFramePolicy.Context {
-        AppAgentInputBarFramePolicy.Context(
+        var context = AppAgentInputBarFramePolicy.Context(
             bounds: view.bounds,
             safeAreaInsets: view.safeAreaInsets,
             keyboardHeight: effectiveKeyboardHeight,
             storedExpandedWidth: storedExpandedInputBarWidth,
-            storedCollapsedPlacement: storedCollapsedInputBarPlacement
+            storedCollapsedPlacement: storedCollapsedInputBarPlacement,
+            hostReservedBottomLift: hostReservedBottomLift
         )
+        context.expandedBarHeight = inputBar.expandedHeight(
+            forWidth: AppAgentInputBarFramePolicy.preferredExpandedWidth(context)
+        )
+        return context
+    }
+
+    /// 布局实际使用的预留高度。配套页面展开时盖住了宿主底部控件，输入栏回到安全区位置；
+    /// 非有限或负值按 0 处理，避免宿主传错值把输入栏推出可用区。
+    var effectiveHostReservedBottomHeight: CGFloat {
+        guard navigationAccessory?.isActive != true else {
+            return 0
+        }
+        return hostReservedBottomHeight.isFinite ? max(0, hostReservedBottomHeight) : 0
+    }
+
+    /// 宿主底部预留高度变化时，输入栏与停在 peek 的面板一起移动所用的时长。
+    static let hostReservedBottomChangeDuration: TimeInterval = 0.2
+
+    /// 生效的预留高度可能变了（宿主页面切换、配套页面展开 / 收起）：已上屏时在一个 UIView 动画块里重排，
+    /// 输入栏 frame、面板容器和 peek 展示高度都在块内写入，共用同一条曲线移动；首帧前只标记布局。
+    func relayoutForHostReservedBottomChange() {
+        guard isViewLoaded else {
+            return
+        }
+        view.setNeedsLayout()
+        guard hasLaidOutInputBar, view.window != nil else {
+            return
+        }
+        UIView.animate(
+            withDuration: Self.hostReservedBottomChangeDuration,
+            delay: 0,
+            options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseInOut],
+            animations: {
+                self.view.layoutIfNeeded()
+            }
+        )
+    }
+
+    /// 展开态输入栏此刻实际让出的宿主预留高度：面板收在 peek 时让满，向 half 展开的过程中
+    /// 随面板底部延伸同步降为 0，回到安全区位置。键盘弹起时 frame 策略不用这个值。
+    var hostReservedBottomLift: CGFloat {
+        effectiveHostReservedBottomHeight * chatPanelView.compactProgress
+    }
+
+    /// 面板收起进度变化让 `hostReservedBottomLift` 变了时重排输入栏（由那次布局通知宿主），返回是否重排。
+    func relayoutInputBarIfReservedLiftChanged(reason: AppAgentPresentationChangeReason) -> Bool {
+        guard abs(hostReservedBottomLift - appliedHostReservedBottomLift) > 0.01 else {
+            return false
+        }
+        // 先记下，layoutInputBar 因容器无效提前返回时也不会反复触发。
+        appliedHostReservedBottomLift = hostReservedBottomLift
+        layoutInputBar(reason: reason)
+        return true
     }
 
     var inputBarContainerAvailableFrame: CGRect {
@@ -135,6 +189,7 @@ extension AppAgentViewController {
     ) {
         let oldFrame = inputBar.frame
         let didChange = didInputBarFrameChange(from: oldFrame, to: targetFrame)
+        appliedHostReservedBottomLift = hostReservedBottomLift
         // 面板可见区的变化会从面板侧冒泡回这里，让它沿用本次的原因，而不是一律记成竖向拖拽。
         currentPresentationChangeReason = reason
         defer { currentPresentationChangeReason = nil }
@@ -148,6 +203,10 @@ extension AppAgentViewController {
             inputBarExpandedFrame: AppAgentInputBarFramePolicy.preferredExpandedFrame(inputBarLayoutContext),
             animation: animation
         )
+        // 面板布局可能刚发布了新的收起进度（如延迟发布的档位变化）：按新进度补一次落位。
+        if relayoutInputBarIfReservedLiftChanged(reason: reason) {
+            return
+        }
         // 故意**不**按 `didChange` 短路：键盘顶起时 inputBar 可能没动、面板容器却整体上移了，
         // 那也是宿主要知道的遮挡变化。重复通知由状态判等去重。
         notifyPresentationChangeIfNeeded(reason: reason, animation: animation.presentation)

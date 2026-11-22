@@ -123,10 +123,15 @@ public enum Tool {
 public protocol ToolProtocol: Sendable {
     /// Unique tool name (used for matching, sorting, and toolPrompts lookup).
     var name: String { get }
-    /// Human-readable description of what the tool does.
+    /// What the tool does and, above all, **when to call it**. Sent with every request,
+    /// so keep it short; move operation details, formats and examples to `usageGuide`.
     var description: String { get }
     /// JSON Schema describing the tool's input parameters.
     var parameters: Tool.Schema { get }
+    /// 详细用法（各操作、参数格式、示例、注意事项）。不随每次请求发送：同一会话里第一次调用
+    /// 这个工具时，执行器把它附在结果后面交给模型，之后不再重复；上下文压缩后再附一次。
+    /// nil 表示 `description` 已经足够。
+    var usageGuide: String? { get }
     /// Whether this tool is currently enabled (default: true).
     /// Rechecked before preflight, after preflight, and immediately before execution.
     /// Mutable implementations must synchronize access; disabling does not stop work already started.
@@ -137,12 +142,23 @@ public protocol ToolProtocol: Sendable {
     /// stateful tools use it to access per-session state.
     /// Implementations must cooperate with cancellation, including resuming callback continuations.
     /// The executor's task-group timeout cannot finish until the execution task exits.
+    ///
+    /// Threading: the executor calls this from a nonisolated child task, so it runs on the Swift
+    /// concurrency thread pool, never implicitly on the main thread, and `.safe` tools may run in
+    /// parallel. A tool that touches main-thread-only host state (UIKit, map views, location
+    /// managers) declares `execute` as `@MainActor` or hops with `MainActor.run`; the SDK does not
+    /// switch threads for it. Keep heavy synchronous work off the main actor.
     func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output
 
     /// Logical grouping for batch enable/disable and UI organization.
     /// SDK built-in groups: "core", "file", "skills", "media", "web", "system", "custom".
     /// Host apps can use any string (e.g., "commerce", "social").
     var group: String { get }
+
+    /// 按需加载组。非 nil 时这个工具平时不发给模型：系统提示词只写一行组名和用途，
+    /// 模型调用 `load_tools` 加载该组后，本会话之后的请求才带上它的完整定义。
+    /// 组需先经 `ToolCentral.registerDeferredGroup` 登记。nil 表示一直暴露。
+    var deferredGroup: String? { get }
 
     /// Safety level — determines whether user confirmation is required.
     var safetyLevel: Tool.SafetyLevel { get }
@@ -169,13 +185,26 @@ public protocol ToolProtocol: Sendable {
     /// 实现必须**无副作用**、不改运行时状态、不自己发起授权；只做「看参数和签名就能下结论」
     /// 的判断。需要提权作用域才能判定的情形留给原本的授权流程。
     func preflightRejection(for arguments: [String: JSONValue], session: AISession) async -> String?
+
+    /// 执行本身就是在等用户作答（如 `clarify`）。为 true 时执行器不套通用的
+    /// `toolTimeout`：一直等到用户作答、跳过或会话被取消。
+    var waitsForUser: Bool { get }
 }
 
 extension ToolProtocol {
+    public var usageGuide: String? {
+        nil
+    }
     public var enabled: Bool { true }
     public var group: String { "custom" }
+    public var deferredGroup: String? {
+        nil
+    }
     public var safetyLevel: Tool.SafetyLevel { .safe }
     public var outputMaxBytes: Int? { nil }
+    public var waitsForUser: Bool {
+        false
+    }
 
     /// Single-purpose tools keep one level for every call.
     public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {

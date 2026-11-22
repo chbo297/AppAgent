@@ -7,12 +7,13 @@
 
 - `AppAgentRunLog.shared.install()` 打开 `Logger` 并把格式化后的每一行追加到 `Documents/AppAgent/logs/appagent-<时间>.log`，按 2MB 滚动、只留最近 3 个文件。**`AppAgentOverlay` 初始化时自动调用**，宿主零代码；install 幂等，且**不吞掉已有 handler**（宿主原来接了自己的日志系统照旧生效）。
 - 导出在调试面板（会话侧栏的「调试」入口）：面板顶部有显眼的「导出全部数据」按钮，导航栏分享菜单里也有同一项。走 `AppAgentDiagnostics.export`，打出一个 zip：`summary.txt`（环境 + 各项计数 + 包内清单）、`debug-log.txt/.json`（模型调用记录）、`run-logs/`、`sessions/`（会话快照，含每轮工具往返）、`memory/`。
+- 诊断包同时带上 `host/<name>/`（宿主用 `AppAgentDiagnostics.registerHostDirectory(name:url:maxBytes:)` 登记的排查目录，例如宿主自己的网络请求记录；各自限额，新的优先，单个文件超限也至少拷最新一个）。宿主还可以用 `AppAgentDiagnostics.registerHostContributor(name:contribute:)` 在导出时机往自己的 `host/<name>/` 写入当时的关键信息（例如开关和计数），补充失败只记在清单里。`summary.txt` 的清单里写明每个目录拷了几个、共有几个。
 - zip 不引三方库：`NSFileCoordinator` 的 `.forUploading` 读意图会给出目录的临时 zip 副本，拷出来即可。**这一步阻塞**，所以 `export` 在后台队列跑、回调切主线程，UI 期间显示「正在打包…」。
 - 导出前必须 `runLog.flush()`：写入是异步排队的，不 flush 最后几行还在队列里——恰恰是卡住之前那几行。
 - **模型报文完整记录（需 Logger 启用且 minimumLevel 为 DEBUG）**：内置 provider 的三种协议统一记录实际发送的 JSON body、HTTP 状态与请求标识，以及解析前收到的每条响应文本。`phase=request/response_line/http_error_body` 保留完整正文，末帧、未知格式和解码失败不会因解析分支而漏记；`sse_flush/eof/stream_error` 标明结束路径。记录的是应用层文本，不是 HTTP 抓包：不包含认证头、Cookie、URL query，也不保留网络换行字节的差异。
 - 每次请求都有 `request=<UUID>`，可从 `debug-log` 的 `requestId` 对应到原始报文；长正文按 `part=i/N` 分块，`payload=` 后是 JSON 字符串，逐块 JSON 解码后按序拼接即可还原脱敏后的全文。响应另按 `seq` 区分各文本行；`bytes` 是分块前原文的 UTF-8 字节数。**没有 800 字裁剪，但磁盘仍只保留最近 2MB × 3 个文件**，旧请求可能被轮转淘汰。
 - 报文日志强制遮盖 API Key、配置中的自定义请求头值及常见凭据字段，即使关闭普通日志脱敏也不放行凭据。其余业务正文会进入诊断包。协议终止缺失或 `unknown` 记为 failure，不再先记 SUCCESS；错误恢复策略不由日志层改变。
-- **OpenAI 兼容端点的三个坑**（都是排查的产物）：① 有的端点在流式分片里用 `message` 而不是 `delta`，`OpenAIChoice.delta` 必须是 Optional 并 `delta ?? message` 兜住——非 Optional 时这类分片整块解码失败被静默丢掉，工具调用就这么没了；② 老式 `function_call` 也要收，并到 0 号槽走同一套收尾。`finish_reason=tool_calls` 却 flush 出 0 个调用时会打 warning 并带上原始 chunk；③ **续传分片里 `id` / `name` 是空字符串而不是缺键**（GLM 系 OneAPI 端点实测如此：首片给全名，后续每片都带 `"id":"","name":""`）。`if let` 挡不住空串，覆盖上去就把首片的工具名擦掉，`flushToolCalls` 再按「名字为空」整条丢掉 —— 现象正是 ② 那句 warning + 界面 loading 转一圈没结果。所以 `OpenAIChatCompletionsMapper` 合并分片一律走 `nonEmpty(_:)`：**空值只补不覆盖**；`OpenAIResponsesMapper` 的 `call_id` / `id` 同理。`Tests/Core/AppAgentCoreTests.swift` 用真实分片序列锁住这条。
+- **OpenAI 兼容端点的三个坑**（都是排查的产物）：① 有的端点在流式分片里用 `message` 而不是 `delta`，`OpenAIChoice.delta` 必须是 Optional 并 `delta ?? message` 兜住——非 Optional 时这类分片整块解码失败被静默丢掉，工具调用就这么没了；② 老式 `function_call` 也要收，并到 0 号槽走同一套收尾。`finish_reason=tool_calls` 却 flush 出 0 个调用时会打 warning 并带上原始 chunk；③ **续传分片里 `id` / `name` 是空字符串而不是缺键**（GLM 系 OpenAI 兼容网关实测如此：首片给全名，后续每片都带 `"id":"","name":""`）。`if let` 挡不住空串，覆盖上去就把首片的工具名擦掉，`flushToolCalls` 再按「名字为空」整条丢掉 —— 现象正是 ② 那句 warning + 界面 loading 转一圈没结果。所以 `OpenAIChatCompletionsMapper` 合并分片一律走 `nonEmpty(_:)`：**空值只补不覆盖**；`OpenAIResponsesMapper` 的 `call_id` / `id` 同理。`Tests/Core/AppAgentCoreTests.swift` 用真实分片序列锁住这条。
 - **「切后台回来就不动了」在日志里长这样**：`phase=response_line` 在某个时刻停止，随后出现 `streamStalled: iteration=N, idle=…s` 与一条 reason=`transport`、文案「模型响应中断：Ns 没有新内容，按可重试错误处理」的 debug-log failure，紧跟着 `retry`。这说明空闲看门狗判死后重试，机制见 `docs/TurnLifecycle.md` → 打断与恢复；具体网络原因仍需结合原文和传输错误判断。
 - `Tests/Core/AppAgentDebugLogTests.swift` 验证长正文还原、强制脱敏、快速轮转及导出；`LLMStreamFailureTests.swift` 验证解析前记录、EOF 尾帧和失败摘要的请求关联。
 
@@ -32,7 +33,7 @@ SKIP_BUILD=1 Scripts/simulator-selfcheck.sh    # 复用上次构建
 - **自检必须把当前 scene 绑到 session 上**（`run(session:)` 开头设 `inspectionSceneIdentifier`）。真机上 overlay 一定会绑（`AppAgentOverlay.bind`），自检以前不绑，于是 `HostInspectionUIKit.includes` 在 `context.sceneIdentifier == nil` 处就短路返回，**整条场景过滤路径从未被执行过**。懒加载 tab 被误判成「不在本场景」（3 个 tab 报成 1 个）就藏在这个盲区里，活了 4 天没被发现。改这里之前先想清楚：不绑 = 自检跑在一个生产上不存在的配置下。
 - 首页「能力自检」按钮在 app 内弹出同一份报告。
 - 加新工具时**一并在 `CapabilitySelfCheck` 加一条检查**，用三种期望之一：`.ok`（必须成功）、`.errorContains(...)`（必须以某个错误拒绝）、`.completes`（只要求不挂死，用于依赖真实模型或宿主 UI 的项）。
-- **自检必须跑完不留痕**：变更类内省（`view_set` / `view_invoke` / JS `uiSet`）只打在 `installScratchView()` 挂上去的一次性隐藏视图上，绝不改真实 UIKit 视图；改了全局观感的（深浅色、当前 tab）要复位；剪贴板只清掉自己写的内容；`session_manage` 建的一次性会话跑完要删掉（旧版 create → rename → archive → restore 每跑一次就在会话列表里多留一条）。报告里有「临时视图已移除 / 深浅色已复位 / tab 已复位 / 剪贴板已清理」几条守着这个约定。
+- **自检必须跑完不留痕**：变更类内省（`view_set` / `view_invoke` / JS `uiSet`）只打在 `installScratchView()` 挂上去的一次性隐藏视图上，绝不改真实 UIKit 视图；`view_activate` 的成功检查必须使用独立、可见、可交互的临时按钮，另用隐藏 scratch 验证拒绝，结束后一起移除；改了全局观感的（深浅色、当前 tab）要复位；剪贴板只清掉自己写的内容；`session` 工具建的一次性会话跑完要删掉（旧版 create → rename → archive → restore 每跑一次就在会话列表里多留一条）。报告里有「临时视图已移除 / 深浅色已复位 / tab 已复位 / 剪贴板已清理」几条守着这个约定。
 - **别在 `withBudget` 之外写可能阻塞的调用**。踩过：直接 `UIPasteboard.general.string` 读别的来源写入的剪贴板会触发系统粘贴授权，无人确认时整轮自检卡死（脚本 60s 超时才发现）。所以不去「读旧值再还原」剪贴板，且所有清理动作也一律包在 `withBudget` 里。
 
 ## 真机测试待办

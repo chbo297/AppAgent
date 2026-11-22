@@ -60,19 +60,38 @@ public enum ErrorClassifier {
 
     // MARK: - Public API
 
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        if case .cancelled = error as? AIAgentError {
+            return true
+        }
+        let underlying = error as NSError
+        return underlying.domain == NSURLErrorDomain && underlying.code == NSURLErrorCancelled
+    }
+
     /// Classify an error into a structured recovery recommendation.
     public static func classify(_ error: Error) -> ClassifiedError {
+        if isCancellation(error) {
+            return ClassifiedError(
+                reason: .unknown, statusCode: nil, message: AIAgentError.cancelled.localizedDescription,
+                retryable: false, shouldCompress: false, shouldFallback: false
+            )
+        }
         // ModelError.httpError — the primary classification target
         if let modelError = error as? ModelError {
             return classifyModelError(modelError)
         }
 
-        // URLError — network/transport issues
-        if let urlError = error as? URLError {
+        // 同时接受原生 NSError 和已在模型请求边界脱敏的网络错误。
+        let underlying = error as NSError
+        if underlying.domain == NSURLErrorDomain || error is ModelNetworkError {
+            let code = (error as? ModelNetworkError)?.code ?? underlying.code
             return ClassifiedError(
-                reason: urlError.code == .timedOut ? .timeout : .transport,
+                reason: code == NSURLErrorTimedOut ? .timeout : .transport,
                 statusCode: nil,
-                message: urlError.localizedDescription,
+                message: error.localizedDescription,
                 retryable: true,
                 shouldCompress: false,
                 shouldFallback: false
@@ -124,6 +143,16 @@ public enum ErrorClassifier {
                 statusCode: nil,
                 message: error.errorDescription ?? String(describing: error),
                 retryable: false,
+                shouldCompress: false,
+                shouldFallback: false
+            )
+        case .malformedToolCall:
+            // 残缺调用在 mapper 层被整体拒绝，没有工具执行过；重发同一请求是安全的。
+            return ClassifiedError(
+                reason: .formatError,
+                statusCode: nil,
+                message: error.errorDescription ?? String(describing: error),
+                retryable: true,
                 shouldCompress: false,
                 shouldFallback: false
             )

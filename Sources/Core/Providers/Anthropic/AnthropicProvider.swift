@@ -53,7 +53,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
     /// Anthropic API version, managed internally.
     private let apiVersion = "2023-06-01"
 
-    public init(
+    public convenience init(
         baseURL: String,
         apiKey: String,
         apiProtocol: APIProtocol = .anthropicMessages,
@@ -62,6 +62,26 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         requestTimeout: TimeInterval = 300,
         defaultRequestMaxTokens: Int = 4096,
         maxConcurrency: Int = 5
+    ) {
+        self.init(
+            baseURL: baseURL, apiKey: apiKey, apiProtocol: apiProtocol,
+            customHeaders: customHeaders, models: models, requestTimeout: requestTimeout,
+            defaultRequestMaxTokens: defaultRequestMaxTokens, maxConcurrency: maxConcurrency,
+            session: Self.makeSession(requestTimeout: requestTimeout)
+        )
+    }
+
+    /// Internal transport injection for deterministic request tests.
+    init(
+        baseURL: String,
+        apiKey: String,
+        apiProtocol: APIProtocol = .anthropicMessages,
+        customHeaders: [String: String] = [:],
+        models: [ModelSpec],
+        requestTimeout: TimeInterval = 300,
+        defaultRequestMaxTokens: Int = 4096,
+        maxConcurrency: Int = 5,
+        session: URLSession
     ) {
         precondition(!models.isEmpty, "AnthropicProvider requires at least one model")
         precondition(defaultRequestMaxTokens > 0, "defaultRequestMaxTokens must be positive")
@@ -77,7 +97,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
             )
         )
         self.concurrencyLimiter = ConcurrencyLimiter(limit: maxConcurrency)
-        self.session = Self.makeSession(requestTimeout: requestTimeout)
+        self.session = session
     }
 
     /// Update the request configuration in place.
@@ -258,6 +278,44 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
 
     // MARK: - Private
 
+    /// Capture URLs and redaction inputs together so an update cannot mix configurations.
+    /// These raw values are internal and must be sanitized before tool output.
+    var endpointConfigurationForDiagnostics: (
+        baseURL: String, requestURL: URL?, apiProtocol: APIProtocol, secrets: [String]
+    ) {
+        let snapshot = configuration
+        return (
+            snapshot.baseURL,
+            try? Self.requestURL(baseURL: snapshot.baseURL, apiProtocol: snapshot.apiProtocol),
+            snapshot.apiProtocol,
+            [snapshot.apiKey] + Array(snapshot.customHeaders.values)
+        )
+    }
+
+    private static func requestURL(baseURL: String, apiProtocol: APIProtocol) throws -> URL {
+        let effectiveBase = baseURL.isEmpty
+            ? (apiProtocol == .anthropicMessages ? "https://api.anthropic.com" : "https://api.openai.com/v1")
+            : baseURL
+        let base = effectiveBase.hasSuffix("/") ? String(effectiveBase.dropLast()) : effectiveBase
+        let endpoint: String
+        switch apiProtocol {
+        case .anthropicMessages:
+            endpoint = base.hasSuffix("/v1/messages")
+                ? base
+                : (base.hasSuffix("/v1") ? "\(base)/messages" : "\(base)/v1/messages")
+        case .openaiCompletions:
+            endpoint = base.hasSuffix("/chat/completions") ? base : "\(base)/chat/completions"
+        case .openaiResponses:
+            endpoint = base.hasSuffix("/responses") ? base : "\(base)/responses"
+        default:
+            throw ModelError.providerError("API protocol '\(apiProtocol.rawValue)' is not implemented")
+        }
+        guard let url = URL(string: endpoint) else {
+            throw ModelError.invalidURL
+        }
+        return url
+    }
+
     /// Build the URLRequest for the Anthropic Messages API.
     ///
     /// Constructs the URL, sets HTTP headers (x-api-key, anthropic-version, Content-Type,
@@ -312,22 +370,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         maxTokens: Int,
         configuration: Configuration
     ) throws -> URLRequest {
-        let effectiveBaseURL = configuration.baseURL.isEmpty
-            ? "https://api.anthropic.com"
-            : configuration.baseURL
-        let base = effectiveBaseURL.hasSuffix("/")
-            ? String(effectiveBaseURL.dropLast())
-            : effectiveBaseURL
-
-        // Gateways (OneAPI etc.) are usually configured with a base that already ends in /v1 —
-        // don't append a second one.
-        let endpoint = base.hasSuffix("/v1/messages")
-            ? base
-            : (base.hasSuffix("/v1") ? "\(base)/messages" : "\(base)/v1/messages")
-
-        guard let url = URL(string: endpoint) else {
-            throw ModelError.invalidURL
-        }
+        let url = try Self.requestURL(baseURL: configuration.baseURL, apiProtocol: .anthropicMessages)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -378,20 +421,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         maxTokens: Int,
         configuration: Configuration
     ) throws -> URLRequest {
-        let effectiveBaseURL = configuration.baseURL.isEmpty
-            ? "https://api.openai.com/v1"
-            : configuration.baseURL
-        let base = effectiveBaseURL.hasSuffix("/")
-            ? String(effectiveBaseURL.dropLast())
-            : effectiveBaseURL
-
-        let endpoint = base.hasSuffix("/chat/completions")
-            ? base
-            : "\(base)/chat/completions"
-
-        guard let url = URL(string: endpoint) else {
-            throw ModelError.invalidURL
-        }
+        let url = try Self.requestURL(baseURL: configuration.baseURL, apiProtocol: .openaiCompletions)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -429,20 +459,7 @@ public final class AnthropicProvider: ModelProvider, @unchecked Sendable {
         maxTokens: Int,
         configuration: Configuration
     ) throws -> URLRequest {
-        let effectiveBaseURL = configuration.baseURL.isEmpty
-            ? "https://api.openai.com/v1"
-            : configuration.baseURL
-        let base = effectiveBaseURL.hasSuffix("/")
-            ? String(effectiveBaseURL.dropLast())
-            : effectiveBaseURL
-
-        let endpoint = base.hasSuffix("/responses")
-            ? base
-            : "\(base)/responses"
-
-        guard let url = URL(string: endpoint) else {
-            throw ModelError.invalidURL
-        }
+        let url = try Self.requestURL(baseURL: configuration.baseURL, apiProtocol: .openaiResponses)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -553,9 +570,9 @@ private func parseProviderSSEEvent(
 ) throws -> [ProviderStreamEvent] {
     switch apiProtocol {
     case .anthropicMessages:
-        return AnthropicMapper.parseSSEEvent(sseEvent, activeToolCalls: &anthropicToolCalls)
+        return try AnthropicMapper.parseSSEEvent(sseEvent, activeToolCalls: &anthropicToolCalls)
     case .openaiCompletions:
-        return OpenAIChatCompletionsMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
+        return try OpenAIChatCompletionsMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
     case .openaiResponses:
         return try OpenAIResponsesMapper.parseSSEEvent(sseEvent, activeToolCalls: &openAIToolCalls)
     default:

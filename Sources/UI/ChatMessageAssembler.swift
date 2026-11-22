@@ -62,7 +62,12 @@ public enum ChatMessageAssembler {
             let turnError = record?.failureMessage.map { "Error: \($0)" }
 
             if let userText = turn.userText {
-                out.append(ChatMessage(role: .user, text: userText, turnID: turn.key))
+                out.append(ChatMessage(
+                    role: .user,
+                    text: userText,
+                    turnID: turn.key,
+                    attachments: turn.userAttachments
+                ))
             }
 
             // 流式文本只属于正在跑的那一轮，且只在它还没落进记录时补上。
@@ -153,6 +158,9 @@ public enum ChatMessageAssembler {
     static func apply(_ record: AIAgentTurnRecord?, to timeline: inout AppAgentActivityTimeline) {
         guard let record = record else { return }
         timeline.setStage(record.stage)
+        for (index, text) in (record.notices ?? []).enumerated() {
+            timeline.appendNotice(text, index: index)
+        }
         if let failedStage = record.failedStage {
             timeline.markFailed(stage: failedStage, message: record.failureMessage ?? "")
         }
@@ -194,6 +202,8 @@ public enum ChatMessageAssembler {
     struct Turn {
         var key: Int
         var userText: String?
+        /// 用户随提问附带的图片 / 文件，跟着用户气泡展示。
+        var userAttachments: [AIAgentMessage.Attachment] = []
         /// agent 在工具调用前的中间发言（属于过程，不是最终答案）。
         var interimTexts: [String] = []
         /// 最终答案：最后一条不含工具调用的 assistant 正文。
@@ -202,6 +212,8 @@ public enum ChatMessageAssembler {
         var activityContents: [(id: String, content: AIAgentMessage.Content)] = []
         /// 旧历史没有执行计数时的回退：一条 assistant 回复计一轮，多个 toolUse 不重复计。
         var assistantRoundCount: Int = 0
+        /// 上一段正文因输出上限被截断、下一段是续写：直接接上，不另起段落。
+        var continuesFinalText = false
         var startedAt: Date
         var lastAt: Date
 
@@ -221,6 +233,7 @@ public enum ChatMessageAssembler {
                 // 只有真的用户发言才开新的一轮。turnID 缺失（旧快照）时接着上一个编号。
                 let key = message.turnID ?? ((turns.last?.key ?? 0) + 1)
                 turns.append(Turn(key: key, userText: message.text,
+                                  userAttachments: message.attachments,
                                   startedAt: message.createdAt, lastAt: message.createdAt))
                 continue
             }
@@ -246,6 +259,11 @@ public enum ChatMessageAssembler {
     }
 
     private static func append(_ message: AIAgentMessage, to turn: inout Turn) {
+        // agent 插给模型的续写指令不展示；它只标记「下一段正文接着上一段」。
+        if message.isAgentNote {
+            turn.continuesFinalText = !turn.finalText.isEmpty
+            return
+        }
         if message.role == .assistant { turn.assistantRoundCount += 1 }
         let hasToolCalls = !message.toolCalls.isEmpty
         for (index, content) in message.content.enumerated() {
@@ -258,6 +276,8 @@ public enum ChatMessageAssembler {
                     turn.activityContents.append(("\(message.id)-\(index)", content))
                 } else if turn.finalText.isEmpty {
                     turn.finalText = text
+                } else if turn.continuesFinalText {
+                    turn.finalText = AIAgentMessage.joiningContinuation(turn.finalText, text)
                 } else {
                     // 一条消息里可以有多个 text block（也可能同一轮先后来了两条纯文本），
                     // 直接覆盖会丢正文，所以按段落接起来。
@@ -265,12 +285,13 @@ public enum ChatMessageAssembler {
                 }
             case .toolUse, .toolResult:
                 turn.activityContents.append(("\(message.id)-\(index)", content))
-            case .hostContext:
+            case .hostContext, .attachment:
                 // 宿主状态/事件消息只进模型的逻辑历史，**不进展示层**：既不是用户气泡，
-                // 也不是过程明细。
+                // 也不是过程明细。用户附件随用户气泡展示（见 `group`），不会走到这里。
                 break
             }
         }
+        if message.role == .assistant { turn.continuesFinalText = false }
         turn.lastAt = max(turn.lastAt, message.createdAt)
     }
 
@@ -306,7 +327,7 @@ public enum ChatMessageAssembler {
                 } else {
                     timeline.finishTool(id: result.toolCallId, resultPreview: result.content)
                 }
-            case .hostContext:
+            case .hostContext, .attachment:
                 // append(_:to:) 不会把宿主状态消息放进 activityContents，这里只是把分支补全，
                 // 保证以后真有人塞进来也不会被渲染成过程明细。
                 break

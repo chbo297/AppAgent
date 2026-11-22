@@ -41,7 +41,7 @@ public final class AppAgentRunLog: @unchecked Sendable {
         self.now = now
     }
 
-    /// 日志目录（默认 `Documents/AppAgent/logs`，这样 `file_read` / 系统「文件」App 都能看到）。
+    /// 日志目录（默认 `Documents/AppAgent/logs`，这样统一 `file` 工具 / 系统「文件」App 都能看到）。
     public var directory: URL {
         get { lock.read { _directory } }
         set { lock.writeSync { _directory = newValue } }

@@ -146,7 +146,7 @@ final class AssistantIdentityTests: XCTestCase {
         let profile = AIAgentProfile(
             hostAppName: "测试应用",
             registerBuiltInTools: false,
-            disabledBuiltInTools: ["session_manage", "session_search"]
+            disabledBuiltInTools: ["session"]
         )
         let other = AIAgentProfile(hostAppName: "测试应用")
 
@@ -156,24 +156,19 @@ final class AssistantIdentityTests: XCTestCase {
         XCTAssertTrue(profile.identity.contains("不预载其他会话历史"))
         XCTAssertTrue(profile.identity.contains("不扩大 SDK 运行时访问范围"))
         XCTAssertTrue(profile.identity.contains("工具范围与授权"))
-        XCTAssertFalse(profile.identity.contains("session_manage"))
-        XCTAssertFalse(profile.identity.contains("session_search"))
+        XCTAssertFalse(profile.identity.contains("session"))
         XCTAssertTrue(profile.messageContextProviders.isEmpty)
     }
 
     func testSessionToolPromptsDescribeOnDemandHistoryAndArchiveOnlyDeletion() throws {
         let prompts = AIAgentProfile.defaultBuiltInToolPrompts
-        let search = try XCTUnwrap(prompts["session_search"])
-        XCTAssertTrue(search.contains("only when needed"))
-        XCTAssertTrue(search.contains("Do not preload"))
-
-        let manage = try XCTUnwrap(prompts["session_manage"])
-        XCTAssertTrue(manage.contains("AppAgent conversations"))
-        XCTAssertTrue(manage.contains("list/read/create/merge/archive/restore"))
-        XCTAssertTrue(manage.contains("as available in the current tool schema"))
-        XCTAssertTrue(manage.contains("'delete' means archive"))
-        XCTAssertTrue(manage.contains("No permanent deletion via tools"))
-        XCTAssertTrue(manage.contains("only the user can purge in the UI"))
+        let session = try XCTUnwrap(prompts["session"])
+        XCTAssertTrue(session.contains("only when needed"))
+        XCTAssertTrue(session.contains("Do not preload"))
+        XCTAssertTrue(session.contains("AppAgent conversations"))
+        XCTAssertTrue(session.contains("'delete' means archive"))
+        XCTAssertTrue(session.contains("no permanent deletion via tools"))
+        XCTAssertTrue(session.contains("user can purge in the UI"))
     }
 
     private func textSegments(

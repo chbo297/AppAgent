@@ -17,10 +17,12 @@ final class AppAgentVoiceInputCoordinatorTests: XCTestCase {
         private(set) var stopReasons: [AppAgentVoiceRecognitionEndReason] = []
         private(set) var finishRequests: [(trailingCapture: TimeInterval, finalizationTimeout: TimeInterval)] = []
         private var continuation: AsyncStream<AppAgentVoiceRecognitionEvent>.Continuation?
+        private var previousContinuations: [AsyncStream<AppAgentVoiceRecognitionEvent>.Continuation] = []
 
         func startRecording(locale: Locale?) -> AsyncStream<AppAgentVoiceRecognitionEvent> {
             startCount += 1
             return AsyncStream { continuation in
+                if let previous = self.continuation { self.previousContinuations.append(previous) }
                 self.continuation = continuation
             }
         }
@@ -40,6 +42,14 @@ final class AppAgentVoiceInputCoordinatorTests: XCTestCase {
                 finalText: finalText,
                 timestamp: 0
             )))
+            continuation?.finish()
+        }
+
+        func emitPreviousEnded(finalText: String) {
+            previousContinuations.last?.yield(.ended(AppAgentVoiceRecognitionEndContext(
+                reason: .cancelled, finalText: finalText, timestamp: 0
+            )))
+            previousContinuations.last?.finish()
         }
     }
 
@@ -273,6 +283,37 @@ final class AppAgentVoiceInputCoordinatorTests: XCTestCase {
             XCTFail("系统取消应以 cancelled 停止识别")
         }
         XCTAssertEqual(harness.feedback.impactReasons.last, "stop-cancel")
+    }
+
+    func testNewGestureAfterCancelIgnoresPreviousRecognitionEnd() async {
+        let harness = makeHarness()
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
+        harness.coordinator.systemCancel(at: .zero)
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
+        XCTAssertEqual(harness.provider.startCount, 2, "取消后必须开启新的识别流")
+
+        harness.provider.emitPreviousEnded(finalText: "上一轮的迟到结果")
+        await pump()
+        XCTAssertTrue(harness.coordinator.isActive)
+        XCTAssertEqual(harness.delegate.events.filter { $0 == "finish" }.count, 1)
+        XCTAssertFalse(harness.delegate.events.contains { $0.hasPrefix("send:") })
+        harness.coordinator.systemCancel(at: .zero)
+    }
+
+    func testNewGestureDuringFinalizeDoesNotSendPreviousText() async {
+        let harness = makeHarness()
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
+        harness.coordinator.end(at: .zero)
+        harness.coordinator.begin(source: .voiceModePress, location: .zero)
+        XCTAssertEqual(harness.provider.startCount, 2)
+
+        harness.provider.emitPreviousEnded(finalText: "上一轮不能发送")
+        await pump()
+        XCTAssertTrue(harness.coordinator.isActive)
+        XCTAssertFalse(harness.delegate.events.contains { $0.hasPrefix("send:") })
+        harness.coordinator.end(at: .zero)
+        XCTAssertEqual(harness.provider.finishRequests.count, 2, "新手势仍可正常松手收尾")
+        harness.coordinator.systemCancel(at: .zero)
     }
 
     // MARK: - 编辑交接

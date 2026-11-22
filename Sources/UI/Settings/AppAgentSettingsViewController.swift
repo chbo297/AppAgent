@@ -14,7 +14,8 @@ import UIKit
 
 public final class AppAgentSettingsViewController: UIViewController {
 
-    /// 用户点击「保存」并通过校验后回调，携带最新设置（此时已写入本地存储）。
+    /// 保存或确认清除成功后回调，此时已写入本地存储。
+    /// 清除传入空配置；调用方必须同样应用到运行时，不能按 isUsable 过滤。
     public var onSave: ((AppAgentEndpointSettings) -> Void)?
 
     /// 单条模型（模型 × 协议）的实测状态。
@@ -22,7 +23,7 @@ public final class AppAgentSettingsViewController: UIViewController {
         case untested
         case testing
         /// 可用，附首 token 返回时长（秒）。
-        case available(TimeInterval)
+        case available(TimeInterval?)
         /// 不可用，附简短原因。
         case unavailable(String)
     }
@@ -43,14 +44,41 @@ public final class AppAgentSettingsViewController: UIViewController {
     private var modelRows: [ModelRow]
     /// 探查 / 实测进行中，避免重复触发。
     private var isBusy = false
+    private var probeGeneration = UUID()
+    private(set) var probeTask: Task<Void, Never>?
+
+    // Replaceable persistence operations keep failure tests away from real credentials.
+    var saveConfiguration: (AppAgentEndpointSettings) -> Bool = AppAgentSettingsStore.save
+    var clearConfiguration: () -> Bool = AppAgentSettingsStore.clear
+
+    // 网络依赖可替换，测试可以准确控制迟到结果，不访问真实接口。
+    var discoverModelCandidates: @Sendable (AppAgentEndpointSettings) async throws -> [AppAgentModelCandidate] = { settings in
+        try await AppAgentModelDiscovery.discoverCandidates(
+            baseURL: settings.baseURL, apiKey: settings.apiKey, customHeaders: settings.customHeaders
+        )
+    }
+    var probeModelAvailability: @Sendable (
+        [AppAgentModelCandidate], AppAgentEndpointSettings,
+        @escaping @Sendable (AppAgentModelAvailability) -> Void
+    ) async -> Void = { candidates, settings, onResult in
+        _ = await AppAgentModelDiscovery.probeAvailability(
+            candidates: candidates, baseURL: settings.baseURL, apiKey: settings.apiKey,
+            customHeaders: settings.customHeaders, contextWindow: settings.contextWindow,
+            maxTokens: settings.maxTokens, onResult: onResult
+        )
+    }
 
     private let tableView = UITableView(frame: .zero, style: .grouped)
     private let baseURLField = UITextField()
     private let apiKeyField = UITextField()
     /// apiKey 输入框右侧的「探查接口」按钮。
     private let apiKeyProbeButton = UIButton(type: .system)
+    private let apiKeyVisibilityButton = UIButton(type: .system)
+    private let apiKeyControls = UIStackView()
 
-    private enum Section: Int, CaseIterable { case endpoint, models }
+    private enum Section: Int, CaseIterable {
+        case endpoint, models, clear
+    }
 
     public init(settings: AppAgentEndpointSettings = AppAgentSettingsStore.loadOrDefault()) {
         baseURL = settings.baseURL
@@ -124,9 +152,29 @@ public final class AppAgentSettingsViewController: UIViewController {
         apiKeyProbeButton.accessibilityLabel = "探查接口支持的模型并实测可用性"
         apiKeyProbeButton.frame = CGRect(x: 0, y: 0, width: 34, height: 26)
         apiKeyProbeButton.addTarget(self, action: #selector(didTapProbe), for: .touchUpInside)
-        apiKeyField.rightView = apiKeyProbeButton
+        apiKeyVisibilityButton.tintColor = AppAgentAppearance.accent
+        apiKeyVisibilityButton.accessibilityIdentifier = "appagent_toggle_api_key_visibility"
+        apiKeyVisibilityButton.addTarget(self, action: #selector(toggleAPIKeyVisibility), for: .touchUpInside)
+        updateAPIKeyVisibility()
+        apiKeyControls.axis = .horizontal
+        apiKeyControls.distribution = .fillEqually
+        apiKeyControls.frame = CGRect(x: 0, y: 0, width: 76, height: 32)
+        apiKeyControls.addArrangedSubview(apiKeyVisibilityButton)
+        apiKeyControls.addArrangedSubview(apiKeyProbeButton)
+        apiKeyField.rightView = apiKeyControls
         apiKeyField.rightViewMode = .always
     }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        apiKeyField.isSecureTextEntry = true
+        updateAPIKeyVisibility()
+        if isMovingFromParent || isBeingDismissed || navigationController?.isBeingDismissed == true {
+            invalidateProbe()
+        }
+    }
+
+    deinit { probeTask?.cancel() }
 
     // MARK: - Helpers
 
@@ -171,10 +219,34 @@ public final class AppAgentSettingsViewController: UIViewController {
 
     // MARK: - Field / nav actions
 
-    @objc private func baseURLChanged() { baseURL = baseURLField.text ?? "" }
-    @objc private func apiKeyChanged() { apiKey = apiKeyField.text ?? "" }
+    @objc private func toggleAPIKeyVisibility() {
+        apiKeyField.isSecureTextEntry.toggle()
+        updateAPIKeyVisibility()
+    }
 
-    @objc private func didTapCancel() { dismiss(animated: true) }
+    private func updateAPIKeyVisibility() {
+        let hidden = apiKeyField.isSecureTextEntry
+        apiKeyVisibilityButton.setImage(UIImage(systemName: hidden ? "eye" : "eye.slash"), for: .normal)
+        apiKeyVisibilityButton.accessibilityLabel = hidden ? "显示 API Key" : "隐藏 API Key"
+    }
+
+    @objc private func baseURLChanged() {
+        let value = baseURLField.text ?? ""
+        guard value != baseURL else { return }
+        baseURL = value
+        invalidateProbe()
+    }
+    @objc private func apiKeyChanged() {
+        let value = apiKeyField.text ?? ""
+        guard value != apiKey else { return }
+        apiKey = value
+        invalidateProbe()
+    }
+
+    @objc private func didTapCancel() {
+        invalidateProbe()
+        dismiss(animated: true)
+    }
 
     @objc private func didTapSave() {
         let settings = currentSettings().normalized
@@ -190,7 +262,52 @@ public final class AppAgentSettingsViewController: UIViewController {
             showAlert("模型配置无效", "请至少勾选一个模型，且每个模型 id 都不能为空。")
             return
         }
-        AppAgentSettingsStore.save(settings)
+        guard settings.isUsable else {
+            showAlert("模型配置无效", "上下文和输出 token 上限必须大于零。")
+            return
+        }
+        invalidateProbe()
+        guard saveConfiguration(settings) else {
+            showAlert("保存失败", "无法保存模型配置，请重试。")
+            return
+        }
+        onSave?(settings)
+        dismiss(animated: true)
+    }
+
+    func makeClearConfirmation() -> UIAlertController {
+        let alert = UIAlertController(
+            title: "清除模型配置？",
+            message: "将删除已保存的 API Key、接口地址和模型配置，并停止正在进行的回复。聊天记录和显示偏好会保留。",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "清除", style: .destructive) { [weak self] _ in
+            self?.clearModelConfiguration()
+        })
+        return alert
+    }
+
+    /// Called only after the user confirms the destructive action.
+    func clearModelConfiguration() {
+        view.endEditing(true)
+        invalidateProbe()
+        guard clearConfiguration() else {
+            showAlert("清除失败", "无法清除已保存的模型配置，请重试。")
+            return
+        }
+        let settings = AppAgentEndpointSettings()
+        baseURL = settings.baseURL
+        apiKey = settings.apiKey
+        customHeaders = settings.customHeaders
+        contextWindow = settings.contextWindow
+        maxTokens = settings.maxTokens
+        modelRows = []
+        baseURLField.text = ""
+        apiKeyField.text = ""
+        apiKeyField.isSecureTextEntry = true
+        updateAPIKeyVisibility()
+        tableView.reloadData()
         onSave?(settings)
         dismiss(animated: true)
     }
@@ -203,7 +320,7 @@ public final class AppAgentSettingsViewController: UIViewController {
     /// 模型区头部按钮：列表为空时等同「探查接口」，否则只对现有条目重测可用性。
     @objc private func didTapRetest() { runProbe(refetchList: modelRows.isEmpty) }
 
-    private func runProbe(refetchList: Bool) {
+    func runProbe(refetchList: Bool) {
         view.endEditing(true)
         let settings = currentSettings().normalized
         guard settings.hasUsableBaseURL else {
@@ -216,42 +333,51 @@ public final class AppAgentSettingsViewController: UIViewController {
         }
         guard !isBusy else { return }
 
+        // 开始时仅把已选项置前；完成后再按本次实测耗时排序，避免逐条回包时列表跳动。
+        sortModelRows(byLatency: false)
         setBusy(true)
-        let base = settings.baseURL
-        let key = settings.apiKey
-        let headers = customHeaders
-        let window = contextWindow
-        let tokens = maxTokens
+        let generation = UUID()
+        probeGeneration = generation
+        let discover = discoverModelCandidates
 
-        Task { @MainActor in
+        probeTask = Task { @MainActor [weak self] in
             if refetchList {
                 do {
-                    let candidates = try await AppAgentModelDiscovery.discoverCandidates(
-                        baseURL: base, apiKey: key, customHeaders: headers
-                    )
+                    let candidates = try await discover(settings)
+                    guard !Task.isCancelled, let self, self.probeGeneration == generation else { return }
                     self.mergeCandidates(candidates)
                     self.tableView.reloadData()
                 } catch {
+                    guard !Task.isCancelled, let self, self.probeGeneration == generation else { return }
+                    self.probeTask = nil
                     self.setBusy(false)
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.promptManualAdd(afterFailure: message)
                     return
                 }
             }
-            await self.testAllRows(
-                baseURL: base, apiKey: key, customHeaders: headers, contextWindow: window, maxTokens: tokens
-            )
+            guard !Task.isCancelled, let self, self.probeGeneration == generation else { return }
+            await self.testAllRows(settings: settings, generation: generation)
+            guard !Task.isCancelled, self.probeGeneration == generation else { return }
+            self.sortModelRows(byLatency: true)
+            self.probeTask = nil
             self.setBusy(false)
         }
     }
 
+    private func invalidateProbe() {
+        probeGeneration = UUID()
+        probeTask?.cancel()
+        probeTask = nil
+        // 绿/红状态属于先前端点与凭据，编辑之后必须重新实测。
+        for index in modelRows.indices { modelRows[index].probe = .untested }
+        if isViewLoaded { setBusy(false) }
+    }
+
     /// 并行实测所有条目：每个结果一回来就刷新对应行，逐个点亮绿/红点。
     private func testAllRows(
-        baseURL: String,
-        apiKey: String,
-        customHeaders: [String: String],
-        contextWindow: Int,
-        maxTokens: Int
+        settings: AppAgentEndpointSettings,
+        generation: UUID
     ) async {
         guard !modelRows.isEmpty else { return }
         for index in modelRows.indices { modelRows[index].probe = .testing }
@@ -259,25 +385,29 @@ public final class AppAgentSettingsViewController: UIViewController {
 
         let candidates = modelRows.map { $0.candidate }
         let (stream, continuation) = AsyncStream<AppAgentModelAvailability>.makePair()
+        let availability = probeModelAvailability
         let probe = Task.detached {
-            await AppAgentModelDiscovery.probeAvailability(
-                candidates: candidates,
-                baseURL: baseURL,
-                apiKey: apiKey,
-                customHeaders: customHeaders,
-                contextWindow: contextWindow,
-                maxTokens: maxTokens
-            ) { continuation.yield($0) }
+            await availability(candidates, settings) { continuation.yield($0) }
             continuation.finish()
         }
-        for await result in stream { applyAvailability(result) }
-        _ = await probe.value
+        await withTaskCancellationHandler {
+            for await result in stream {
+                guard !Task.isCancelled, probeGeneration == generation else { break }
+                applyAvailability(result)
+            }
+        } onCancel: {
+            probe.cancel()
+            continuation.finish()
+        }
+        // 取消不等待可能尚未退出的网络任务，迟到输出已被关闭的 stream 隔离。
+        if Task.isCancelled { return }
+        await probe.value
     }
 
     private func applyAvailability(_ result: AppAgentModelAvailability) {
         guard let index = modelRows.firstIndex(where: { $0.candidate == result.candidate }) else { return }
         modelRows[index].probe = result.isAvailable
-            ? .available(result.firstTokenLatency ?? 0)
+            ? .available(result.firstTokenLatency)
             : .unavailable(result.failureReason ?? "不可用")
         tableView.reloadRows(at: [IndexPath(row: index, section: Section.models.rawValue)], with: .none)
     }
@@ -291,20 +421,42 @@ public final class AppAgentSettingsViewController: UIViewController {
             spinner.startAnimating()
             apiKeyField.rightView = spinner
         } else {
-            apiKeyField.rightView = apiKeyProbeButton
+            apiKeyField.rightView = apiKeyControls
         }
         tableView.reloadSections(IndexSet(integer: Section.models.rawValue), with: .none)
     }
 
-    /// 合并探查结果：接口声明支持的全部「模型 × 协议」都列出；已有条目保留用户勾选与上次实测，
-    /// 新条目默认未勾选。此前没有任何启用项时自动勾选第一条。
+    /// 已选项保持用户优先级；其余可用项按首 token 耗时升序，缺少耗时或失败项置后。
+    private func sortModelRows(byLatency: Bool) {
+        func latency(_ row: ModelRow) -> TimeInterval {
+            if case .available(let value) = row.probe,
+               let value, value.isFinite, value >= 0 {
+                return value
+            }
+            return .infinity
+        }
+        modelRows = modelRows.enumerated().sorted { lhs, rhs in
+            if lhs.element.enabled != rhs.element.enabled {
+                return lhs.element.enabled
+            }
+            if byLatency && !lhs.element.enabled {
+                let left = latency(lhs.element)
+                let right = latency(rhs.element)
+                if left != right {
+                    return left < right
+                }
+            }
+            return lhs.offset < rhs.offset
+        }.map {
+            $0.element
+        }
+    }
+
+    /// 合并探查结果：已有条目保留用户勾选，新条目默认未勾选。
     private func mergeCandidates(_ candidates: [AppAgentModelCandidate]) {
         let known = Set(modelRows.map { $0.candidate })
         for candidate in candidates where !known.contains(candidate) {
             modelRows.append(ModelRow(candidate: candidate, enabled: false))
-        }
-        if !modelRows.contains(where: { $0.enabled }), !modelRows.isEmpty {
-            modelRows[0].enabled = true
         }
     }
 
@@ -350,6 +502,7 @@ extension AppAgentSettingsViewController: UITableViewDataSource, UITableViewDele
         switch Section(rawValue: section)! {
         case .endpoint: return 2
         case .models: return modelRows.count + 1 // +1 = 手动添加
+        case .clear: return 1
         }
     }
 
@@ -385,6 +538,8 @@ extension AppAgentSettingsViewController: UITableViewDataSource, UITableViewDele
                 button.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -18),
                 button.centerYAnchor.constraint(equalTo: label.centerYAnchor)
             ])
+        case .clear:
+            label.text = "清除配置"
         }
         return header
     }
@@ -395,7 +550,10 @@ extension AppAgentSettingsViewController: UITableViewDataSource, UITableViewDele
             return "填好地址与 API Key 后点右侧放大镜：并行探查 OpenAI / Anthropic 两种协议声明支持的模型。"
         case .models:
             return "同一模型支持两种协议时会分成两条，各自标注协议。绿点＝实测可用（附首 token 时长），"
-                + "红点＝不可用，灰点＝未实测。勾选启用、拖动排序，第一条为默认模型，其余按序作为备选。"
+                + "红点＝不可用，灰点＝未实测。探查后已选模型置前，未选模型按首 token 时长从快到慢排列。"
+                + "勾选启用、拖动排序，已选的第一条为默认模型，其余按序作为备选。"
+        case .clear:
+            return "清除接口、密钥和模型配置，保留聊天记录与显示偏好。"
         }
     }
 
@@ -427,6 +585,13 @@ extension AppAgentSettingsViewController: UITableViewDataSource, UITableViewDele
             cell.accessibilityLabel = "\(row.candidate.modelId)，\(Self.statusText(for: row))，\(row.enabled ? "已启用" : "未启用")"
             cell.showsReorderControl = true
             return cell
+        case .clear:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.backgroundColor = AppAgentAppearance.inputBarBackground
+            cell.textLabel?.text = "清除模型配置"
+            cell.textLabel?.textColor = .systemRed
+            cell.accessibilityIdentifier = "appagent_clear_model_configuration"
+            return cell
         }
     }
 
@@ -455,7 +620,11 @@ extension AppAgentSettingsViewController: UITableViewDataSource, UITableViewDele
         switch row.probe {
         case .untested: return "\(proto) · 未实测"
         case .testing: return "\(proto) · 实测中…"
-        case .available(let latency): return "\(proto) · 首 token \(String(format: "%.2f", latency))s"
+        case .available(let latency):
+            guard let latency, latency.isFinite, latency >= 0 else {
+                return "\(proto) · 可用（耗时未知）"
+            }
+            return "\(proto) · 首 token \(String(format: "%.2f", latency))s"
         case .unavailable(let reason): return "\(proto) · 不可用（\(reason)）"
         }
     }
@@ -490,6 +659,11 @@ extension AppAgentSettingsViewController: UITableViewDataSource, UITableViewDele
 
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        if Section(rawValue: indexPath.section) == .clear {
+            view.endEditing(true)
+            present(makeClearConfirmation(), animated: true)
+            return
+        }
         guard Section(rawValue: indexPath.section) == .models else { return }
         if indexPath.row == modelRows.count {
             promptManualAdd(afterFailure: nil)

@@ -12,7 +12,7 @@ import UIKit
 /// 负责裁切，实际聊天内容始终按照完整内容区域布局，不依赖 viewport 的临时尺寸；只有 `listView` 内部的 tableView
 /// 会把自身视口高度对齐到当前展示高度（见 `AppAgentChatMessageListView.updateVisibleArea`）。
 ///
-/// **裁切与圆角一律用 `clipsToBounds` + `layer.cornerRadius` + `maskedCorners` 表达，不用 shape mask。**
+/// **裁切与圆角一律用 `clipsToBounds` + `layer.cornerRadius` 表达，不用 shape mask。**
 /// 实测踩过：`layer.mask` 不吃 UIKit 动画块的隐式动画（`animationKeys()` 恒为空），而它又是唯一的裁切者，
 /// 于是键盘动画里可见边界第一帧就跳到终态、内容再慢慢滑上来，看起来就是「先落后键盘、再跳一下」；
 /// 想显式给 mask 补 CAAnimation 的话，`path` 那条又会在半屏高度制造「重绘半截闪白」。
@@ -26,6 +26,9 @@ final class AppAgentChatPanelView: UIView {
 
     /// 点击内容区导航栏“新对话”按钮时触发。
     var onNewSessionRequested: (() -> Void)?
+
+    /// 点击内容区导航栏“会话设置”按钮时触发。
+    var onSessionSettingsRequested: (() -> Void)?
 
     /// 聊天内容区，消息的追加和流式更新由宿主直接操作。
     let listView = AppAgentChatMessageListView()
@@ -54,7 +57,31 @@ final class AppAgentChatPanelView: UIView {
     private var currentDisplayHeight: CGFloat?
     private var minimumDisplayHeight: CGFloat?
     private var compactTransitionStartDisplayHeight: CGFloat?
+    /// 收到最小档时紧凑框的高度：与展开态 inputBar 等高，随草稿行数变化。
+    private var compactHeight = AppAgentInputBarMetrics.barHeight
     private var appliedLayout: AppAgentChatPanelContentLayout?
+
+    /// 当前竖向收起进度：half 及以上为 0，peek 为 1。尚未布局时按 half 处理。
+    var compactProgress: CGFloat {
+        appliedLayout?.compactProgress ?? 0
+    }
+
+    /// 可见区（viewport）下沿以下的透明区域是否让触摸穿透到宿主。
+    ///
+    /// 宿主要求底部避让（`hostReservedBottomHeight` 有实际数值）时由控制器置为 true：peek 档输入栏被抬高，
+    /// 面板却仍铺到屏幕底部，不放行的话输入栏下方的宿主控件点不到。只有系统安全区时保持 false，
+    /// 安全区那一段照旧由面板承接。
+    var passesTouchesBelowViewport = false
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard super.point(inside: point, with: event) else {
+            return false
+        }
+        guard passesTouchesBelowViewport, let layout = appliedLayout else {
+            return true
+        }
+        return point.y < layout.contentAreaFrame.minY + layout.viewportFrame.maxY
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -81,7 +108,8 @@ final class AppAgentChatPanelView: UIView {
     func updateDisplayHeight(
         _ displayHeight: CGFloat,
         minimumDisplayHeight: CGFloat,
-        compactTransitionStartDisplayHeight: CGFloat
+        compactTransitionStartDisplayHeight: CGFloat,
+        compactHeight: CGFloat
     ) {
         let normalizedDisplayHeight = max(0, displayHeight)
         let normalizedMinimumHeight = max(0, minimumDisplayHeight)
@@ -99,13 +127,18 @@ final class AppAgentChatPanelView: UIView {
             (self.compactTransitionStartDisplayHeight ?? -.greatestFiniteMagnitude)
                 - normalizedTransitionStartHeight
         ) > 0.001
+        let compactHeightChanged = abs(self.compactHeight - compactHeight) > 0.001
         guard displayHeightChanged
             || minimumHeightChanged
-            || transitionStartHeightChanged else { return }
+            || transitionStartHeightChanged
+            || compactHeightChanged else {
+            return
+        }
 
         currentDisplayHeight = normalizedDisplayHeight
         self.minimumDisplayHeight = normalizedMinimumHeight
         self.compactTransitionStartDisplayHeight = normalizedTransitionStartHeight
+        self.compactHeight = compactHeight
         applyContentLayoutIfNeeded()
     }
 
@@ -130,7 +163,8 @@ final class AppAgentChatPanelView: UIView {
             bounds: bounds,
             displayHeight: displayHeight,
             minimumDisplayHeight: minimumDisplayHeight,
-            compactTransitionStartDisplayHeight: compactTransitionStartDisplayHeight
+            compactTransitionStartDisplayHeight: compactTransitionStartDisplayHeight,
+            compactHeight: compactHeight
         )
         guard layout != appliedLayout else { return }
         appliedLayout = layout
@@ -149,22 +183,13 @@ final class AppAgentChatPanelView: UIView {
         listView.frame = layout.messageListFrame
         layoutDecisionCard()
 
-        // 【竖向收起形状应用点】背景和 viewport 共用同一组圆角，保证边缘完全重合。
-        // A/B 过渡区间四角同半径；高于 A 点是「上圆角、下直角」。
-        applyCornerRadius(top: layout.topCornerRadius, bottom: layout.bottomCornerRadius, to: viewportView)
-        backgroundView.applyCornerRadius(top: layout.topCornerRadius, bottom: layout.bottomCornerRadius)
+        // 【竖向收起形状应用点】背景和 viewport 共用同一圆角，保证边缘完全重合。
+        viewportView.layer.cornerRadius = layout.cornerRadius
+        backgroundView.layer.cornerRadius = layout.cornerRadius
 
         // 可见区变了：冒泡给控制器去报给宿主。竖向拖拽拉高不经过 inputBar 那条路，
         // 只有这里知道面板的展示高度变了。
         onViewportChanged?()
-    }
-
-    /// 上下圆角只有「四角同半径」与「只上两角」两种形态，正好能用 `maskedCorners` 表达。
-    private func applyCornerRadius(top: CGFloat, bottom: CGFloat, to view: UIView) {
-        view.layer.cornerRadius = top
-        view.layer.maskedCorners = bottom > 0.5
-            ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
-            : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
     }
 
     /// 决策卡片底部要额外让出的高度：面板 viewport 会延伸到 inputBar 之下，
@@ -243,6 +268,9 @@ final class AppAgentChatPanelView: UIView {
         viewportView.addSubview(listView)
         viewportView.addSubview(navigationBar)
         decisionCard.isHidden = true
+        decisionCard.onContentHeightChange = { [weak self] in
+            self?.layoutDecisionCard()
+        }
         viewportView.addSubview(decisionCard)
 
         navigationBar.onSessionListRequested = { [weak self] in
@@ -253,6 +281,9 @@ final class AppAgentChatPanelView: UIView {
         }
         navigationBar.onNewSessionRequested = { [weak self] in
             self?.onNewSessionRequested?()
+        }
+        navigationBar.onSessionSettingsRequested = { [weak self] in
+            self?.onSessionSettingsRequested?()
         }
 
         applyAppearance()
@@ -279,13 +310,6 @@ private final class AppAgentChatPanelBackgroundView: UIView, AppAgentRuntimeOwne
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         setup()
-    }
-
-    func applyCornerRadius(top: CGFloat, bottom: CGFloat) {
-        layer.cornerRadius = top
-        layer.maskedCorners = bottom > 0.5
-            ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
-            : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
     }
 
     func applyAppearance(for traitCollection: UITraitCollection) {

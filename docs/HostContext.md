@@ -4,8 +4,17 @@
 > 当前状态、语义事件与动态工作区」，**不绑定任何具体 App**。
 >
 > 状态：协议冻结基线 v0.3。
-> 实现现状见 AppAgent `Sources/Core/HostContext/HostContextTypes.swift`、`HostStateMirror.swift`；
+> 实现现状见 AppAgent `Sources/Core/HostContext/HostContextTypes.swift`、`HostStateReporter.swift`；
 > 尚未实现的是「固有能力 Manifest」那一层（§4）。
+
+> **2026-11 重做（以本条为准）**：宿主状态改成「一组 key → 文本」（`[String: String]`），宿主不再维护
+> epoch / revision 版本号，也不再推送增量流。SDK 每次请求模型前读一次，逐字段比对，第一帧发全量、之后只发变了的字段。
+> 下文 §7 的结构化 JSON 示例只作为「宿主可以往字段里写什么」的参考；协议本身见 §8 与 §14.1。
+
+阅读入口：宿主状态汇报、提交边界和线协议分别见 §8、§9；完整设计示例保留在下文。
+`HostContextTypes.swift` / `HostStateReporter.swift` 是已实现行为的依据；Manifest 的发现/缓存、
+动态页面的宿主实现与工作区恢复流程是设计约定，不能仅因本文出现示例就视作 SDK 已交付。
+本轮维护结果与后续计划见 [OptimizationPlan.md](OptimizationPlan.md)。
 
 ---
 
@@ -22,7 +31,7 @@
 
 ```text
 App 状态变化
-  → AppAgent 内部状态镜像
+  → AppAgent 内部 HostStateReporter
   → 等待下次模型请求
   → 以结构化 Host Context Message 放入模型消息历史
   → 再发送用户消息、App 事件或工具续行
@@ -87,7 +96,7 @@ AppAgent 负责：
 
 - 加载和缓存宿主能力 Manifest。
 - 注册宿主工具。
-- 维护宿主状态镜像。
+- 维护宿主状态汇报（HostStateReporter）。
 - 把 Host Context Message 放入模型逻辑消息历史。
 - 将用户输入、App 自动事件和工具往返编排成模型请求。
 - 区分用户消息、App 消息、工具结果和隐藏状态消息。
@@ -475,7 +484,7 @@ Host State Snapshot
 
 ```text
 App 发布变化
-  → AppAgent 更新 StateMirror
+  → AppAgent 更新 HostStateReporter
   → 等待下一次模型请求
   → 将累计变化合并为一个 Host State Delta
 ```
@@ -484,7 +493,7 @@ App 发布变化
 
 ```text
 App 发布事件
-  → AppAgent 更新 StateMirror
+  → AppAgent 更新 HostStateReporter
   → 创建 App Event Message
   → 将事件提交到对应会话
   → 触发模型一轮
@@ -529,7 +538,6 @@ displayPolicy:
 ```text
 trigger
 eventId
-stateCursor
 causedByToolCallId
 ```
 
@@ -599,36 +607,18 @@ source: host
 
 ### 7.1 顶层结构
 
-当前状态从 `[String: String]` 升级为结构化 JSON。
+宿主状态是一组「key → 文本」。key 用点号分组，一个 key 是一个比对单位：
 
-推荐的顶层结构：
-
-```json
-{
-  "stateSchemaVersion": 1,
-  "page": {
-    "stack": [],
-    "current": {}
-  }
-}
+```text
+page.top      = BMPoiDetailPage
+page.stack    = 首页 > 搜索结果 > POI详情
+map.viewport  = 116.39741,39.90812 - 116.41200,39.92000 zoom=15
+location      = 116.39741,39.90812 ±20m
+workspaces    = ws_1 可见 v3 12KB; ws_2 隐藏 v1 3KB
 ```
 
-`stateSchemaVersion` 表示状态 JSON 的结构版本，不是 App build，也不参与能力缓存。
-
-运行态协议 envelope 可以单独带传输控制字段：
-
-```json
-{
-  "kind": "state_delta",
-  "cursor": {
-    "epoch": "opaque-runtime-token",
-    "revision": 121
-  },
-  "changes": {}
-}
-```
-
-其中 `cursor` 属于 App 和 AppAgent 的通信控制信息，不进入 system prompt，也不要求模型理解。
+下面 §7.2–§7.8 的 JSON 是「某个字段里可以写什么」的示例：宿主可以把一段结构用
+`HostStateStore.stableText(from:)` 转成固定格式的文本放进一个字段。字段越细，变化时重发的内容越少。
 
 ### 7.2 页面栈
 
@@ -827,132 +817,64 @@ source: host
 ---
 
 
-## 8. 状态增量协议
+## 8. 状态比对协议
 
-### 8.1 是否需要 epoch 和 revision
+### 8.1 谁负责什么
 
-它们是通信层控制字段，不是模型业务字段。
+- **宿主**：状态变了就把对应字段写进 `HostStateStore`（或实现 `HostStateProvider.currentState()`，
+  返回已经存好的副本）。不维护版本号，不推送增量。数值转字符串时注意防抖：浮点末位的抖动会让字段每次都算「变了」。
+- **SDK**（`HostStateReporter`，每个会话一份）：每次请求模型前读一次，和「模型已经看到的字段」逐个比对，决定这一帧发什么。
 
-#### `stateSchemaVersion`
+### 8.2 每一帧发什么
 
-表示 JSON 结构版本。只有状态结构不兼容变化时升级。
+| 情况 | 发送 |
+|---|---|
+| 这一轮第一次请求、上下文被压缩之后、上一帧没提交成功 | `host_state`：全部字段，外加字段说明 |
+| 和模型看到的相比有字段变了或没了 | `host_state_change`：`changed`（变了的字段）+ `removed`（没了的 key） |
+| 状态没变，但有宿主事件 | 只发 `host_event` |
+| 什么都没变 | 不发 |
 
-#### `epoch`
+单个字段超过 `fieldCharacterLimit`（默认 4096 字符）会被截断并注明原文长度。
 
-表示一次状态生命周期。例如 App 重启后进入新 epoch，用于避免旧异步回调覆盖新状态。
+### 8.3 读取
 
-#### `revision`
-
-表示同一 epoch 内的递增状态序号，用于判断状态顺序和是否丢失更新。
-
-例如：
-
-```text
-收到 revision 121
-又收到 revision 123
-没有收到 revision 122
-```
-
-AppAgent 可以判断中间状态可能丢失，需要重新请求完整快照。
-
-这三个字段不应进入稳定 system prompt，也不需要让模型理解。
-
-### 8.2 最小增量格式
-
-```json
-{
-  "kind": "state_delta",
-  "cursor": {
-    "epoch": "opaque-runtime-token",
-    "revision": 121
-  },
-  "changes": {
-    "page": {
-      "current": {
-        "interaction": {
-          "selectedOverlay": null
-        }
-      }
-    }
-  }
-}
-```
-
-### 8.3 合并规则
-
-- 字段缺失：保持原值。
-- 字段为 `null`：清除原值。
-- 对象字段：按约定递归合并。
-- 数组字段：默认整体替换。
-- 状态变化按照 cursor 顺序合并。
-- 发现 epoch 变化或 revision 断档：重新获取完整快照。
-
-例如取消当前内容选中：
-
-```json
-{
-  "page": {
-    "current": {
-      "interaction": {
-        "selectedOverlay": null
-      }
-    }
-  }
-}
-```
+- 每次请求模型前在非主线程调一次 `currentState()`，最多等 `stateReadTimeout`（默认 3 秒），
+  超时沿用上一份，记 `host_state_timeout` 失败日志；超过 0.5 秒打警告。
+- 读取期间换了来源（`installProvider` 又被调用），迟到的结果丢弃。
 
 ### 8.4 状态传输和模型上下文的关系
 
-推荐分三层：
-
 ```text
-App → AppAgent：只传 delta
+宿主 → store：状态变了就写字段
 
-AppAgent 内部：合并成完整 StateMirror
+SDK 内部：每次请求前读一份，和 modelSeenFields 比对
 
-AppAgent → Model：
-  - 首次发送完整 snapshot
-  - 后续发送未被模型看到的 delta
-  - 压缩/恢复后发送新的完整 snapshot
+SDK → 模型：
+  - 每轮第一帧发完整状态
+  - 之后只发变了的字段
+  - 压缩/提交失败后重发完整状态
 ```
 
-因此，App 不需要每次发送完整状态，模型也不会因为只收到 delta 而失去状态基线。
+### 8.5 `modelSeenFields` 的提交边界
 
-### 8.5 `modelSeenCursor` 的提交边界
-
-每次准备 provider 请求时，AppAgent 先从 StateMirror 生成一个不可变的待发送上下文：
-
-```text
-prepare:
-  current StateMirror
-  + modelSeenCursor
-  → pending snapshot/delta
-  → provider request
-```
-
-生成 pending 上下文不会推进 `modelSeenCursor`。只有满足以下条件时才提交：
+每次准备 provider 请求时，SDK 生成一个不可变的待发送帧（`PreparedHostContext`），
+其中记着「提交后模型看到的完整字段」。生成不改变模型进度。只有满足以下条件时才提交：
 
 - provider 请求已完成；
 - 流式响应已经被完整解析为合法的 assistant 文本、工具调用或终止结果；
 - 当前请求没有传输错误、解析错误或被取消。
 
-提交动作必须使用本次请求携带的 cursor，并且只能单调推进：
-
 ```text
 成功：
-  modelSeenCursor = pending.cursor
+  modelSeenFields = pending.modelFields
+  帧里的事件标记为已发送（之后不再发）
 
 失败、取消或解析异常：
-  modelSeenCursor 保持不变
-  下次重试重新发送相同的 snapshot/delta
+  modelSeenFields 保持不变，事件留在收件箱
+  下次请求重新比对、重新发送
 ```
 
-工具执行发生在 provider 响应成功解析之后，因此工具调用请求已经可以提交其
-Host Context cursor。工具执行产生的新状态属于下一次 provider 请求，不能提前标记为
-模型已看到。
-
-如果 provider 返回了部分流后失败，整次请求按失败处理，不能因为已经收到部分 token
-而推进 cursor。重试时应依赖现有的请求/turn 生命周期去避免重复追加一条用户消息。
+工具执行产生的新状态属于下一次 provider 请求：工具改了字段，下一帧自然只带这些字段的变化。
 
 ### 8.6 provider wire 合并矩阵
 
@@ -1021,8 +943,7 @@ Snapshot
 - 正常运行：只追加 Delta。
 - 到达消息数量或字节阈值：追加新的完整 Snapshot。
 - 上下文压缩后：在压缩结果后追加完整 Snapshot。
-- App 重启或 epoch 变化：追加完整 Snapshot。
-- 状态断档：先请求完整 Snapshot，再继续 Delta。
+- 每一轮（用户发一条消息）的第一次请求：完整状态。
 
 每次完整 Snapshot 都是一个新的模型状态检查点。追加检查点后，新的
 `modelSeenCursor` 以该 Snapshot 的 cursor 为基线；旧 Delta 可以在上下文压缩时
@@ -1032,7 +953,7 @@ Snapshot
 Delta。压缩流程必须是：
 
 ```text
-冻结当前 StateMirror
+冻结当前 HostStateReporter
   → 压缩旧消息
   → 在压缩结果后追加完整 Host State Snapshot
   → 使用同一请求的成功提交规则推进 cursor
@@ -1090,7 +1011,7 @@ App 自动事件同时具有：
 
 该事件中携带的变化同时完成：
 
-1. 更新 AppAgent 的 StateMirror；
+1. 更新 AppAgent 的 HostStateReporter；
 2. 让模型知道用户操作的语义；
 3. 作为模型消息历史中的状态变化记录；
 4. 作为 UI 的折叠 App 消息。
@@ -1226,7 +1147,7 @@ AppAgent 负责：
 
 - 会话首次创建动态页面时，附带完整 workspace snapshot；
 - 后续用户在动态页面中产生重要交互时，追加 workspace delta；
-- 普通滚动和高频 UI 变化默认只更新 StateMirror；
+- 普通滚动和高频 UI 变化默认只更新 HostStateReporter；
 - 下一次模型请求前，将未被模型看到的 workspace delta 发送给模型；
 - 页面被释放后，工作区可恢复状态仍保留，WebView 本身不保留在内存消息中。
 
@@ -1326,61 +1247,51 @@ H5 通过白名单协议声明响应区域。宿主校验区域后才允许触�
 
 ### 14.1 协议
 
-将当前：
-
 ```swift
-func currentState() async -> [String: String]
+public protocol HostStateProvider: Sendable {
+    func currentState() async throws -> [String: String]
+    func fieldDescriptions() async -> [String: String]   // 可选，默认空
+}
 ```
 
-升级为结构化协议，例如：
+一般不用自己实现，直接用 SDK 提供的 `HostStateStore`（`@objc`，OC 可直接用，任意线程读写）：
 
 ```swift
-func snapshot() async throws -> HostStateSnapshot
-func subscribe(_ observer: @escaping @Sendable (HostStateUpdate) -> Void)
+let store = HostStateStore()
+store.setField("BMPoiDetailPage", forKey: "page.top")        // 状态变了就写
+store.setDescription("当前最上层页面", forKey: "page.top")   // 可选：字段含义
+store.postEvent(trigger: "tap", action: "open-detail", detail: "poi=123")
+try await session.installHostStateProvider(store)
 ```
 
-AppAgent 核心层应定义与业务无关的 Codable/Sendable 类型：
+- **key 和含义由宿主自己定义**。key 本身看得懂的不用写说明；看不懂的用 `setDescription` 写一句，
+  它只随完整状态发给模型。
+- **事件**不是状态，比对不出来，由 `postEvent` 告诉 SDK，随下一帧发出、只发一次。
+  自己实现来源的宿主可以调 `session.hostStateReporter.post(_:)`。
+- **`app_state` 工具**读的也是这个来源（`AppStateTool()`），宿主不用再实现第二个接口。
 
-```swift
-struct StateCursor
-struct HostStateSnapshot
-struct HostStateDelta
-enum HostStateUpdate
-struct HostEvent
-struct HostPageDefinition
-struct HostWorkspaceState
-```
+消息里的类型：`HostState`（全量）、`HostStateChange`（变化）、`HostEvent`（事件），
+都包在 `HostContextPayload` 里。
 
-其中：
+线程约定（宿主实现工具与 provider 时必须遵守）：
 
-- `HostStateSnapshot` 必须携带 `stateSchemaVersion`、`cursor` 和结构化 `state`；
-- `HostStateDelta` 必须携带 `cursor` 和 `changes`，不能只携带格式化字符串；
-- `HostStateUpdate` 区分 snapshot、delta 和 event；
-- `HostEvent` 必须携带 `eventId`、`trigger`、语义 action、display policy 和可选 changes；
-- `HostPageDefinition` 使用稳定 `pageId` 与 `definitionHash`；
-- `HostWorkspaceState` 只描述工作区协议状态，不携带 WebView 或 UIKit 实例。
+- AppAgent 从非隔离的子任务调用 `ToolProtocol.execute`、`HostStateProvider.currentState()` 和
+  `ToolExecutionGate`，它们跑在 Swift 并发线程池上，**不保证主线程**；`.safe` 工具还可能并行执行。
+- `currentState()` 每次请求模型前都会被调用，应该只拷贝已经存好的状态。只能在主线程读到的状态
+  （UIKit、地图视图、页面栈）由宿主在变化发生时（本来就在主线程）写进 store，不要在 `currentState()` 里切主线程现算。
+- 工具需要主线程时把 `execute` 写成 `@MainActor`；宿主的 ObjC 桥建议用 `NS_SWIFT_UI_ACTOR` 标注。
+- 主线程上只做读写宿主状态和组装结果；CPU 重的同步计算放进非隔离的 async 函数。
 
-状态合并、cursor 校验和模型可见 cursor 追踪应放在独立的
-`HostStateMirror`/`HostContextCoordinator` 中，不放进某个业务 provider。
+### 14.2 HostStateReporter
 
-当前协议位置：
+`HostStateReporter`（每个会话一份）负责：
 
-`AppAgent/Sources/Core/Tools/Protocols/AppStateProvider.swift:15`
+- 每次请求前读宿主（带超时），截断超长字段；
+- 和 `modelSeenFields` 比对，生成全量 / 变化 / 事件帧；
+- 收宿主事件、去重；
+- prepare / commit / discard 提交边界。
 
-### 14.2 StateMirror
-
-新增 `HostStateMirror`，负责：
-
-- 接收完整快照；
-- 接收 delta；
-- 合并状态；
-- 检查 epoch/revision；
-- 发现断档后请求完整快照；
-- 为每个 session 提供当前状态；
-- 追踪 `modelSeenCursor`。
-
-`HostStateMirror` 不负责启动模型请求。模型触发由 session executor 和显式
-`HostEvent` 决定，避免状态发布与模型执行形成隐式耦合。
+`HostStateReporter` 不负责启动模型请求。模型触发由 session executor 和显式事件决定。
 
 ### 14.3 模型请求前注入
 
@@ -1392,7 +1303,7 @@ struct HostWorkspaceState
 
 ```text
 每次 provider 请求前：
-  1. 读取当前 StateMirror。
+  1. 读取当前 HostStateReporter。
   2. 判断模型已看到的 cursor。
   3. 追加未发送的 Host State Snapshot/Delta。
   4. 再发送本轮用户消息、App 事件或工具续行。
@@ -1418,8 +1329,7 @@ struct HostWorkspaceState
 - displayPolicy；
 - trigger；
 - eventId；
-- causedByToolCallId；
-- stateCursor。
+- causedByToolCallId。
 
 消息模型必须继续 Codable 和 Sendable，并为旧有 user/assistant/tool 内容提供单一
 明确的构造入口。新代码不得通过“role 是 user 且 content 是 text”推断真实用户输入。
@@ -1446,7 +1356,7 @@ App 自动事件不应依赖 `.user` role 判断。
 | 固有能力 Manifest | App Bundle | 是 |
 | Manifest 热点索引 | AppAgent 缓存 | 可清理落盘 |
 | 当前 App 状态 | 宿主内存 | 否 |
-| AppAgent StateMirror | AppAgent 内存 | 否 |
+| AppAgent HostStateReporter | AppAgent 内存 | 否 |
 | 用户真实消息 | AppAgent session storage | 是 |
 | Agent 回复和工具往返 | AppAgent session storage | 是 |
 | Host State Snapshot/Delta | 模型逻辑消息历史 | 是，随 session |
@@ -1459,7 +1369,7 @@ App 自动事件不应依赖 `.user` role 判断。
 
 关键原则：
 
-> 模型消息历史保存的是模型理解所需的状态事实；AppAgent 状态镜像保存的是当前完整状态；宿主保存的是页面和动态工作区的可恢复事实；模型缓存不承担持久化职责。
+> 模型消息历史保存的是模型理解所需的状态事实；AppAgent 的 HostStateReporter 保存最新读到的状态；宿主保存的是页面和动态工作区的可恢复事实；模型缓存不承担持久化职责。
 
 ---
 
@@ -1484,7 +1394,7 @@ App 自动事件不应依赖 `.user` role 判断。
 ```text
 用户拖动页面
   → App 发布多次 map.viewportBounds 变化
-  → AppAgent 合并到 StateMirror
+  → AppAgent 合并到 HostStateReporter
   → 不触发模型
 
 用户随后提问
@@ -1500,7 +1410,7 @@ App 自动事件不应依赖 `.user` role 判断。
 用户点击内容卡片
   → App 更新页面 interaction
   → App 发布 hostEvent(selected_poi)
-  → AppAgent 合并 StateMirror
+  → AppAgent 合并 HostStateReporter
   → 追加 hostEvent 消息
   → UI 展示折叠的 App 消息
   → 请求模型
@@ -1512,7 +1422,7 @@ App 自动事件不应依赖 `.user` role 判断。
 模型调用 app_navigate
   → App 执行页面跳转
   → App 更新页面状态
-  → AppAgent 更新 StateMirror
+  → AppAgent 更新 HostStateReporter
   → 工具结果返回模型
   → 下一次模型请求前附带 Host State Delta
   → 默认不再创建新的 App 自动事件
@@ -1580,9 +1490,9 @@ App build 只用于诊断。能力缓存使用语义内容 hash。
 6. 后续每次向模型发送新请求前，发送上次模型已看到状态之后的增量。
 7. 状态变化不自动触发模型；固定语义用户操作才生成 App 自动事件。
 8. App 自动事件进入模型历史，也进入 UI，但 UI 以折叠 App 消息展示。
-9. `epoch/revision` 只用于端内状态一致性，不进入 system prompt。
+9. 宿主状态只以「字段 → 文本」进入消息，比对在 SDK 内完成，不进入 system prompt。
 10. `appBuild` 只用于诊断，不参与能力缓存。
 11. 页面是状态第一归属单位，业务状态隶属于页面。
 12. 页面只保留业务方声明的最小状态和选中引用，不复制完整业务对象详情。
 13. 动态页面的展示意图、实际显隐和内存实例分离管理。
-14. AppAgent 维护状态镜像，宿主 App 维护运行事实，宿主服务只保存任务所需快照。
+14. AppAgent 的 HostStateReporter 负责汇报状态，宿主 App 维护运行事实，宿主服务只保存任务所需快照。

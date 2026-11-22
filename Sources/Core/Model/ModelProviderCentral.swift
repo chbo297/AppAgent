@@ -79,8 +79,8 @@ public actor ModelProviderCentral {
     /// - Returns: A tuple of `(provider, modelId)` if both the provider name and model ID match,
     ///   or `nil` otherwise.
     public func resolve(modelReference: String) -> (provider: any ModelProvider, modelId: String)? {
-        let parts = modelReference.split(separator: "/", maxSplits: 1)
-        guard parts.count == 2 else {
+        let parts = modelReference.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
             Logger.warning("ModelProviderCentral", "resolve: invalid reference format '\(modelReference)', expected 'providerName/modelId'")
             return nil
         }

@@ -48,6 +48,9 @@ public struct AIAgentTurnRecord: Codable, Sendable, Equatable {
     /// 已进入的模型执行循环数（包括重试 / 模型回退），不是工具调用个数。
     /// nil = 旧快照未记录；0 = 尚未进入循环。Optional 保证缺键的旧数据仍可解码。
     public var roundCount: Int?
+    /// 本轮执行中给用户的说明（会话压缩、输出上限续写等），按发生顺序。nil = 没有。
+    /// Optional 保证缺键的旧快照仍可解码。
+    public var notices: [String]?
 
     public init(
         turnID: Int,
@@ -56,7 +59,8 @@ public struct AIAgentTurnRecord: Codable, Sendable, Equatable {
         stage: AIAgentRunStage = .preparing,
         outcome: Outcome? = nil,
         modelRef: String? = nil,
-        roundCount: Int? = nil
+        roundCount: Int? = nil,
+        notices: [String]? = nil
     ) {
         self.turnID = turnID
         self.startedAt = startedAt
@@ -65,6 +69,7 @@ public struct AIAgentTurnRecord: Codable, Sendable, Equatable {
         self.outcome = outcome
         self.modelRef = modelRef
         self.roundCount = roundCount.map { max(0, $0) }
+        self.notices = notices
     }
 
     /// 是否已经有终局。

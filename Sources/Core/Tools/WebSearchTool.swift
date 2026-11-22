@@ -41,7 +41,9 @@ public struct WebSearchTool: ToolProtocol {
             return .error("Missing required parameter: query")
         }
 
-        let limit = Int(arguments["limit"]?.numberValue ?? 5)
+        guard let limit = ToolArgumentValues.integer(arguments, "limit", default: 5, range: 1...20) else {
+            return .error("'limit' must be an integer between 1 and 20.")
+        }
 
         guard let provider else {
             return .error("No web search provider configured. The host app must provide a WebSearchProvider.")

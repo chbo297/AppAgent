@@ -15,7 +15,9 @@ public struct HotfixTool: ToolProtocol {
         - 'apply': install/replace patch 'name' with 'javascript' ('applyMode': instant|restart)
         - 'toggle': enable/disable patch 'name' via 'enabled'
         - 'remove': remove patch 'name'
-        For test builds only. instant patches take effect immediately; restart patches need an app restart.
+        Only use when the host explicitly enables this capability for the current deployment. \
+        This may be an internally distributed Release build as well as a Debug build. \
+        instant patches take effect immediately; restart patches need an app restart.
         """
     public let parameters = Tool.Schema(
         properties: [

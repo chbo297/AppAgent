@@ -58,17 +58,38 @@ public final class AISession: @unchecked Sendable {
     /// The model provider for this session. Resolved at creation time; can be re-pointed at
     /// runtime via `switchModel(...)`（切换只影响随后发起的 run）。
     public var provider: (any ModelProvider)? {
-        modelSelection.provider
+        currentModelSelection().provider
     }
 
     /// The model ID for this session (e.g., "Claude Opus 4.6").
     public var modelId: String? {
-        modelSelection.modelId
+        currentModelSelection().modelId
     }
 
     /// Atomically read the provider/model pair used by one run.
     public func modelSelectionSnapshot() -> ModelSelection {
-        modelSelection
+        currentModelSelection(forRun: true)
+    }
+
+    private func currentModelSelection(forRun: Bool = false) -> ModelSelection {
+        $modelSelection.mutate { selection in
+            // Also covers sessions being created/restored while clear enumerates the manager.
+            let agent = agentMask?.agent
+            if agent?.isEndpointConfigurationCleared == true,
+               selection.provider != nil || selection.modelId != nil {
+                resetModelSelection(&selection)
+            }
+            guard forRun, let provider = selection.provider, let agent else {
+                return selection
+            }
+            // Bind the revocation lease while holding the selection lock. Clear must
+            // reset this selection before a later valid apply can publish a new lease.
+            return ModelSelection(
+                provider: agent.endpointProviderForRun(provider),
+                modelId: selection.modelId,
+                generation: selection.generation
+            )
+        }
     }
 
     @Locked
@@ -106,6 +127,49 @@ public final class AISession: @unchecked Sendable {
     @TrackedLocked
     public private(set) var turnRecords: [Int: AIAgentTurnRecord] = [:]
 
+    /// 本会话里选了「在本会话中允许」的权限 id，**随快照落盘**。
+    /// 「始终允许」不记在这里，见 `AppAgentPermissionStore`。
+    @TrackedLocked
+    public internal(set) var permissionGrants: Set<String> = []
+
+    /// 已经随结果下发过 `usageGuide` 的工具名。只在内存里：重启 App 或上下文压缩后清空，
+    /// 下次调用再附一次，保证模型眼前总有一份手册。
+    @Locked
+    var deliveredToolGuides: Set<String> = []
+
+    /// 原子地登记「这次要下发 name 的手册」；同一批并发调用里只有一个能拿到 true。
+    func claimToolGuide(_ name: String) -> Bool {
+        $deliveredToolGuides.mutate { delivered in
+            delivered.insert(name).inserted
+        }
+    }
+
+    /// 本会话经 `load_tools` 加载过的按需工具组（内存）。
+    @Locked
+    var loadedToolGroupsInMemory: Set<String> = []
+
+    /// 本会话已加载的按需工具组：内存登记，加上历史里出现过的 `load_tools` 调用与组内工具调用。
+    /// 从历史推出来，重启 App 或恢复会话后仍然成立，历史里引用过的工具不会突然消失。
+    func loadedToolGroups(groupOf: (String) -> String?) -> Set<String> {
+        var groups = loadedToolGroupsInMemory
+        for message in messages {
+            for call in message.toolCalls {
+                if call.name == LoadToolsTool.toolName, let group = call.arguments["group"]?.stringValue {
+                    groups.insert(group)
+                } else if let group = groupOf(call.name) {
+                    groups.insert(group)
+                }
+            }
+        }
+        return groups
+    }
+
+    func markToolGroupLoaded(_ group: String) {
+        $loadedToolGroupsInMemory.mutate { groups in
+            groups.insert(group)
+        }
+    }
+
     /// Delegation depth (0 = top-level session, 1 = sub-session, ...).
     public let delegationDepth: Int
 
@@ -130,11 +194,10 @@ public final class AISession: @unchecked Sendable {
     /// The LLM execution engine mounted on this session.
     public private(set) var executor: LLMExecutor!
 
-    /// Session-owned mirror of the host application's structured runtime state.
+    /// 这个会话的宿主状态汇报器：每次请求模型前读宿主状态，只把模型还不知道的部分发出去。
     ///
-    /// The host provider may be shared by multiple sessions, but this mirror and
-    /// its model-seen cursor belong exclusively to this session.
-    public let hostStateMirror: HostStateMirror
+    /// 同一个宿主来源可以装在多个会话上，但「模型已经看到了什么」只属于这个会话。
+    public let hostStateReporter: HostStateReporter
 
     // MARK: - Computed Properties
 
@@ -146,6 +209,7 @@ public final class AISession: @unchecked Sendable {
     /// Whether any persistable property has been modified since last `clearDirty()`.
     public var isDirty: Bool {
         _title.isDirty || _updatedAt.isDirty || _messages.isDirty || _turnRecords.isDirty
+            || _permissionGrants.isDirty
     }
 
     /// Clear dirty flags after successful persistence.
@@ -154,6 +218,7 @@ public final class AISession: @unchecked Sendable {
         _updatedAt.clearDirty()
         _messages.clearDirty()
         _turnRecords.clearDirty()
+        _permissionGrants.clearDirty()
     }
 
     public init(id: String,
@@ -167,7 +232,8 @@ public final class AISession: @unchecked Sendable {
          updatedAt: Date? = nil,
          turnRecords: [AIAgentTurnRecord] = [],
          delegationDepth: Int = 0,
-         metadata: [String: String]? = nil) {
+         metadata: [String: String]? = nil,
+         permissionGrants: Set<String> = []) {
         self.id = id
         self.createdAt = createdAt
         self.metadata = metadata
@@ -190,31 +256,32 @@ public final class AISession: @unchecked Sendable {
         self._turnRecords = TrackedLocked(
             wrappedValue: Dictionary(turnRecords.map { ($0.turnID, $0) }, uniquingKeysWith: { _, last in last })
         )
+        self._permissionGrants = TrackedLocked(wrappedValue: permissionGrants, isEqual: ==)
         self._toolPolicy = Locked(wrappedValue: nil)
         self._decisionResponders = Locked(wrappedValue: .default)
-        self.hostStateMirror = HostStateMirror()
+        self.hostStateReporter = HostStateReporter()
         self.uiState = SessionUIState()
         self.delegationDepth = delegationDepth
         // LLMExecutor is initialized below after all stored properties are set
         self.executor = LLMExecutor(session: self)
+        if agentMask?.agent?.isEndpointConfigurationCleared == true {
+            resetModelSelection()
+        }
     }
 
     // MARK: - Host Context
 
-    /// Install a host state provider and load its first complete snapshot.
-    ///
-    /// Updates are consumed continuously. A revision gap or epoch change causes
-    /// an automatic snapshot refresh before consumption continues.
+    /// 装上宿主状态来源（一般是一个 `HostStateStore`）并读一次。之后每次请求模型前都会再读。
     @discardableResult
     public func installHostStateProvider(
         _ provider: any HostStateProvider
     ) async throws -> Bool {
-        try await hostStateMirror.installProvider(provider)
+        try await hostStateReporter.installProvider(provider)
     }
 
-    /// Stop consuming host updates while retaining the last mirrored snapshot.
+    /// 卸下宿主状态来源；之后的请求不再带宿主状态。
     public func removeHostStateProvider() async {
-        await hostStateMirror.removeProviderGeneration()
+        await hostStateReporter.removeProvider()
     }
 
     // MARK: - Tool Management
@@ -252,28 +319,46 @@ public final class AISession: @unchecked Sendable {
     /// starting a run. If the parallel-run limit is reached, the run is rejected: the
     /// agent's delegate is notified via `didRejectRun` and an immediately-finished empty
     /// stream is returned (no `.error` event, so the rejection does not pollute history).
-    public func sendMessage(_ text: String) -> AsyncStream<AIAgentEvent> {
-        if let agent = agentMask?.agent, !agent.sessionManager.canAdmitRun(for: self) {
+    public func sendMessage(
+        _ text: String,
+        attachments: [AIAgentMessage.Attachment] = []
+    ) -> AsyncStream<AIAgentEvent> {
+        if let agent = agentMask?.agent {
+            if let stream = agent.sessionManager.startRunIfAdmitted(for: self, {
+                lifecycle.start {
+                    executor.run(text, attachments: attachments)
+                }
+            }) {
+                return stream
+            }
             let limit = agent.sessionManager.governor.limit
             Logger.info("AISession", "sendMessage rejected by concurrency limit: sessionId=\(id), limit=\(limit)")
             agent.sessionDidRejectRun(self, error: AIAgentError.concurrencyLimitReached(limit: limit))
             return AsyncStream { $0.finish() }
         }
-        return lifecycle.start { executor.run(text) }
+        return lifecycle.start {
+            executor.run(text, attachments: attachments)
+        }
     }
 
     /// Add a user message to the conversation history. Starts a new turn.
     /// Returns the allocated turn ID so a run never has to read a later run's current ID.
     @discardableResult
-    public func addUserMessage(_ text: String) -> Int {
-        let isFirstUserMessage = !messages.contains { $0.role == .user }
+    public func addUserMessage(
+        _ text: String,
+        attachments: [AIAgentMessage.Attachment] = []
+    ) -> Int {
         // 取号必须是一次临界区：`+= 1` 是读-改-写两次加锁，旧 run 还没排干时两条提问
         // 可能拿到同一个号，展示层就会把两轮并成一轮。
         let turnID = $currentTurnID.mutate { value -> Int in
             value += 1
             return value
         }
-        messages.append(.user(text, turnID: turnID))
+        let isFirstUserMessage = $messages.mutate { history in
+            let first = !history.contains { $0.role == .user }
+            history.append(.user(text, attachments: attachments, turnID: turnID))
+            return first
+        }
         updatedAt = Date()
         // Codex-style auto-naming: derive the session title from the first user
         // message, but only while the title is still a default placeholder so a
@@ -360,6 +445,15 @@ public final class AISession: @unchecked Sendable {
         }
     }
 
+    /// 记一条给用户的过程说明；终局之后的迟到说明不再写入。
+    func appendTurnNotice(turnID: Int, text: String) {
+        $turnRecords.mutate {
+            guard var record = $0[turnID], !record.isFinished else { return }
+            record.notices = (record.notices ?? []) + [text]
+            $0[turnID] = record
+        }
+    }
+
     /// 推进阶段。记录已经有终局了就不再动它（终局是不可逆的）。
     func advanceTurnStage(turnID: Int, stage: AIAgentRunStage, modelRef: String? = nil) {
         $turnRecords.mutate {
@@ -410,6 +504,7 @@ public final class AISession: @unchecked Sendable {
     /// - Returns: 解析并切换成功返回 true；引用无法解析返回 false。
     @discardableResult
     public func switchModel(reference: String) async -> Bool {
+        let generation = modelSelectionSnapshot().generation
         guard let central = agentMask?.agent?.providerCentral,
               let resolved = await central.resolve(modelReference: reference) else {
             Logger.warning("AISession", "switchModel: 无法解析模型引用 \(reference)")
@@ -418,7 +513,8 @@ public final class AISession: @unchecked Sendable {
         return switchModel(
             provider: resolved.provider,
             modelId: resolved.modelId,
-            reference: reference
+            reference: reference,
+            expectedGeneration: generation
         )
     }
 
@@ -430,14 +526,17 @@ public final class AISession: @unchecked Sendable {
         reference: String,
         expectedGeneration: UInt64? = nil
     ) -> Bool {
+        guard agentMask?.agent?.isEndpointConfigurationCleared != true else {
+            return false
+        }
+        let generation = expectedGeneration ?? modelSelection.generation
         guard provider.modelSpec(for: modelId) != nil else {
             Logger.warning("AISession", "switchModel: provider 中不存在模型 \(modelId)")
             return false
         }
 
         let didSwitch = $modelSelection.mutate { selection -> Bool in
-            if let expectedGeneration,
-               selection.generation != expectedGeneration {
+            if selection.generation != generation || agentMask?.agent?.isEndpointConfigurationCleared == true {
                 return false
             }
             selection = ModelSelection(
@@ -445,6 +544,7 @@ public final class AISession: @unchecked Sendable {
                 modelId: modelId,
                 generation: selection.generation &+ 1
             )
+            uiState.set(SessionUIState.activeModelKey, value: reference)
             return true
         }
         guard didSwitch else {
@@ -456,7 +556,6 @@ public final class AISession: @unchecked Sendable {
         }
 
         updatedAt = Date()
-        uiState.set(SessionUIState.activeModelKey, value: reference)
         Logger.info("AISession", "switchModel: sessionId=\(id) → \(reference)")
         AppAgentDebugLog.shared.record(
             .info,
@@ -467,6 +566,25 @@ public final class AISession: @unchecked Sendable {
             modelId: modelId
         )
         return true
+    }
+
+    /// Revoke the provider snapshot and fallback publication generation without touching history.
+    /// AIAgentMask contains no model policy; fallback policy lives on the owning agent.
+    func resetModelSelection() {
+        $modelSelection.mutate { selection in
+            resetModelSelection(&selection)
+        }
+    }
+
+    private func resetModelSelection(_ selection: inout ModelSelection) {
+        selection = ModelSelection(
+            provider: nil,
+            modelId: nil,
+            generation: selection.generation &+ 1
+        )
+        if let _: String = uiState.get(SessionUIState.activeModelKey) {
+            uiState.remove(SessionUIState.activeModelKey)
+        }
     }
 
     /// Cancel the current agent run.
@@ -538,9 +656,13 @@ public final class AISession: @unchecked Sendable {
                               decisionBoundariesAllow(request, chain: chain) else { return fallback }
                         if latest == .deny { return .deny }
                         if case .clarification = request { return latest ?? outcome }
-                        if let latest, latest != .allowOnce && latest != .allowForSession { return .deny }
+                        if let latest, !Self.isApproval(latest) {
+                            return .deny
+                        }
                         // An allowOnce host policy cannot be expanded by a session-wide UI answer.
-                        if latest == .allowOnce, outcome == .allowForSession { return .allowOnce }
+                        if latest == .allowOnce, outcome == .allowForSession || outcome == .allowAlways {
+                            return .allowOnce
+                        }
                         return outcome
                     }
                 }
@@ -588,7 +710,9 @@ public final class AISession: @unchecked Sendable {
             if case .clarification = request {
                 if selected == nil { selected = outcome }
             } else {
-                guard outcome == .allowOnce || outcome == .allowForSession else { return .deny }
+                guard Self.isApproval(outcome) else {
+                    return .deny
+                }
                 if selected == nil || outcome == .allowOnce { selected = outcome }
             }
         }
@@ -608,9 +732,13 @@ public final class AISession: @unchecked Sendable {
     /// 没人能回答时的结果：授权类一律拒绝，澄清类当作没回答。
     private static func fallbackOutcome(for request: DecisionRequest) -> DecisionOutcome {
         switch request {
-        case .privateNetworkAccess, .toolAuthorization, .appAgentInspection: return .deny
+        case .privateNetworkAccess, .toolAuthorization, .appAgentInspection, .permission: return .deny
         case .clarification: return .answer(nil)
         }
+    }
+
+    private static func isApproval(_ outcome: DecisionOutcome) -> Bool {
+        outcome == .allowOnce || outcome == .allowForSession || outcome == .allowAlways
     }
 
     // MARK: - Persistence
@@ -626,7 +754,8 @@ public final class AISession: @unchecked Sendable {
             metadata: metadata,
             turnRecords: turnRecords.values.sorted { $0.turnID < $1.turnID },
             executionPolicy: executionPolicy,
-            ownerAgentID: agentMask?.agent?.id
+            ownerAgentID: agentMask?.agent?.id,
+            permissionGrants: permissionGrants.isEmpty ? nil : permissionGrants.sorted()
         )
     }
 }

@@ -48,7 +48,7 @@ enum OpenAIChatCompletionsMapper {
                     "function": [
                         "name": tool.name,
                         "description": tool.description,
-                        "parameters": buildInputSchema(tool.parameters)
+                        "parameters": ToolSchemaMapper.inputSchema(tool.parameters)
                     ]
                 ])
             }
@@ -59,10 +59,30 @@ enum OpenAIChatCompletionsMapper {
 
     private static func appendUserMessage(_ message: AIAgentMessage, to result: inout [[String: Any]]) {
         var textBuffer = ""
+        // 用户附图时 content 必须是 parts 数组（text + image_url）；没有图就保持字符串形式。
+        var imageParts: [[String: Any]] = []
+
+        func appendText(_ text: String) {
+            if !textBuffer.isEmpty {
+                textBuffer += "\n\n"
+            }
+            textBuffer += text
+        }
 
         func flushText() {
-            guard !textBuffer.isEmpty else { return }
-            result.append(["role": "user", "content": textBuffer])
+            if imageParts.isEmpty {
+                guard !textBuffer.isEmpty else {
+                    return
+                }
+                result.append(["role": "user", "content": textBuffer])
+            } else {
+                var parts = imageParts
+                if !textBuffer.isEmpty {
+                    parts.append(["type": "text", "text": textBuffer])
+                }
+                result.append(["role": "user", "content": parts])
+                imageParts = []
+            }
             textBuffer = ""
         }
 
@@ -99,10 +119,21 @@ enum OpenAIChatCompletionsMapper {
             case .toolUse:
                 break
             case .hostContext(let payload):
-                if !textBuffer.isEmpty {
-                    textBuffer += "\n\n"
+                appendText(payload.modelText)
+            case .attachment(let attachment):
+                guard let image = attachment.image else {
+                    // 后面紧跟的 `.text` 是直接拼接的，先补好段落分隔，免得文件描述和提问粘成一行。
+                    appendText(attachment.modelText + "\n\n")
+                    continue
                 }
-                textBuffer += payload.modelText
+                if !textBuffer.isEmpty {
+                    imageParts.append(["type": "text", "text": textBuffer])
+                    textBuffer = ""
+                }
+                imageParts.append([
+                    "type": "image_url",
+                    "image_url": ["url": "data:\(image.mediaType);base64,\(image.base64)"]
+                ])
             }
         }
 
@@ -142,10 +173,12 @@ enum OpenAIChatCompletionsMapper {
     static func parseSSEEvent(
         _ sseEvent: SSEEvent,
         activeToolCalls: inout [Int: ActiveToolCall]
-    ) -> [ProviderStreamEvent] {
+    ) throws -> [ProviderStreamEvent] {
         let payload = sseEvent.data.trimmingCharacters(in: .whitespacesAndNewlines)
         guard payload != "[DONE]" else {
-            return flushToolCalls(&activeToolCalls)
+            // A proxy marker cannot confirm a complete tool-call response.
+            activeToolCalls.removeAll()
+            return []
         }
 
         guard let data = payload.data(using: .utf8),
@@ -178,7 +211,7 @@ enum OpenAIChatCompletionsMapper {
                     name: "",
                     arguments: ""
                 )
-                // 续传分片里 `id` / `name` 常是**空字符串**而不是缺键（实测 GLM 系的 OneAPI
+                // 续传分片里 `id` / `name` 常是**空字符串**而不是缺键（实测 GLM 系的 OpenAI 兼容网关
                 // 端点就这样：首片给全名，后续每片都带 `"id":"","name":""`）。`if let` 挡不住
                 // 空串，直接覆盖会把首片的名字擦掉，收尾时 `flushToolCalls` 又按「名字为空」
                 // 整条丢掉 —— 于是 `finish_reason=tool_calls` 却解析出 0 个调用，界面上就是
@@ -206,7 +239,7 @@ enum OpenAIChatCompletionsMapper {
             if let finishReason = choice.finishReason {
                 switch finishReason {
                 case "tool_calls", "function_call":
-                    let flushed = flushToolCalls(&activeToolCalls)
+                    let flushed = try flushToolCalls(&activeToolCalls)
                     if flushed.isEmpty {
                         // 端点说这一轮是工具调用、却没给出可用的调用。留一条日志，
                         // 否则上层只看到「空回复」，根因在诊断包里无迹可寻。
@@ -218,10 +251,16 @@ enum OpenAIChatCompletionsMapper {
                     events.append(contentsOf: flushed)
                     events.append(.done(stopReason: .toolUse))
                 case "stop":
+                    activeToolCalls.removeAll()
                     events.append(.done(stopReason: .endTurn))
                 case "length":
+                    // 撞输出上限：写到一半的调用不执行，但要告诉上层，续写时好让模型拆小重发。
+                    let names = activeToolCalls.keys.sorted().compactMap { activeToolCalls[$0]?.name }
+                    activeToolCalls.removeAll()
+                    events.append(contentsOf: names.map { ProviderStreamEvent.discardedToolCall(name: $0) })
                     events.append(.done(stopReason: .maxTokens))
                 default:
+                    activeToolCalls.removeAll()
                     events.append(.done(stopReason: .unknown))
                 }
             }
@@ -236,97 +275,33 @@ enum OpenAIChatCompletionsMapper {
         return value
     }
 
-    private static func flushToolCalls(_ activeToolCalls: inout [Int: ActiveToolCall]) -> [ProviderStreamEvent] {
-        let calls = activeToolCalls
+    private static func flushToolCalls(_ activeToolCalls: inout [Int: ActiveToolCall]) throws -> [ProviderStreamEvent] {
+        defer { activeToolCalls.removeAll() }
+        return try activeToolCalls
             .sorted { $0.key < $1.key }
-            .compactMap { _, toolCall -> ProviderStreamEvent? in
-                guard !toolCall.name.isEmpty else { return nil }
+            .map { _, toolCall -> ProviderStreamEvent in
+                guard !toolCall.name.isEmpty else {
+                    throw ModelError.malformedToolCall("Chat Completions 工具调用缺少名称")
+                }
                 return .toolCall(AIAgentMessage.ToolCall(
                     id: toolCall.id,
                     name: toolCall.name,
-                    arguments: decodeArguments(toolCall.arguments)
+                    arguments: try decodeArguments(toolCall.arguments)
                 ))
             }
-        activeToolCalls.removeAll()
-        return calls
     }
 
-    private static func decodeArguments(_ raw: String) -> [String: JSONValue] {
+    /// 无参工具（如 `screenshot`）经网关转成 Chat Completions 时 `arguments` 是 `""`，按空对象处理。
+    private static func decodeArguments(_ raw: String) throws -> [String: JSONValue] {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let data = trimmed.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) else {
+        if trimmed.isEmpty {
             return [:]
         }
+        guard let data = trimmed.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) else {
+            throw ModelError.malformedToolCall("Chat Completions 工具参数不是完整的 JSON 对象")
+        }
         return decoded
-    }
-
-    // MARK: - Schema Helpers
-
-    private static func buildInputSchema(_ schema: Tool.Schema) -> [String: Any] {
-        var properties: [String: Any] = [:]
-        for (key, prop) in schema.properties {
-            properties[key] = buildJSONSchema(prop)
-        }
-
-        return [
-            "type": "object",
-            "properties": properties,
-            "required": schema.required
-        ]
-    }
-
-    private static func buildJSONSchema(_ schema: JSONSchema) -> [String: Any] {
-        switch schema {
-        case .string(let desc, let enumValues, let defaultValue):
-            var dict: [String: Any] = ["type": "string"]
-            if let desc { dict["description"] = desc }
-            if let enumValues { dict["enum"] = enumValues }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .number(let desc, let minimum, let maximum, let defaultValue):
-            var dict: [String: Any] = ["type": "number"]
-            if let desc { dict["description"] = desc }
-            if let minimum { dict["minimum"] = minimum }
-            if let maximum { dict["maximum"] = maximum }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .integer(let desc, let minimum, let maximum, let defaultValue):
-            var dict: [String: Any] = ["type": "integer"]
-            if let desc { dict["description"] = desc }
-            if let minimum { dict["minimum"] = minimum }
-            if let maximum { dict["maximum"] = maximum }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .boolean(let desc, let defaultValue):
-            var dict: [String: Any] = ["type": "boolean"]
-            if let desc { dict["description"] = desc }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .array(let desc, let items, let maxItems):
-            var dict: [String: Any] = ["type": "array"]
-            if let desc { dict["description"] = desc }
-            if let items { dict["items"] = buildJSONSchema(items) }
-            if let maxItems { dict["maxItems"] = maxItems }
-            return dict
-
-        case .object(let desc, let properties, let required):
-            var dict: [String: Any] = ["type": "object"]
-            if let desc { dict["description"] = desc }
-            if let properties {
-                var nested: [String: Any] = [:]
-                for (key, prop) in properties {
-                    nested[key] = buildJSONSchema(prop)
-                }
-                dict["properties"] = nested
-            }
-            if let required { dict["required"] = required }
-            return dict
-        }
     }
 
     private static func argumentsJSONString(_ arguments: [String: JSONValue]) -> String {
@@ -337,19 +312,7 @@ enum OpenAIChatCompletionsMapper {
         return string
     }
 
-    private static func jsonValueToAny(_ value: JSONValue) -> Any {
-        switch value {
-        case .string(let s): return s
-        case .number(let n): return n
-        case .bool(let b): return b
-        case .null: return NSNull()
-        case .array(let arr): return arr.map { jsonValueToAny($0) }
-        case .object(let obj):
-            var dict: [String: Any] = [:]
-            for (k, v) in obj { dict[k] = jsonValueToAny(v) }
-            return dict
-        }
-    }
+
 }
 
 private struct OpenAIStreamChunk: Decodable {
@@ -379,7 +342,7 @@ private struct OpenAIDelta: Decodable {
     let toolCalls: [OpenAIToolCallDelta]?
     /// 老式单函数调用。新端点都用 `tool_calls`，但兼容层里仍有发这个的。
     let functionCall: OpenAIFunctionDelta?
-    /// 推理模型的思考增量：DeepSeek / OneAPI 系用 `reasoning_content`，部分网关用 `reasoning`。
+    /// 推理模型的思考增量：DeepSeek 及部分 OpenAI 兼容网关用 `reasoning_content`，部分网关用 `reasoning`。
     let reasoningContent: String?
     let reasoning: String?
 

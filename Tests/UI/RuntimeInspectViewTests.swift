@@ -72,7 +72,7 @@ final class RuntimeInspectViewTests: XCTestCase {
         XCTAssertFalse(controller.isViewLoaded)
 
         // A real Objective-C ivar with a colliding ordinary method must be read as storage.
-        let cls = try XCTUnwrap(objc_allocateClassPair(NSObject.self, "PropertyIvarProbe_\(UUID().uuidString)", 0))
+        let cls: AnyClass = try XCTUnwrap(objc_allocateClassPair(NSObject.self, "PropertyIvarProbe_\(UUID().uuidString)", 0))
         XCTAssertTrue(class_addIvar(cls, "_value", MemoryLayout<Int64>.size, 3, "q"))
         let method: @convention(block) (NSObject) -> Int64 = { _ in
             999
@@ -230,7 +230,8 @@ final class RuntimeInspectViewTests: XCTestCase {
         let tool = RuntimeInspectTool(provider: RecordingRuntimeProvider())
         let session = AISession(id: "s", title: "t")
 
-        let missingPath = try await tool.execute(arguments: ["op": .string("view_info")], session: session)
+        let missingPath = try await RuntimeInspectTool.ui(provider: RecordingRuntimeProvider())
+            .execute(arguments: ["op": .string("view_info")], session: session)
         guard case .error = missingPath else { return XCTFail("expected error for missing path") }
 
         let missingKey = try await tool.execute(

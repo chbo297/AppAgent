@@ -48,7 +48,7 @@ enum OpenAIResponsesMapper {
                     "type": "function",
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": buildInputSchema(tool.parameters)
+                    "parameters": ToolSchemaMapper.inputSchema(tool.parameters)
                 ])
             }
         }
@@ -102,6 +102,18 @@ enum OpenAIResponsesMapper {
                     "type": "input_text",
                     "text": payload.modelText
                 ])
+            case .attachment(let attachment):
+                if let image = attachment.image {
+                    content.append([
+                        "type": "input_image",
+                        "image_url": "data:\(image.mediaType);base64,\(image.base64)"
+                    ])
+                } else {
+                    content.append([
+                        "type": "input_text",
+                        "text": attachment.modelText
+                    ])
+                }
             }
         }
 
@@ -197,14 +209,16 @@ enum OpenAIResponsesMapper {
             }
             if event.type == "response.incomplete" {
                 let reason = event.response?.incompleteDetails?.reason
-                let hadToolCalls = !activeToolCalls.isEmpty
+                let names = activeToolCalls.keys.sorted().compactMap { activeToolCalls[$0]?.name }
                 activeToolCalls.removeAll()
-                guard reason == "max_output_tokens", !hadToolCalls else {
+                // 撞到输出上限：工具调用可能只写了一半，一律不执行，交给上层续写（模型会重发）。
+                guard reason == "max_output_tokens" else {
                     throw ModelError.upstreamError(
                         type: "response.incomplete", code: reason,
                         message: "模型响应未完成，未执行本次工具调用。"
                     )
                 }
+                events.append(contentsOf: names.map { ProviderStreamEvent.discardedToolCall(name: $0) })
                 events.append(.done(stopReason: .maxTokens))
             } else {
                 let hadToolCalls = !activeToolCalls.isEmpty
@@ -230,7 +244,7 @@ enum OpenAIResponsesMapper {
             .sorted { $0.key < $1.key }
             .map { _, toolCall -> ProviderStreamEvent in
                 guard !toolCall.name.isEmpty else {
-                    throw ModelError.decodingError("Responses 工具调用缺少名称")
+                    throw ModelError.malformedToolCall("Responses 工具调用缺少名称")
                 }
                 return .toolCall(AIAgentMessage.ToolCall(
                     id: toolCall.id,
@@ -240,82 +254,17 @@ enum OpenAIResponsesMapper {
             }
     }
 
+    /// 无参工具的 `arguments` 可能是 `""`，按空对象处理。
     private static func decodeArguments(_ raw: String) throws -> [String: JSONValue] {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let data = trimmed.data(using: .utf8),
+        if trimmed.isEmpty {
+            return [:]
+        }
+        guard let data = trimmed.data(using: .utf8),
               let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) else {
-            throw ModelError.decodingError("Responses 工具参数不是完整的 JSON 对象")
+            throw ModelError.malformedToolCall("Responses 工具参数不是完整的 JSON 对象")
         }
         return decoded
-    }
-
-    // MARK: - Schema Helpers
-
-    private static func buildInputSchema(_ schema: Tool.Schema) -> [String: Any] {
-        var properties: [String: Any] = [:]
-        for (key, prop) in schema.properties {
-            properties[key] = buildJSONSchema(prop)
-        }
-
-        return [
-            "type": "object",
-            "properties": properties,
-            "required": schema.required
-        ]
-    }
-
-    private static func buildJSONSchema(_ schema: JSONSchema) -> [String: Any] {
-        switch schema {
-        case .string(let desc, let enumValues, let defaultValue):
-            var dict: [String: Any] = ["type": "string"]
-            if let desc { dict["description"] = desc }
-            if let enumValues { dict["enum"] = enumValues }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .number(let desc, let minimum, let maximum, let defaultValue):
-            var dict: [String: Any] = ["type": "number"]
-            if let desc { dict["description"] = desc }
-            if let minimum { dict["minimum"] = minimum }
-            if let maximum { dict["maximum"] = maximum }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .integer(let desc, let minimum, let maximum, let defaultValue):
-            var dict: [String: Any] = ["type": "integer"]
-            if let desc { dict["description"] = desc }
-            if let minimum { dict["minimum"] = minimum }
-            if let maximum { dict["maximum"] = maximum }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .boolean(let desc, let defaultValue):
-            var dict: [String: Any] = ["type": "boolean"]
-            if let desc { dict["description"] = desc }
-            if let defaultValue { dict["default"] = jsonValueToAny(defaultValue) }
-            return dict
-
-        case .array(let desc, let items, let maxItems):
-            var dict: [String: Any] = ["type": "array"]
-            if let desc { dict["description"] = desc }
-            if let items { dict["items"] = buildJSONSchema(items) }
-            if let maxItems { dict["maxItems"] = maxItems }
-            return dict
-
-        case .object(let desc, let properties, let required):
-            var dict: [String: Any] = ["type": "object"]
-            if let desc { dict["description"] = desc }
-            if let properties {
-                var nested: [String: Any] = [:]
-                for (key, prop) in properties {
-                    nested[key] = buildJSONSchema(prop)
-                }
-                dict["properties"] = nested
-            }
-            if let required { dict["required"] = required }
-            return dict
-        }
     }
 
     private static func argumentsJSONString(_ arguments: [String: JSONValue]) -> String {
@@ -326,19 +275,7 @@ enum OpenAIResponsesMapper {
         return string
     }
 
-    private static func jsonValueToAny(_ value: JSONValue) -> Any {
-        switch value {
-        case .string(let s): return s
-        case .number(let n): return n
-        case .bool(let b): return b
-        case .null: return NSNull()
-        case .array(let arr): return arr.map { jsonValueToAny($0) }
-        case .object(let obj):
-            var dict: [String: Any] = [:]
-            for (k, v) in obj { dict[k] = jsonValueToAny(v) }
-            return dict
-        }
-    }
+
 }
 
 // MARK: - Streaming event decoding

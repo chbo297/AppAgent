@@ -126,8 +126,8 @@ The UIKit layer is intentionally small:
 
 - `AppAgentOverlay`: the host-facing entry point (passthrough window + chat controller)
 - `AppAgentViewController`: chat panel plus input bar, only valid as `AppAgentWindow`'s root
-- `AppAgentInputBar`: text field, send button, collapsed menu behavior
-- `AppAgentTextField`: custom text field used by the input bar
+- `AppAgentInputBar`: multi-line input, send button, collapsed menu behavior
+- `AppAgentTextView`: multi-line text input used by the input bar (grows up to 3 lines, then scrolls)
 - `AppAgentMenuButton`: compact menu button
 - `ChatMessage`: UI-facing message model
 - `ChatMessageCell`: table cell for user, assistant, streaming, error, and tool-info display

@@ -17,8 +17,8 @@ public enum AIAgentMessageType: String, Sendable, Codable {
     case assistant
     case toolCall = "tool_call"
     case toolResult = "tool_result"
-    case hostStateSnapshot = "host_state_snapshot"
-    case hostStateDelta = "host_state_delta"
+    case hostState = "host_state"
+    case hostStateChange = "host_state_change"
     case hostEvent = "host_event"
 }
 
@@ -49,7 +49,6 @@ public struct AIAgentMessage: Sendable, Codable {
     public let displayPolicy: AIAgentMessageDisplayPolicy
     public let trigger: String?
     public let eventId: String?
-    public let stateCursor: StateCursor?
     public let causedByToolCallId: String?
 
     /// 这条消息属于哪一轮「用户提问 → agent 答复」。
@@ -72,7 +71,6 @@ public struct AIAgentMessage: Sendable, Codable {
         displayPolicy: AIAgentMessageDisplayPolicy? = nil,
         trigger: String? = nil,
         eventId: String? = nil,
-        stateCursor: StateCursor? = nil,
         causedByToolCallId: String? = nil
     ) {
         self.id = id
@@ -89,7 +87,6 @@ public struct AIAgentMessage: Sendable, Codable {
         self.displayPolicy = displayPolicy ?? Self.inferDisplayPolicy(for: inferredType)
         self.trigger = trigger
         self.eventId = eventId
-        self.stateCursor = stateCursor ?? Self.inferCursor(from: content)
         self.causedByToolCallId = causedByToolCallId
     }
 
@@ -104,7 +101,6 @@ public struct AIAgentMessage: Sendable, Codable {
         case displayPolicy
         case trigger
         case eventId
-        case stateCursor
         case causedByToolCallId
     }
 
@@ -118,10 +114,11 @@ public struct AIAgentMessage: Sendable, Codable {
             content: content,
             createdAt: try container.decode(Date.self, forKey: .createdAt),
             turnID: try container.decodeIfPresent(Int.self, forKey: .turnID),
-            messageType: try container.decodeIfPresent(
+            // 认不出的类型（旧版本落盘的宿主上下文）按内容重新推断，别让整条会话解不开。
+            messageType: (try? container.decodeIfPresent(
                 AIAgentMessageType.self,
                 forKey: .messageType
-            ),
+            )) ?? nil,
             source: try container.decodeIfPresent(
                 AIAgentMessageSource.self,
                 forKey: .source
@@ -132,10 +129,6 @@ public struct AIAgentMessage: Sendable, Codable {
             ),
             trigger: try container.decodeIfPresent(String.self, forKey: .trigger),
             eventId: try container.decodeIfPresent(String.self, forKey: .eventId),
-            stateCursor: try container.decodeIfPresent(
-                StateCursor.self,
-                forKey: .stateCursor
-            ),
             causedByToolCallId: try container.decodeIfPresent(
                 String.self,
                 forKey: .causedByToolCallId
@@ -155,20 +148,27 @@ public struct AIAgentMessage: Sendable, Codable {
         try container.encode(displayPolicy, forKey: .displayPolicy)
         try container.encodeIfPresent(trigger, forKey: .trigger)
         try container.encodeIfPresent(eventId, forKey: .eventId)
-        try container.encodeIfPresent(stateCursor, forKey: .stateCursor)
         try container.encodeIfPresent(causedByToolCallId, forKey: .causedByToolCallId)
     }
 
     // MARK: - Convenience initializers
 
-    /// Create a simple text message.
+    /// Create a user message. Attachments go first: providers read images / files
+    /// before the question that refers to them. An attachment-only message has no text part.
     public static func user(
         _ text: String,
+        attachments: [Attachment] = [],
         turnID: Int? = nil
     ) -> AIAgentMessage {
-        AIAgentMessage(
+        var content: [Content] = attachments.map { attachment in
+            Content.attachment(attachment)
+        }
+        if !text.isEmpty || content.isEmpty {
+            content.append(.text(text))
+        }
+        return AIAgentMessage(
             role: .user,
-            content: [.text(text)],
+            content: content,
             turnID: turnID,
             messageType: .user,
             source: .user,
@@ -188,6 +188,41 @@ public struct AIAgentMessage: Sendable, Codable {
             source: .agent,
             displayPolicy: .normal
         )
+    }
+
+    /// agent 自己插给模型的一句指令（如「输出到上限了，接着写」）。
+    ///
+    /// wire 上必须是 user 角色，但它不是用户说的话：不开新轮、不进展示层、不挂消息上下文。
+    static func agentNote(_ text: String, turnID: Int?) -> AIAgentMessage {
+        AIAgentMessage(
+            role: .user,
+            content: [.text(text)],
+            turnID: turnID,
+            messageType: .user,
+            source: .agent,
+            displayPolicy: .hidden
+        )
+    }
+
+    /// 见 `agentNote(_:turnID:)`。
+    public var isAgentNote: Bool {
+        role == .user && source == .agent
+    }
+
+    /// 把撞输出上限后的续写接到前一段后面。
+    ///
+    /// 实测（DeepSeek-V4-Flash，2026-11）模型续写时常把断点前的几个字再写一遍
+    /// （「只有 ‖ 只有知了…」）。前一段结尾与后一段开头重叠 2～40 个字符时只保留一份。
+    public static func joiningContinuation(_ previous: String, _ next: String) -> String {
+        let limit = min(40, previous.count, next.count)
+        guard limit >= 2 else {
+            return previous + next
+        }
+        for length in stride(from: limit, through: 2, by: -1)
+        where previous.hasSuffix(String(next.prefix(length))) {
+            return previous + next.dropFirst(length)
+        }
+        return previous + next
     }
 
     public static func hostContext(
@@ -213,30 +248,26 @@ public struct AIAgentMessage: Sendable, Codable {
         let source: AIAgentMessageSource
         let trigger: String?
         let eventId: String?
-        let cursor: StateCursor?
         let resolvedPolicy: AIAgentMessageDisplayPolicy
 
         switch payload {
-        case .snapshot(let snapshot):
-            type = .hostStateSnapshot
+        case .state:
+            type = .hostState
             source = .host
             trigger = nil
             eventId = nil
-            cursor = snapshot.cursor
             resolvedPolicy = displayPolicy ?? .hidden
-        case .delta(let delta):
-            type = .hostStateDelta
+        case .change:
+            type = .hostStateChange
             source = .host
             trigger = nil
             eventId = nil
-            cursor = delta.cursor
             resolvedPolicy = displayPolicy ?? .hidden
         case .event(let event):
             type = .hostEvent
             source = .app
             trigger = event.trigger
             eventId = event.eventId
-            cursor = event.cursor
             resolvedPolicy = displayPolicy ?? event.displayPolicy
         }
 
@@ -251,8 +282,7 @@ public struct AIAgentMessage: Sendable, Codable {
             source: source,
             displayPolicy: resolvedPolicy,
             trigger: trigger,
-            eventId: eventId,
-            stateCursor: cursor
+            eventId: eventId
         )
     }
 
@@ -295,8 +325,8 @@ public struct AIAgentMessage: Sendable, Codable {
     }
 
     public var isHostContext: Bool {
-        messageType == .hostStateSnapshot
-            || messageType == .hostStateDelta
+        messageType == .hostState
+            || messageType == .hostStateChange
             || messageType == .hostEvent
     }
 
@@ -311,10 +341,10 @@ public struct AIAgentMessage: Sendable, Codable {
             return nil
         }).first {
             switch payload {
-            case .snapshot:
-                return .hostStateSnapshot
-            case .delta:
-                return .hostStateDelta
+            case .state:
+                return .hostState
+            case .change:
+                return .hostStateChange
             case .event:
                 return .hostEvent
             }
@@ -349,7 +379,7 @@ public struct AIAgentMessage: Sendable, Codable {
             return .agent
         case .toolResult:
             return .tool
-        case .hostStateSnapshot, .hostStateDelta:
+        case .hostState, .hostStateChange:
             return .host
         case .hostEvent:
             return .app
@@ -364,28 +394,9 @@ public struct AIAgentMessage: Sendable, Codable {
             return .normal
         case .hostEvent:
             return .collapsed
-        case .toolCall, .toolResult, .hostStateSnapshot, .hostStateDelta:
+        case .toolCall, .toolResult, .hostState, .hostStateChange:
             return .hidden
         }
-    }
-
-    private static func inferCursor(
-        from content: [Content]
-    ) -> StateCursor? {
-        for part in content {
-            guard case .hostContext(let payload) = part else {
-                continue
-            }
-            switch payload {
-            case .snapshot(let snapshot):
-                return snapshot.cursor
-            case .delta(let delta):
-                return delta.cursor
-            case .event(let event):
-                return event.cursor
-            }
-        }
-        return nil
     }
 }
 
@@ -403,6 +414,8 @@ extension AIAgentMessage {
         case toolResult(ToolCallResult)
         /// Structured host state or event content.
         case hostContext(HostContextPayload)
+        /// An image or file the user attached to their message.
+        case attachment(Attachment)
 
         // MARK: - Codable
 
@@ -411,6 +424,7 @@ extension AIAgentMessage {
             case toolUse
             case toolResult
             case hostContext
+            case attachment
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -419,6 +433,7 @@ extension AIAgentMessage {
             case toolCall
             case toolResult
             case hostContext
+            case attachment
         }
 
         public init(from decoder: Decoder) throws {
@@ -440,6 +455,9 @@ extension AIAgentMessage {
                     forKey: .hostContext
                 )
                 self = .hostContext(payload)
+            case .attachment:
+                let attachment = try container.decode(Attachment.self, forKey: .attachment)
+                self = .attachment(attachment)
             }
         }
 
@@ -458,6 +476,9 @@ extension AIAgentMessage {
             case .hostContext(let payload):
                 try container.encode(ContentType.hostContext, forKey: .type)
                 try container.encode(payload, forKey: .hostContext)
+            case .attachment(let attachment):
+                try container.encode(ContentType.attachment, forKey: .type)
+                try container.encode(attachment, forKey: .attachment)
             }
         }
     }

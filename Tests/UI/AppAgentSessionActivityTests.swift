@@ -16,6 +16,29 @@ final class AppAgentSessionActivityTests: XCTestCase {
             - AppAgentChatMessageListView.latestReplyUserTailHeight
     )
 
+    func testReusedTurnAfterClearDoesNotInheritCollapseChoice() async throws {
+        let demo = await AppAgentFailureDemo.make()
+        let session = demo.session
+        let turnID = session.addUserMessage("旧问题")
+        session.openTurnRecord(turnID: turnID, modelRef: nil)
+        let controller = AppAgentViewController()
+        controller.agent = demo.agent
+        controller.switchSession(to: session.id)
+        session.uiState.onChange = nil
+        var message = try XCTUnwrap(controller.chatMessages.last)
+        message.isActivityExpanded = false
+        controller.handleActivityToggled(message)
+        XCTAssertTrue(controller.collapsedActivityTurnIDs.contains(turnID))
+
+        session.clearHistory()
+        let reusedTurnID = session.addUserMessage("新问题")
+        XCTAssertEqual(reusedTurnID, turnID)
+        session.openTurnRecord(turnID: reusedTurnID, modelRef: nil)
+        controller.reloadFromSession(reason: .runningUpdate)
+        XCTAssertFalse(controller.collapsedActivityTurnIDs.contains(reusedTurnID))
+        XCTAssertTrue(try XCTUnwrap(controller.chatMessages.last).isActivityExpanded)
+    }
+
     func testTerminalReloadRetainsAllocatedHeightAndSessionSwitchResetsIt() async throws {
         let central = AIAgentCentral()
         let agent = await central.create(

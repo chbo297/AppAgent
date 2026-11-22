@@ -33,7 +33,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
                 for window in windows {
                     for root in HostInspectionUIKit.inspectionRoots(in: window, context: context) {
                         guard let path = Self.addressablePath(of: root, context: context) else { continue }
-                        out += "[\(path)] \(type(of: root)) frame=\(root.frame)\n"
+                        out += "[\(path)] \(HostUINaming.view(root, context: context)) frame=\(root.frame)\n"
                         Self.describeAddressable(view: root, path: path, depth: 0, maxDepth: 100,
                                                  context: context, into: &out)
                     }
@@ -282,6 +282,8 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         var topController: String
         var containers: [String]
         var title: String?
+        /// 给模型看的页面称呼，随 presentation 变（app_ui 是页面名，app_runtime_inspect 是类名 + 说明）。
+        var displayName: String? = nil
     }
 
     /// 沿「当前可见」的容器链收集 VC：present > tab 选中项 > nav 栈顶 > 最后一个 child。
@@ -324,7 +326,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         return PageFingerprint(
             topController: top.map { "\(type(of: $0))" } ?? "(none)",
             containers: containers,
-            title: top?.title ?? top?.tabBarItem?.title
+            title: top?.title ?? top?.tabBarItem?.title,
+            displayName: top.map { controller in
+                HostUINaming.page(controller, context: context)
+            }
         )
     }
 
@@ -338,7 +343,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
     }
 
     static func describePage(_ fingerprint: PageFingerprint) -> String {
-        var parts = [fingerprint.topController]
+        var parts = [fingerprint.displayName ?? fingerprint.topController]
         if !fingerprint.containers.isEmpty { parts.append(fingerprint.containers.joined(separator: " / ")) }
         if let title = fingerprint.title, !title.isEmpty { parts.append("\"\(clip(title))\"") }
         return parts.joined(separator: " ")
@@ -366,14 +371,14 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
                 return rejection
             }
             found.control.sendActions(for: controlEvent)
-            return "OK. 已激活 \(location(path: path, hops: found.hops, object: found.control)) "
+            return "OK. 已激活 \(location(path: path, hops: found.hops, object: found.control, context: context)) "
                 + "via sendActions(\(eventName(controlEvent)))"
                 + pageChangeNote(from: before, context: context)
         }
         // 2) 无障碍激活：自定义控件只要实现了 accessibilityActivate，就会走它本该走的分支。
         //    指定了具体 control 事件时不降级到这里——语义不一样，不能悄悄换。
         if event == nil, let activated = accessibilityActivated(from: hit, context: context) {
-            return "OK. 已激活 \(location(path: path, hops: activated.hops, object: activated.view)) "
+            return "OK. 已激活 \(location(path: path, hops: activated.hops, object: activated.view, context: context)) "
                 + "via accessibilityActivate()"
                 + pageChangeNote(from: before, context: context)
         }
@@ -438,8 +443,11 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
     }
 
     @MainActor
-    private static func location(path: String, hops: Int, object: NSObject) -> String {
-        hops == 0 ? "[\(path)] \(type(of: object))" : "[\(path)] 往上第 \(hops) 层的 \(type(of: object))"
+    private static func location(path: String, hops: Int, object: NSObject, context: HostInspectionContext) -> String {
+        let name = (object as? UIView).map { view in
+            HostUINaming.view(view, context: context)
+        } ?? "\(type(of: object))"
+        return hops == 0 ? "[\(path)] \(name)" : "[\(path)] 往上第 \(hops) 层的 \(name)"
     }
 
     static func controlEvent(named name: String?) -> UIControl.Event? {
@@ -586,7 +594,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         let previous = scrollView.contentOffset
         guard offset != previous else { return "OK. 已经到 \(direction) 方向的尽头，未做改动" }
         scrollView.setContentOffset(offset, animated: true)
-        return "OK. \(type(of: scrollView)) 往 \(direction) 滚 \(screens) 屏："
+        return "OK. \(HostUINaming.view(scrollView, context: context)) 往 \(direction) 滚 \(screens) 屏："
             + "contentOffset (\(Int(previous.x)), \(Int(previous.y))) → (\(Int(offset.x)), \(Int(offset.y)))"
     }
 
@@ -733,25 +741,61 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         guard let className, !className.isEmpty else { return topViewController(context: context) }
         guard let cls = resolveClass(className, context: context) else { return nil }
         if let top = topViewController(context: context), top.isKind(of: cls) { return top }
+        // 宿主自建的页面栈（child 容器）不在 presented/nav/tab 链上：按控制器树找最上层的实例。
+        // 真机上详情页 BMDetailPoiMapPage 就在栈顶，却因此报「no target object for KVC」。
+        if let controller = topmostController(of: cls, context: context) {
+            return controller
+        }
         return context.scope == .all ? cls as AnyObject : nil
+    }
+
+    /// 深度优先遍历在范围内的控制器树，后访问的视为更靠上，返回最后一个命中的实例。
+    @MainActor
+    private static func topmostController(of cls: AnyClass, context: HostInspectionContext) -> UIViewController? {
+        var match: UIViewController?
+        var visited = 0
+        func visit(_ controller: UIViewController) {
+            guard visited < 2000, HostInspectionUIKit.includes(controller, context: context) else {
+                return
+            }
+            visited += 1
+            if controller.isKind(of: cls) {
+                match = controller
+            }
+            for child in controller.children {
+                visit(child)
+            }
+            if let presented = controller.presentedViewController, presented.presentingViewController === controller {
+                visit(presented)
+            }
+        }
+        for window in allWindows(context: context) {
+            if let root = window.rootViewController {
+                visit(root)
+            }
+        }
+        return match
     }
 
     // MARK: - Scoped property access
 
     /// Walk one declared member at a time, checking ownership before every read.
     /// KVC also dispatches ordinary methods, so it cannot implement a safe observation.
+    /// 读取不设对象链限制（集合、非 UI 中间对象、任意 key 都可读）；只有写入仍限定为 UI 对象链。
+    /// 范围归属（host 不读 SDK 自身对象）对读写都生效。
     @MainActor
     private static func propertyTarget(
-        _ target: NSObject, keyPath: String, context: HostInspectionContext
+        _ target: NSObject, keyPath: String, context: HostInspectionContext, isMutation: Bool
     ) throws -> (NSObject, String) {
         let keys = keyPath.components(separatedBy: ".")
         guard !keys.isEmpty, keys.allSatisfy({ !$0.isEmpty && !$0.contains("@") }) else {
             throw UIKitInspectionError.unsafeObjectChain
         }
+        let restricted = isMutation && context.scope != .all
         var current = target
         for (index, key) in keys.enumerated() {
-            try validatePropertyTarget(current, context: context)
-            if context.scope != .all {
+            try validatePropertyTarget(current, context: context, restricted: restricted)
+            if restricted {
                 // These synthesize object graphs/descriptions instead of exposing a property.
                 guard !key.hasPrefix("_"),
                       !["description", "debugDescription", "recursiveDescription", "class", "superclass",
@@ -763,8 +807,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
             }
             if index == keys.count - 1 { return (current, key) }
             let next = try declaredPropertyValue(from: current, key: key)
-            guard let object = next as? NSObject else { throw UIKitInspectionError.unsafeObjectChain }
-            try validatePropertyTarget(object, context: context)
+            guard let object = next as? NSObject else {
+                throw restricted ? UIKitInspectionError.unsafeObjectChain : UIKitInspectionError.undeclaredKey
+            }
+            try validatePropertyTarget(object, context: context, restricted: restricted)
             current = object
         }
         throw UIKitInspectionError.unsafeObjectChain
@@ -772,6 +818,16 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
 
     @MainActor
     private static func declaredPropertyValue(from object: NSObject, key: String) throws -> Any? {
+        // 集合按下标/键取值：服务端下发的 NSDictionary（如详情页原始响应）要能逐层读下去。
+        if let dictionary = object as? NSDictionary {
+            return dictionary.object(forKey: key)
+        }
+        if let array = object as? NSArray, let index = Int(key) {
+            guard index >= 0, index < array.count else {
+                throw UIKitInspectionError.undeclaredKey
+            }
+            return array.object(at: index)
+        }
         // Some UIKit observations are methods rather than runtime properties.
         // Keep this positive, receiver-specific list small; a getter-shaped name is not evidence.
         let allowedGetter: String?
@@ -797,16 +853,18 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
             }
         } catch {
             // Neither exception reasons nor arbitrary method return values may escape as observations.
-            throw UIKitInspectionError.unsafeObjectChain
+            throw UIKitInspectionError.undeclaredKey
         }
     }
 
     @MainActor
-    private static func validatePropertyTarget(_ object: NSObject, context: HostInspectionContext) throws {
+    private static func validatePropertyTarget(
+        _ object: NSObject, context: HostInspectionContext, restricted: Bool
+    ) throws {
         guard HostInspectionUIKit.includes(object, context: context) else { throw UIKitInspectionError.outsideScope }
-        if context.scope != .all {
-            // Class objects, collections and arbitrary non-UI intermediates could expose global
-            // singletons or describe nested SDK objects. Use a scoped view path instead.
+        if restricted {
+            // Mutations stay on UI object chains: class objects, collections and arbitrary
+            // non-UI intermediates could reach global singletons. Use a scoped view path instead.
             guard object is UIView || object is UIViewController,
                   let cls = object_getClass(object), !class_isMetaClass(cls) else {
                 throw UIKitInspectionError.unsafeObjectChain
@@ -814,7 +872,11 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         }
     }
 
-    /// Never ask an arbitrary object/collection for its description in a limited scope.
+    /// 单次读取的描述上限，避免整包下发数据把一轮上下文撑爆。
+    static let maxDescriptionLength = 20_000
+
+    /// 读取不设类型限制：任意对象/集合都按 description 输出（超长截断）。
+    /// 只保留范围归属：host 范围内值本身或集合里嵌套的 SDK 对象仍按 outsideScope 拒绝。
     /// A UI object is represented only by its class, after checking inherited ownership.
     @MainActor
     static func inspectedDescription(of value: Any?, context: HostInspectionContext = .init()) throws -> String {
@@ -824,7 +886,9 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
                 context.scope == .appagent && isScalarValue(object) && !HostInspectionUIKit.isAppAgentOwned(object)
             ) else { throw UIKitInspectionError.outsideScope }
         }
-        if context.scope == .all { return String(describing: value) }
+        if context.scope == .all {
+            return truncatedDescription(String(describing: value))
+        }
         if let object = value as? NSObject, HostInspectionUIKit.isAppAgentOwned(object),
            context.scope == .host { throw UIKitInspectionError.outsideScope }
         if let string = value as? String { return string }
@@ -833,7 +897,53 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         if let boxed = value as? NSValue, isScalarValue(boxed) { return boxed.description }
         if let view = value as? UIView { return "<\(NSStringFromClass(type(of: view)))>" }
         if let controller = value as? UIViewController { return "<\(NSStringFromClass(type(of: controller)))>" }
-        throw UIKitInspectionError.unsafeObjectChain
+        if context.scope == .host, containsAppAgentOwned(value, depth: 0) {
+            throw UIKitInspectionError.outsideScope
+        }
+        return truncatedDescription(String(describing: value))
+    }
+
+    private static func truncatedDescription(_ text: String) -> String {
+        guard text.count > maxDescriptionLength else {
+            return text
+        }
+        return String(text.prefix(maxDescriptionLength))
+            + "\n…(truncated, \(text.count) chars total; read a deeper keyPath for the rest)"
+    }
+
+    /// 集合描述会递归描述元素：先扫一遍，host 范围不能借集合把 SDK 对象带出来。
+    @MainActor
+    private static func containsAppAgentOwned(_ value: Any, depth: Int) -> Bool {
+        guard depth < 8 else {
+            return false
+        }
+        if let dictionary = value as? NSDictionary {
+            for (key, element) in dictionary {
+                if containsAppAgentOwned(key, depth: depth + 1) || containsAppAgentOwned(element, depth: depth + 1) {
+                    return true
+                }
+            }
+            return false
+        }
+        let elements: [Any]?
+        if let array = value as? NSArray {
+            elements = Array(array)
+        } else if let set = value as? NSSet {
+            elements = set.allObjects
+        } else if let ordered = value as? NSOrderedSet {
+            elements = ordered.array
+        } else {
+            elements = nil
+        }
+        if let elements {
+            return elements.contains { element in
+                containsAppAgentOwned(element, depth: depth + 1)
+            }
+        }
+        guard let object = value as? NSObject else {
+            return false
+        }
+        return HostInspectionUIKit.isAppAgentOwned(object)
     }
 
     private static func isScalarValue(_ object: NSObject) -> Bool {
@@ -851,7 +961,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         from target: NSObject, keyPath: String, context: HostInspectionContext = .init()
     ) -> String {
         do {
-            let (object, key) = try propertyTarget(target, keyPath: keyPath, context: context)
+            let (object, key) = try propertyTarget(target, keyPath: keyPath, context: context, isMutation: false)
             let value = try declaredPropertyValue(from: object, key: key)
             return try inspectedDescription(of: value, context: context)
         } catch let error as UIKitInspectionError {
@@ -883,7 +993,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         on target: NSObject, keyPath: String, value: String, context: HostInspectionContext = .init()
     ) -> String {
         do {
-            let (object, key) = try propertyTarget(target, keyPath: keyPath, context: context)
+            let (object, key) = try propertyTarget(target, keyPath: keyPath, context: context, isMutation: true)
             // Validate the old value before invoking a setter on an object-valued property.
             // This also prevents a successful write from leaking an excluded rollback value.
             if context.scope != .all {
@@ -893,7 +1003,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
                 }
                 let old = try declaredPropertyValue(from: object, key: key)
                 _ = try inspectedDescription(of: old, context: context)
-                if old is UIView || old is UIViewController { throw UIKitInspectionError.unsafeObjectChain }
+                // 读取已放开任意对象，写入仍只允许标量属性（字符串/数字/颜色/几何值）。
+                if let oldObject = old as? NSObject, !isScalarValue(oldObject) {
+                    throw UIKitInspectionError.unsafeObjectChain
+                }
             }
             try ObjCExceptionCatcher.perform { object.setValue(boxedValue(from: value), forKey: key) }
             let updated = try declaredPropertyValue(from: object, key: key)
@@ -924,15 +1037,28 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         guard HostInspectionUIKit.includes(view, context: context) else {
             return UIKitInspectionError.outsideScope.localizedDescription
         }
-        var out = "path=\(path)\nclass=\(type(of: view))\n"
+        var out = "path=\(path)\n"
+        if context.presentation == .implementation {
+            out += "class=\(type(of: view))\n"
+        } else {
+            out += "kind=\(HostUINaming.view(view, context: context))\n"
+        }
+        if let page = HostUINaming.owningPage(of: view, context: context) {
+            out += "page=\(page)\n"
+        }
         out += "frame=\(view.frame)\nbounds=\(view.bounds)\ncenter=\(view.center)\n"
         out += "alpha=\(view.alpha) hidden=\(view.isHidden) userInteractionEnabled=\(view.isUserInteractionEnabled)\n"
         out += "backgroundColor=\(view.backgroundColor.map { "\($0)" } ?? "nil")\n"
         out += "cornerRadius=\(view.layer.cornerRadius) tag=\(view.tag)\n"
-        out += "superclass=\(view.superclass.map { "\($0)" } ?? "nil")\n"
+        if context.presentation == .implementation {
+            out += "superclass=\(view.superclass.map { "\($0)" } ?? "nil")\n"
+        }
         let parent = view.superview.flatMap { HostInspectionUIKit.includes($0, context: context) ? $0 : nil }
         let childCount = view.subviews.filter { HostInspectionUIKit.includes($0, context: context) }.count
-        out += "superview=\(parent.map { "\(type(of: $0))" } ?? "nil/out-of-scope") subviews=\(childCount)\n"
+        let parentName = parent.map { superview in
+            HostUINaming.view(superview, context: context)
+        } ?? "nil/out-of-scope"
+        out += "superview=\(parentName) subviews=\(childCount)\n"
         if let label = view as? UILabel { out += "text=\"\(label.text ?? "")\"\n" }
         if let field = view as? UITextField { out += "text=\"\(field.text ?? "")\"\n" }
         if let button = view as? UIButton { out += "title=\"\(button.title(for: .normal) ?? "")\"\n" }
@@ -1139,7 +1265,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         else if let button = view as? UIButton { extra = " title=\"\(button.title(for: .normal) ?? "")\"" }
         else if let field = view as? UITextField { extra = " text=\"\(field.text ?? "")\"" }
         let hidden = view.isHidden ? " hidden" : ""
-        out += "\(pad)[\(path)] \(type(of: view)) frame=\(view.frame)\(extra)\(hidden)\n"
+        out += "\(pad)[\(path)] \(HostUINaming.view(view, context: context)) frame=\(view.frame)\(extra)\(hidden)\n"
         guard depth < maxDepth else {
             let count = view.subviews.filter { HostInspectionUIKit.includes($0, context: context) }.count
             if count > 0 { out += "\(pad)  … \(count) more subviews (raise maxDepth)\n" }
@@ -1292,7 +1418,8 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
             return
         }
         let pad = String(repeating: "  ", count: indent)
-        out += "\(pad)- \(type(of: vc)) title=\(vc.title ?? "nil")\n"
+        let title = context.presentation == .implementation ? " title=\(vc.title ?? "nil")" : ""
+        out += "\(pad)- \(HostUINaming.page(vc, context: context))\(title)\n"
         for child in vc.children {
             describe(viewController: child, indent: indent + 1, context: context, into: &out)
         }
@@ -1315,7 +1442,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
         else if let button = view as? UIButton { extra = " title=\"\(button.title(for: .normal) ?? "")\"" }
         else if let field = view as? UITextField { extra = " text=\"\(field.text ?? "")\" placeholder=\"\(field.placeholder ?? "")\"" }
         let hidden = view.isHidden ? " hidden" : ""
-        out += "\(pad)• \(type(of: view)) frame=\(view.frame)\(extra)\(hidden)\n"
+        out += "\(pad)• \(HostUINaming.view(view, context: context)) frame=\(view.frame)\(extra)\(hidden)\n"
         for sub in view.subviews {
             describe(view: sub, indent: indent + 1, context: context, into: &out)
         }
@@ -1461,8 +1588,10 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
             return
         }
         let pad = String(repeating: "  ", count: indent)
-        var line = "\(pad)- \(type(of: vc))"
-        if let title = vc.title, !title.isEmpty { line += " title=\"\(clip(title))\"" }
+        var line = "\(pad)- \(HostUINaming.page(vc, context: context))"
+        if context.presentation == .implementation, let title = vc.title, !title.isEmpty {
+            line += " title=\"\(clip(title))\""
+        }
         guard vc.isViewLoaded else {
             out += line + "  (view 未加载)\n"
             return
@@ -1472,7 +1601,9 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
 
         if let nav = vc as? UINavigationController {
             let visible = nav.viewControllers.filter { HostInspectionUIKit.includes($0, context: context) }
-            let top = visible.last.map { "\(type(of: $0))" } ?? "nil"
+            let top = visible.last.map { controller in
+                HostUINaming.page(controller, context: context)
+            } ?? "nil"
             out += "\(pad)  页面栈 \(visible.count) 层，栈顶 = \(top)\n"
             for child in visible {
                 describeVCSkeleton(child, indent: indent + 2, context: context, into: &out)
@@ -1533,7 +1664,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
             }
             shown += 1
 
-            var line = "\(pad)• \(type(of: sub))\(inlineLabel(of: sub, context: context)) [\(subPath)]"
+            var line = "\(pad)• \(HostUINaming.view(sub, context: context))\(inlineLabel(of: sub, context: context)) [\(subPath)]"
             let inside = subStats.views - 1
             let tooBig = inside > Summary.collapseAbove
             let tooDeep = anchorDepth + 1 >= Summary.anchorDepth
@@ -1574,7 +1705,7 @@ public final class DefaultRuntimeInspectProvider: RuntimeInspectProvider, Sendab
             for root in roots {
                 guard let path = addressablePath(of: root, context: context) else { continue }
                 let total = stats(of: root, context: context)
-                out += "\n[\(path)] \(type(of: root))\(inlineLabel(of: root, context: context))"
+                out += "\n[\(path)] \(HostUINaming.view(root, context: context))\(inlineLabel(of: root, context: context))"
                 out += " · 共 \(total.views) 视图 / depth \(total.depth)\n"
                 out += "  视图锚点：\n"
                 emitAnchors(of: root, path: path, anchorDepth: 0, indent: 2, context: context, into: &out)

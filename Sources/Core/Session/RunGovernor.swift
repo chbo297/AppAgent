@@ -13,7 +13,9 @@ import Foundation
 /// (see `AISessionManager.runningSessionCount`) — there is no separate counter to drift
 /// out of sync with the executors.
 ///
-/// Kept as a type (not an inline constant) so a future token / weighted / thread-safe
+/// AISessionManager serializes the check together with synchronous executor startup,
+/// so simultaneous callers cannot all consume the same last available slot.
+/// Kept as a type (not an inline constant) so a future token / weighted
 /// version can drop in without touching the call sites in `AISessionManager` /
 /// `AISession.sendMessage`.
 ///

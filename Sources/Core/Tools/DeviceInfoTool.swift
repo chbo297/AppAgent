@@ -1,5 +1,5 @@
 //
-//  AppDeviceInfoTool.swift
+//  DeviceInfoTool.swift
 //  AppAgent
 //
 //  Host-environment tool: report device model, OS, storage, memory, locale and
@@ -13,8 +13,8 @@ import Foundation
 import UIKit
 #endif
 
-public struct AppDeviceInfoTool: ToolProtocol {
-    public let name = "app_device_info"
+public struct DeviceInfoTool: ToolProtocol {
+    public let name = "device_info"
     public let description = """
         Read the device and runtime environment the host app is running in. \
         Pick a 'section' to keep the payload small, or omit it for everything:

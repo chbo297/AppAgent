@@ -66,7 +66,8 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         viewController.chatPanelView.updateDisplayHeight(
             300,
             minimumDisplayHeight: 120,
-            compactTransitionStartDisplayHeight: 300
+            compactTransitionStartDisplayHeight: 300,
+            compactHeight: AppAgentInputBarMetrics.barHeight
         )
         let before = try XCTUnwrap(viewController.presentationState.chatPanelFrame)
         spy.states.removeAll()
@@ -75,7 +76,8 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         viewController.chatPanelView.updateDisplayHeight(
             500,
             minimumDisplayHeight: 120,
-            compactTransitionStartDisplayHeight: 300
+            compactTransitionStartDisplayHeight: 300,
+            compactHeight: AppAgentInputBarMetrics.barHeight
         )
 
         let after = try XCTUnwrap(viewController.presentationState.chatPanelFrame)
@@ -94,6 +96,20 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         viewController.notifyPresentationChangeIfNeeded(reason: .keyboard)
 
         XCTAssertEqual(spy.states.count, baseline, "几何没变就不该再报")
+    }
+
+    func testReplacingPresentationDelegateReceivesCurrentGeometryOnce() {
+        let viewController = makeLaidOutViewController()
+        let original = PresentationSpy()
+        viewController.presentationDelegate = original
+        let replacement = PresentationSpy()
+        viewController.presentationDelegate = replacement
+
+        XCTAssertEqual(replacement.states.count, 1, "新观察者必须收到当前遮挡状态")
+        XCTAssertEqual(replacement.states.first?.areas, viewController.presentationState.areas)
+        viewController.presentationDelegate = replacement
+        viewController.notifyPresentationChangeIfNeeded(reason: .layout)
+        XCTAssertEqual(replacement.states.count, 1, "同一个观察者仍按几何去重")
     }
 
     /// 输入栏收到底时面板按 ease-out 淡出：宿主要能看出「透明了、其实不再遮挡」。
@@ -774,6 +790,199 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         )
     }
 
+    /// 草稿多行：输入栏贴底向上长高，消息列表底部让位跟着加大，不被长高的输入栏盖住。
+    func testMultiLineDraftGrowsInputBarUpwardAndListMakesRoom() {
+        let viewController = makeLaidOutViewController()
+        let restingFrame = viewController.inputBar.frame
+        let listScrollView = viewController.chatPanelView.listView.participantScrollView
+        let restingListInset = listScrollView.contentInset.bottom
+
+        viewController.inputBar.text = "第一行\n第二行\n第三行"
+        viewController.view.layoutIfNeeded()
+
+        let grownFrame = viewController.inputBar.frame
+        XCTAssertGreaterThan(grownFrame.height, restingFrame.height + 10)
+        XCTAssertEqual(grownFrame.maxY, restingFrame.maxY, accuracy: 0.5)
+        XCTAssertEqual(
+            listScrollView.contentInset.bottom - restingListInset,
+            grownFrame.height - restingFrame.height,
+            accuracy: 0.5
+        )
+
+        viewController.inputBar.clearText()
+        viewController.view.layoutIfNeeded()
+        XCTAssertEqual(viewController.inputBar.frame, restingFrame)
+    }
+
+    /// 逐行输入（走代理回调的完整路径）：折行后输入栏与文字区同步长高，行数变化时通知宿主。
+    func testTypingGrowsInputBarLineByLine() {
+        let viewController = makeLaidOutViewController()
+        let inputBar = viewController.inputBar
+        let lines = [
+            "第一行内容",
+            "第二行内容第二行内容第二行内容第二行内容",
+            "第三行内容第三行内容第三行内容第三行内容第三行内容第三行内容",
+            "第四行内容第四行内容第四行内容第四行内容第四行内容第四行内容第四行内容",
+        ]
+        var previousHeight = inputBar.frame.height
+        for (_, line) in lines.enumerated() {
+            inputBar.textView.text = (inputBar.textView.text.isEmpty ? "" : inputBar.textView.text + "\n") + line
+            inputBar.textView.delegate?.textViewDidChange?(inputBar.textView)
+            viewController.view.layoutIfNeeded()
+            if inputBar.frame.height > previousHeight {
+                XCTAssertEqual(inputBar.frame.height, inputBar.expandedHeight(forWidth: inputBar.frame.width), accuracy: 1)
+            }
+            previousHeight = max(previousHeight, inputBar.frame.height)
+        }
+        XCTAssertGreaterThan(inputBar.frame.height, 56 + 40, "总高应能容纳约 7 行")
+    }
+
+    /// 宿主预留高度：peek 时输入栏让出、紧凑框对齐；展开到 half 输入栏回到安全区位置；键盘弹起仍贴键盘；收起胶囊不变。
+    func testHostReservedBottomHeightLiftsInputBarOnlyAtPeekAndNotKeyboardOrCollapsedFrame() async {
+        let inset: CGFloat = 60
+        var context = AppAgentInputBarFramePolicy.Context(
+            bounds: bounds,
+            safeAreaInsets: safeAreaInsets,
+            keyboardHeight: 0,
+            storedExpandedWidth: nil,
+            storedCollapsedPlacement: nil
+        )
+        let restingFrame = AppAgentInputBarFramePolicy.preferredExpandedFrame(context)
+        let collapsedFrame = AppAgentInputBarFramePolicy.preferredCollapsedFrame(context)
+        context.hostReservedBottomLift = inset
+        XCTAssertEqual(
+            AppAgentInputBarFramePolicy.preferredExpandedFrame(context).maxY,
+            restingFrame.maxY - inset,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(AppAgentInputBarFramePolicy.preferredCollapsedFrame(context), collapsedFrame)
+        let keyboardContext = AppAgentInputBarFramePolicy.Context(
+            bounds: bounds,
+            safeAreaInsets: safeAreaInsets,
+            keyboardHeight: 300,
+            storedExpandedWidth: nil,
+            storedCollapsedPlacement: nil,
+            hostReservedBottomLift: inset
+        )
+        XCTAssertEqual(
+            AppAgentInputBarFramePolicy.preferredExpandedFrame(keyboardContext).maxY,
+            bounds.height - 300,
+            accuracy: 0.001
+        )
+
+        let viewController = makeLaidOutViewController()
+        viewController.setChatPanelDetent(.half, animated: false)
+        await Task.yield()
+        viewController.view.layoutIfNeeded()
+        let restingInputBarMaxY = viewController.inputBar.frame.maxY
+        let panelFrame = viewController.chatPanelContainer.frame
+        viewController.hostReservedBottomHeight = inset
+        viewController.view.layoutIfNeeded()
+        // 测试环境没有 window，BODragScroll 的非动画移动不会立即落定，几何变化后可能偏离档位；
+        // 这里重新对齐 half。预留高度不改变 half 档由下一个用例在 coordinator 层验证。
+        viewController.setChatPanelDetent(.half, animated: false)
+        await Task.yield()
+        viewController.view.layoutIfNeeded()
+        // half 档：面板铺到屏幕底部，输入栏仍按安全区落位，不让出预留高度。
+        XCTAssertEqual(viewController.inputBar.frame.maxY, restingInputBarMaxY, accuracy: 0.5)
+        XCTAssertEqual(viewController.chatPanelContainer.frame, panelFrame)
+
+        // peek 档：输入栏让出预留高度，紧凑框与抬高后的输入栏对齐。
+        viewController.setChatPanelDetent(.peek, animated: false)
+        await Task.yield()
+        viewController.view.layoutIfNeeded()
+        XCTAssertEqual(viewController.inputBar.frame.maxY, restingInputBarMaxY - inset, accuracy: 0.5)
+        let viewport = viewController.chatPanelView.viewportView
+        let viewportFrame = viewport.convert(viewport.bounds, to: viewController.view)
+        XCTAssertEqual(viewportFrame.maxY, viewController.inputBar.frame.maxY, accuracy: 0.5)
+        // 输入栏下方让出的那段不接触摸，宿主底部控件可点；紧凑框本身仍可命中。
+        let panelView = viewController.chatPanelView
+        let belowInputBar = panelView.convert(
+            CGPoint(x: viewportFrame.midX, y: viewportFrame.maxY + inset / 2),
+            from: viewController.view
+        )
+        let insideViewport = panelView.convert(
+            CGPoint(x: viewportFrame.midX, y: viewportFrame.maxY - 1),
+            from: viewController.view
+        )
+        XCTAssertFalse(panelView.point(inside: belowInputBar, with: nil))
+        XCTAssertTrue(panelView.point(inside: insideViewport, with: nil))
+        viewController.hostReservedBottomHeight = 0
+        viewController.view.layoutIfNeeded()
+        XCTAssertFalse(panelView.passesTouchesBelowViewport)
+        viewController.hostReservedBottomHeight = inset
+        viewController.view.layoutIfNeeded()
+        XCTAssertTrue(panelView.passesTouchesBelowViewport)
+
+        // 回到 half：输入栏随面板展开回到安全区位置。
+        viewController.setChatPanelDetent(.half, animated: false)
+        await Task.yield()
+        viewController.view.layoutIfNeeded()
+        XCTAssertEqual(viewController.inputBar.frame.maxY, restingInputBarMaxY, accuracy: 0.5)
+
+        viewController.hostReservedBottomHeight = -.infinity
+        XCTAssertEqual(viewController.effectiveHostReservedBottomHeight, 0)
+    }
+
+    /// 宿主改预留高度只抬高 peek 档；停在 half 的面板不能因此被收起。
+    func testHostReservedBottomHeightOnlyRaisesPeekAndKeepsHalfDetent() async throws {
+        let coordinator = AppAgentChatPanelCoordinator()
+        coordinator.updateLayout(bounds: bounds, safeAreaInsets: safeAreaInsets)
+        let geometry = try XCTUnwrap(makeGeometry())
+        coordinator.move(to: .half, animated: false)
+        await Task.yield()
+
+        coordinator.updateLayout(bounds: bounds, safeAreaInsets: safeAreaInsets, hostReservedBottomHeight: 60)
+        await Task.yield()
+        XCTAssertEqual(coordinator.dragScrollView.displayHeight, geometry.halfHeight, accuracy: 0.5)
+        XCTAssertEqual(coordinator.panelView.compactProgress, 0, accuracy: 0.001)
+
+        coordinator.move(to: .peek, animated: false)
+        await Task.yield()
+        XCTAssertEqual(coordinator.dragScrollView.displayHeight, geometry.peekHeight + 60, accuracy: 0.5)
+        XCTAssertEqual(coordinator.panelView.compactProgress, 1, accuracy: 0.001)
+
+        // 停在 peek 时预留高度归零：面板跟着落到新的 peek，不能保留旧高度高出输入栏一截。
+        coordinator.updateLayout(bounds: bounds, safeAreaInsets: safeAreaInsets, hostReservedBottomHeight: 0)
+        await Task.yield()
+        XCTAssertEqual(coordinator.dragScrollView.displayHeight, geometry.peekHeight, accuracy: 0.5)
+        coordinator.updateLayout(bounds: bounds, safeAreaInsets: safeAreaInsets, hostReservedBottomHeight: 60)
+        await Task.yield()
+        XCTAssertEqual(coordinator.dragScrollView.displayHeight, geometry.peekHeight + 60, accuracy: 0.5)
+    }
+
+    /// 宿主协议：切页面后 invalidate，SDK 向 delegate 重新取值；配套页面展开期间不让出，收起后恢复。
+    func testHostReservedBottomHeightFollowsDelegateAndCompanionPage() async {
+        let viewController = makeLaidOutViewController()
+        viewController.setChatPanelDetent(.peek, animated: false)
+        await Task.yield()
+        viewController.view.layoutIfNeeded()
+        let restingMaxY = viewController.inputBar.frame.maxY
+
+        // 设置 delegate 即取一次：当前在有底部 tab 栏的主页，预留 60，输入栏抬高。
+        let host = ReservedBottomHost(height: 60)
+        viewController.presentationDelegate = host
+        viewController.view.layoutIfNeeded()
+        XCTAssertEqual(viewController.inputBar.frame.maxY, restingMaxY - 60, accuracy: 0.5)
+
+        // 切到无底栏页面：宿主返回 0 后 invalidate，输入栏回到安全区位置。
+        host.height = 0
+        viewController.invalidateHostReservedBottomHeight()
+        viewController.view.layoutIfNeeded()
+        XCTAssertEqual(viewController.inputBar.frame.maxY, restingMaxY, accuracy: 0.5)
+
+        // 回到主页后展开配套页面：宿主仍返回 60，SDK 自己不让出；收起配套页面后恢复。
+        host.height = 60
+        viewController.invalidateHostReservedBottomHeight()
+        viewController.navigationAccessory = AppAgentNavigationAccessory(isActive: true, accessibilityName: "工作区")
+        viewController.view.layoutIfNeeded()
+        XCTAssertEqual(viewController.hostReservedBottomHeight, 60)
+        XCTAssertEqual(viewController.inputBar.frame.maxY, restingMaxY, accuracy: 0.5)
+        viewController.navigationAccessory = AppAgentNavigationAccessory(isActive: false, accessibilityName: "工作区")
+        viewController.view.layoutIfNeeded()
+        XCTAssertEqual(viewController.inputBar.frame.maxY, restingMaxY - 60, accuracy: 0.5)
+    }
+
     func testChatPanelContainerLayoutCollapsedKeepsTwelvePointOutsetAndFullHeight() {
         let collapsedFrame = CGRect(
             x: bounds.maxX - AppAgentInputBarMetrics.collapsedMinWidth - 12,
@@ -962,8 +1171,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.contentFrame, CGRect(x: 0, y: 0, width: 393, height: 765))
         XCTAssertEqual(layout.navigationBarFrame, CGRect(x: 0, y: 0, width: 393, height: 48))
         XCTAssertEqual(layout.messageListFrame, CGRect(x: 0, y: 48, width: 393, height: 717))
-        XCTAssertEqual(layout.topCornerRadius, 20, accuracy: 0.001)
-        XCTAssertEqual(layout.bottomCornerRadius, 20, accuracy: 0.001)
+        XCTAssertEqual(layout.cornerRadius, 20, accuracy: 0.001)
         XCTAssertEqual(layout.compactProgress, 0, accuracy: 0.001)
     }
 
@@ -986,8 +1194,8 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.contentFrame, CGRect(x: 0, y: 0, width: 393, height: 765))
         XCTAssertEqual(layout.navigationBarFrame, CGRect(x: 0, y: 0, width: 393, height: 48))
         XCTAssertEqual(layout.messageListFrame, CGRect(x: 0, y: 48, width: 393, height: 717))
-        XCTAssertEqual(layout.topCornerRadius, 20, accuracy: 0.001)
-        XCTAssertEqual(layout.bottomCornerRadius, 0, accuracy: 0.001)
+        // 高于 A 点四角仍保持展开圆角，底部不能突然变成直角。
+        XCTAssertEqual(layout.cornerRadius, 20, accuracy: 0.001)
         XCTAssertEqual(layout.compactProgress, 0, accuracy: 0.001)
     }
 
@@ -1026,8 +1234,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.contentFrame, CGRect(x: -12, y: 0, width: 393, height: 765))
         XCTAssertEqual(layout.navigationBarFrame, CGRect(x: -12, y: 0, width: 393, height: 48))
         XCTAssertEqual(layout.messageListFrame, CGRect(x: -12, y: 48, width: 393, height: 717))
-        XCTAssertEqual(layout.topCornerRadius, AppAgentInputBarMetrics.expandedCornerRadius, accuracy: 0.001)
-        XCTAssertEqual(layout.bottomCornerRadius, AppAgentInputBarMetrics.expandedCornerRadius, accuracy: 0.001)
+        XCTAssertEqual(layout.cornerRadius, AppAgentInputBarMetrics.expandedCornerRadius, accuracy: 0.001)
         XCTAssertEqual(layout.compactProgress, 1, accuracy: 0.001)
     }
 
@@ -1050,8 +1257,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.contentFrame, CGRect(x: -6, y: 0, width: 393, height: 765))
         XCTAssertEqual(layout.navigationBarFrame, CGRect(x: -6, y: 0, width: 393, height: 48))
         XCTAssertEqual(layout.messageListFrame, CGRect(x: -6, y: 48, width: 393, height: 717))
-        XCTAssertEqual(layout.topCornerRadius, 18, accuracy: 0.001)
-        XCTAssertEqual(layout.bottomCornerRadius, 18, accuracy: 0.001)
+        XCTAssertEqual(layout.cornerRadius, 18, accuracy: 0.001)
     }
 
     func testContentLayoutHandlesCoincidentHalfAndPeekHeights() {
@@ -1081,7 +1287,8 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         panelView.updateDisplayHeight(
             minimumHeight,
             minimumDisplayHeight: minimumHeight,
-            compactTransitionStartDisplayHeight: halfHeight
+            compactTransitionStartDisplayHeight: halfHeight,
+            compactHeight: AppAgentInputBarMetrics.barHeight
         )
 
         XCTAssertTrue(panelView.dragHandleAreaView.superview === panelView)
@@ -1156,6 +1363,39 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         viewController.hideSessionSidebar(animated: false)
     }
 
+    /// 宿主配套页面开关：无页面时隐藏；有页面时排在设置按钮左侧，展开 / 收起由控件状态表达，点按只回调宿主。
+    func testNavigationAccessoryTogglesVisibilityStateAndForwardsTap() {
+        let viewController = AppAgentViewController()
+        viewController.loadViewIfNeeded()
+        viewController.view.frame = bounds
+        viewController.view.layoutIfNeeded()
+        let bar = viewController.chatPanelView.navigationBar
+        XCTAssertTrue(bar.accessoryButton.isHidden)
+
+        var taps = 0
+        viewController.onNavigationAccessoryTapped = {
+            taps += 1
+        }
+        viewController.navigationAccessory = AppAgentNavigationAccessory(isActive: false, accessibilityName: "工作区页面")
+        bar.frame = CGRect(x: 0, y: 0, width: bounds.width, height: AppAgentChatPanelMetrics.navigationBarHeight)
+        bar.layoutIfNeeded()
+
+        XCTAssertFalse(bar.accessoryButton.isHidden)
+        XCTAssertLessThan(bar.accessoryButton.frame.maxX, bar.sessionSettingsButton.frame.minX)
+        XCTAssertFalse(bar.accessoryButton.isExpanded)
+        XCTAssertEqual(bar.accessoryButton.accessibilityLabel, "工作区页面")
+        XCTAssertEqual(bar.accessoryButton.accessibilityValue, "已收起")
+
+        viewController.navigationAccessory?.isActive = true
+        XCTAssertTrue(bar.accessoryButton.isExpanded)
+        XCTAssertEqual(bar.accessoryButton.accessibilityValue, "已展开")
+        bar.didTapAccessoryButton()
+        XCTAssertEqual(taps, 1)
+
+        viewController.navigationAccessory = nil
+        XCTAssertTrue(bar.accessoryButton.isHidden)
+    }
+
     /// 容器「命中自己就穿透」现在由 BOUIKit 的 bo_skipsSelfInHitTest 提供，
     /// 这条用例同时验证该依赖是否接线成功。
     func testContainerPassesSelfHitsThroughButKeepsSubviews() {
@@ -1189,6 +1429,20 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             halfScreenVisibleHeight: 554,
             bottomInset: 90
         )
+    }
+}
+
+/// 按当前页面返回底部预留高度的宿主桩。
+@MainActor
+private final class ReservedBottomHost: AppAgentPresentationDelegate {
+    var height: CGFloat
+
+    init(height: CGFloat) {
+        self.height = height
+    }
+
+    func appAgentHostReservedBottomHeight() -> CGFloat {
+        height
     }
 }
 #endif

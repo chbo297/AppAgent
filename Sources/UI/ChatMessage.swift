@@ -39,6 +39,8 @@ public struct ChatMessage {
     /// 不受影响（此值恒为 false），仍保留过程入口。cell 渲染时与 `shouldDisplayActivity`
     /// 取与：只有「结构上有内容可展示」且「未被本开关抑制」才显示过程区。
     public var suppressResolvedActivity: Bool
+    /// 用户随这条提问发出的图片 / 文件（只有用户气泡才有）。
+    public var attachments: [AIAgentMessage.Attachment]
 
     public init(
         role: Role,
@@ -47,7 +49,8 @@ public struct ChatMessage {
         turnID: Int? = nil,
         activity: AppAgentActivityTimeline? = nil,
         isActivityExpanded: Bool = false,
-        suppressResolvedActivity: Bool = false
+        suppressResolvedActivity: Bool = false,
+        attachments: [AIAgentMessage.Attachment] = []
     ) {
         self.id = UUID()
         self.role = role
@@ -58,6 +61,7 @@ public struct ChatMessage {
         self.activity = activity
         self.isActivityExpanded = isActivityExpanded
         self.suppressResolvedActivity = suppressResolvedActivity
+        self.attachments = attachments
     }
 
     /// 两条气泡的**展示内容**是否等价（忽略每次组装都会变的 `id` 与 `timestamp`）。
@@ -72,6 +76,7 @@ public struct ChatMessage {
             && isActivityExpanded == other.isActivityExpanded
             && suppressResolvedActivity == other.suppressResolvedActivity
             && activity == other.activity
+            && attachments.map(\.id) == other.attachments.map(\.id)
     }
 }
 #endif

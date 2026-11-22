@@ -360,15 +360,6 @@ final class WebInspectTests: XCTestCase {
         withExtendedLifetime(agent) {
         }
     }
-
-    // MARK: - 抓包通道扩展
-
-    func testCaptureChannelsUseHostDefinedNames() {
-        XCTAssertTrue(HookCaptureStore.isValidChannel("bridge_in"))
-        XCTAssertTrue(HookCaptureStore.isValidChannel("page.navigation"))
-        XCTAssertFalse(HookCaptureStore.isValidChannel("../escape"))
-        XCTAssertFalse(HookCaptureStore.isValidChannel(""))
-    }
 }
 
 private actor WebInspectDenyGate: ToolExecutionGate {

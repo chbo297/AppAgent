@@ -144,6 +144,14 @@ final class TurnJournal: @unchecked Sendable {
         persist(session, false)
     }
 
+    /// 给用户的过程说明：事件流里实时展示，同时记进本轮记录，重建界面后仍在。
+    func notice(_ text: String) {
+        continuation.yield(.notice(text))
+        guard let session, let turnID, isActive() else { return }
+        session.appendTurnNotice(turnID: turnID, text: text)
+        persist(session, false)
+    }
+
     // MARK: - 流式内容
 
     /// 正文 delta。

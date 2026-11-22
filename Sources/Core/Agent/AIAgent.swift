@@ -41,7 +41,7 @@ public final class AIAgent: @unchecked Sendable {
     public var modelPolicy: ModelPolicy?
 
     /// 宿主 UI 注入的「切换到某个会话」钩子。核心没有 current session 概念（那是 UI 概念），
-    /// 由 `AppAgentViewController` 安装；未安装时 `session_manage` 的 `switch` 会明确报未支持。
+    /// 由 `AppAgentViewController` 安装；未安装时 `session` 的 `switch` 会明确报未支持。
     @Locked
     public var activateSessionHandler: (@Sendable (String) -> Bool)?
 
@@ -59,6 +59,14 @@ public final class AIAgent: @unchecked Sendable {
 
     /// Skills manager for skill discovery and lifecycle.
     public let skillsManager: SkillsManager
+
+    /// Optional host action bridge. When provided, `app_action` is registered
+    /// with the SDK built-ins so every host can expose its own core actions
+    /// through the same default tool.
+    private let appActionProvider: (any AppActionProvider)?
+
+    /// Optional host metadata extension used by the default `host_info` tool.
+    private let hostInfoProvider: (any HostInfoProvider)?
 
     /// Delegate for lifecycle callbacks.
     @WeakLocked
@@ -106,7 +114,9 @@ public final class AIAgent: @unchecked Sendable {
         toolPolicy: ToolCentral.ToolPolicy? = nil,
         memoryStorage: any MemoryStorage = FileMemoryStorage(),
         sessionStorage: any SessionStorage = FileSessionStorage(),
-        skillsManager: SkillsManager = SkillsManager()
+        skillsManager: SkillsManager = SkillsManager(),
+        appActionProvider: (any AppActionProvider)? = nil,
+        hostInfoProvider: (any HostInfoProvider)? = nil
     ) {
         self.id = id
         self._profile = Locked(wrappedValue: profile)
@@ -119,6 +129,8 @@ public final class AIAgent: @unchecked Sendable {
         self.memoryStore = MemoryStore(config: profile.memoryConfig, storage: memoryStorage)
         self.sessionManager = AISessionManager(storage: sessionStorage)
         self.skillsManager = skillsManager
+        self.appActionProvider = appActionProvider
+        self.hostInfoProvider = hostInfoProvider
 
         // Wire back-references
         self.sessionManager.agent = self
@@ -194,6 +206,9 @@ public final class AIAgent: @unchecked Sendable {
     public func registerBuiltInTools() async {
         let disabled = profile.disabledBuiltInTools
 
+        // 按需加载：debug 组（ToolCentral 预置）平时只在提示词里占一行，load_tools 后才发完整定义。
+        await toolCentral.register(LoadToolsTool())
+
         // Phase 1: Core tools
         if !disabled.contains("clarify") {
             await toolCentral.register(ClarifyTool())
@@ -206,26 +221,19 @@ public final class AIAgent: @unchecked Sendable {
         }
 
         // Phase 2: File tools
-        let sandboxRoot = profile.sandboxRoot
-        if !disabled.contains("file_read") {
-            await toolCentral.register(FileReadTool(sandboxRoot: sandboxRoot))
-        }
-        if !disabled.contains("file_write") {
-            await toolCentral.register(FileWriteTool(sandboxRoot: sandboxRoot))
-        }
-        if !disabled.contains("file_search") {
-            await toolCentral.register(FileSearchTool(sandboxRoot: sandboxRoot))
+        if !disabled.contains("file") {
+            await toolCentral.register(FileTool(registry: profile.fileResources))
         }
 
-        // Phase 2: Skills tools
-        if !disabled.contains("skills_list") {
-            await toolCentral.register(SkillsListTool(manager: skillsManager))
+        // Phase 2: Unified progressive skill tool
+        if !disabled.contains("skill") {
+            await toolCentral.register(SkillTool(manager: skillsManager))
         }
-        if !disabled.contains("skill_view") {
-            await toolCentral.register(SkillViewTool(manager: skillsManager))
-        }
-        if !disabled.contains("skill_manage") {
-            await toolCentral.register(SkillManageTool(manager: skillsManager))
+
+        // Host action bridge. The provider is host-owned, while the tool
+        // contract and execution policy remain part of the SDK.
+        if !disabled.contains("app_action"), let appActionProvider {
+            await toolCentral.register(AppActionTool(provider: appActionProvider))
         }
 
         // Phase 3: Media tools
@@ -237,11 +245,8 @@ public final class AIAgent: @unchecked Sendable {
         if !disabled.contains("delegate_task") {
             await toolCentral.register(DelegateTaskTool())
         }
-        if !disabled.contains("session_search") {
-            await toolCentral.register(SessionSearchTool())
-        }
-        if !disabled.contains("session_manage") {
-            await toolCentral.register(SessionManageTool())
+        if !disabled.contains("session") {
+            await toolCentral.register(SessionTool())
         }
 
         // System tools
@@ -262,18 +267,22 @@ public final class AIAgent: @unchecked Sendable {
         if !disabled.contains("app_user_defaults") {
             await toolCentral.register(AppUserDefaultsTool())
         }
-        if !disabled.contains("app_sandbox_file") {
-            await toolCentral.register(AppSandboxFileTool())
+        if !disabled.contains("device_info") {
+            await toolCentral.register(DeviceInfoTool())
         }
-        if !disabled.contains("app_device_info") {
-            await toolCentral.register(AppDeviceInfoTool())
+        if !disabled.contains("host_info") {
+            await toolCentral.register(HostInfoTool(provider: hostInfoProvider))
         }
 
-        // Host runtime introspection (group "host-runtime"). Requires UIKit for the
-        // default provider; hosts on other platforms can register their own.
+        // Host runtime (group "host-runtime"). Requires UIKit for the default provider; hosts on
+        // other platforms can register their own. app_ui is everyday; app_runtime_inspect is debug.
         #if canImport(UIKit)
-        if !disabled.contains("app_runtime_inspect") {
-            await toolCentral.register(RuntimeInspectTool(provider: DefaultRuntimeInspectProvider()))
+        let runtimeProvider = DefaultRuntimeInspectProvider()
+        if !disabled.contains(RuntimeInspectTool.uiToolName) {
+            await toolCentral.register(RuntimeInspectTool.ui(provider: runtimeProvider))
+        }
+        if !disabled.contains(RuntimeInspectTool.objectsToolName) {
+            await toolCentral.register(RuntimeInspectTool(provider: runtimeProvider))
         }
         if !disabled.contains("screenshot") {
             await toolCentral.register(ScreenshotTool())
@@ -325,6 +334,13 @@ public final class AIAgent: @unchecked Sendable {
         // 出现「清单里有、执行时 Tool not found」。所以必须先等就绪。
         await ensureReady()
         try await sessionManager.restoreAll()
+        // 会话都在内存里了，顺手清一次没人引用的暂存附件；放后台，不拖启动。
+        if let workspaceRoot = profile.fileResources.descriptor(for: "agent://workspace")?.rootURL {
+            let manager = sessionManager
+            Task.detached(priority: .utility) {
+                await manager.sweepStagedAttachments(workspaceRoot: workspaceRoot)
+            }
+        }
     }
 
     /// Compatibility alias for recoverable archive. Never permanently deletes history.

@@ -25,13 +25,14 @@ public struct SSEParser {
 
     /// Feed a single line. Returns an SSEEvent if a complete event was parsed.
     public mutating func processLine(_ line: String) -> SSEEvent? {
-        if line.hasPrefix("event: ") {
+        if line.hasPrefix("event:") {
             // A new event starting — if we already have a complete event buffered, emit it first
             let previous = emitIfReady()
-            currentEvent = String(line.dropFirst(7))
+            let value = line.dropFirst(6)
+            currentEvent = String(value.first == " " ? value.dropFirst() : value)
             return previous
         }
-        if line.hasPrefix("data: ") {
+        if line.hasPrefix("data:") {
             // A new `data:` line also delimits an event. Some transports
             // (notably URLSession.AsyncBytes.lines) do not surface the blank
             // separator line between SSE events, so `data:`-only streams
@@ -39,7 +40,8 @@ public struct SSEParser {
             // overwriting the buffer and never emit. Flush the buffered
             // event first, then start accumulating the new one.
             let previous = emitIfReady()
-            currentData = String(line.dropFirst(6))
+            let value = line.dropFirst(5)
+            currentData = String(value.first == " " ? value.dropFirst() : value)
             return previous
         }
         // Empty line = event boundary (standard SSE)

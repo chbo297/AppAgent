@@ -125,7 +125,17 @@ final class AppAgentVoiceInputCoordinator {
         renderState != nil
     }
 
-    private let recognitionManager: AppAgentVoiceRecognitionProviding
+    /// 解析「这一次语音输入用哪个识别引擎」：默认读 `AppAgentVoiceRecognitionCentral` 的当前选择，
+    /// 单测注入固定替身。每次开始识别时解析一次，用户在设置页切换后下一次语音输入即生效。
+    private let resolveRecognizer: () -> AppAgentVoiceRecognitionProviding
+
+    /// 当前（或上一次）识别会话所用的引擎；停止 / 收尾请求必须发给开始时的那个引擎。
+    private var activeRecognizer: AppAgentVoiceRecognitionProviding?
+
+    private var recognitionManager: AppAgentVoiceRecognitionProviding {
+        activeRecognizer ?? resolveRecognizer()
+    }
+
     private let feedback: AppAgentVoiceInputFeedbackProviding
     private let timings: AppAgentVoiceInputTimings
     private var recognitionTask: Task<Void, Never>?
@@ -147,13 +157,22 @@ final class AppAgentVoiceInputCoordinator {
     /// 取时间的钩子：单测注入假时钟，生产用参考时间。
     private let now: () -> TimeInterval
 
+    /// `recognitionManager` 传 nil 时按设置页的引擎选择解析；传值则固定用它（单测）。
     init(
-        recognitionManager: AppAgentVoiceRecognitionProviding = AppAgentVoiceRecognitionManager.shared,
+        recognitionManager: AppAgentVoiceRecognitionProviding? = nil,
         feedback: AppAgentVoiceInputFeedbackProviding,
         timings: AppAgentVoiceInputTimings = .standard,
         now: @escaping () -> TimeInterval = { Date.timeIntervalSinceReferenceDate }
     ) {
-        self.recognitionManager = recognitionManager
+        if let recognitionManager {
+            self.resolveRecognizer = {
+                recognitionManager
+            }
+        } else {
+            self.resolveRecognizer = {
+                AppAgentVoiceRecognitionCentral.default.activeRecognizer
+            }
+        }
         self.feedback = feedback
         self.timings = timings
         self.now = now
@@ -171,7 +190,10 @@ final class AppAgentVoiceInputCoordinator {
     /// 面板不展示、不发任何 delegate 事件。正式开始（`begin`）会复用这条已起的识别。
     func prewarm(source: AppAgentInputBarVoiceInputSource) {
         guard !isActive, finalizeAction == nil, !isPrewarming else { return }
-        guard recognitionManager.canPrewarmNow else { return }
+        // 空闲时按当前选择判断：上一次会话的引擎可能已被用户在设置页换掉。
+        guard resolveRecognizer().canPrewarmNow else {
+            return
+        }
         isPrewarming = true
         startRecognitionIfNeeded()
         prewarmWatchdogTask?.cancel()
@@ -198,6 +220,12 @@ final class AppAgentVoiceInputCoordinator {
 
     /// 手势开始：建立本次语音输入状态、启动识别（复用预热），并请求宿主展示面板。
     func begin(source: AppAgentInputBarVoiceInputSource, location: CGPoint) {
+        // 上一次取消/收尾的 ended 可能还在主线程队列里。只有预热可以复用识别；
+        // 新手势必须先断开旧消费者，不能让旧结果发送文本或关掉新面板。
+        if !isPrewarming, recognitionTask != nil {
+            stopRecognition(reason: .cancelled)
+        }
+        finalizeAction = nil
         prewarmWatchdogTask?.cancel()
         prewarmWatchdogTask = nil
         isPrewarming = false
@@ -288,9 +316,12 @@ final class AppAgentVoiceInputCoordinator {
     private func startRecognitionIfNeeded() {
         // 幂等：预热已起的识别，正式开始时直接复用，不重启（重启会丢掉预热已识别的音频）。
         guard recognitionTask == nil else { return }
-        let events = recognitionManager.startRecording()
+        let recognizer = resolveRecognizer()
+        activeRecognizer = recognizer
+        let events = recognizer.startRecording()
         recognitionTask = Task { @MainActor [weak self] in
             for await event in events {
+                guard !Task.isCancelled else { return }
                 self?.handleRecognitionEvent(event)
             }
         }
@@ -337,6 +368,8 @@ final class AppAgentVoiceInputCoordinator {
     }
 
     private func stopRecognition(reason: AppAgentVoiceRecognitionEndReason) {
+        recognitionTask?.cancel()
+        recognitionTask = nil
         recognitionManager.requestStopRecording(reason: reason)
     }
 

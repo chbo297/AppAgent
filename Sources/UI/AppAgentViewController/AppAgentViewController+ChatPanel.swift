@@ -23,9 +23,14 @@ extension AppAgentViewController {
             self?.toggleSessionSidebar()
         }
         // 面板可见区（展示位置 + 高度）变化的第二个来源：竖向拖拽不经过 inputBar 那条路，
-        // 只有面板自己知道。正在 `applyInputBarFrame` 里时沿用那一次的原因。
+        // 只有面板自己知道。收起进度若改变了输入栏让出的预留高度，就在同一帧（同一动画上下文）
+        // 重排输入栏。正在 `applyInputBarFrame` 里时沿用那一次的原因，重排由它收尾补做。
         chatPanelView.onViewportChanged = { [weak self] in
             guard let self else { return }
+            if self.currentPresentationChangeReason == nil,
+               self.relayoutInputBarIfReservedLiftChanged(reason: .chatPanelHeightPan) {
+                return
+            }
             self.notifyPresentationChangeIfNeeded(
                 reason: self.currentPresentationChangeReason ?? .chatPanelHeightPan
             )
@@ -35,6 +40,12 @@ extension AppAgentViewController {
         }
         chatPanelView.onNewSessionRequested = { [weak self] in
             self?.startNewSession()
+        }
+        chatPanelView.onSessionSettingsRequested = { [weak self] in
+            self?.presentSessionSettings()
+        }
+        chatPanelView.navigationBar.onAccessoryTapped = { [weak self] in
+            self?.onNavigationAccessoryTapped?()
         }
         chatPanelCoordinator.onWillRevealMessages = { [weak self] in
             self?.prepareChatForPresentation()
@@ -69,9 +80,10 @@ extension AppAgentViewController {
     /// 新建一个会话并切换过去；未绑定 agent 时无操作。
     func startNewSession() {
         guard let agent else { return }
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
             let session = await agent.createSession(title: "对话")
-            switchSession(to: session.id)
+            guard let self, self.agent === agent else { return }
+            self.switchSession(to: session.id)
         }
     }
 
@@ -94,11 +106,17 @@ extension AppAgentViewController {
         let keyboardLift = chatPanelKeyboardLift(for: inputBarExpandedFrame)
 
         // 面板几何与键盘、inputBar 宽度都无关：键盘只把整个容器上移（下面的 `shiftedBounds`），
-        // inputBar 的可变展开宽只驱动容器横向平移，面板尺寸只按 view 算。
+        // inputBar 的可变展开宽只驱动容器横向平移。宿主底部预留高度只抬高 peek 档（紧凑框对齐抬高后的
+        // 输入栏）；面板仍铺到屏幕底部，展开时底部延伸、输入栏同步回到安全区位置。
         chatPanelCoordinator.updateLayout(
             bounds: view.bounds,
-            safeAreaInsets: view.safeAreaInsets
+            safeAreaInsets: view.safeAreaInsets,
+            inputBarHeight: inputBarExpandedFrame.height,
+            hostReservedBottomHeight: effectiveHostReservedBottomHeight
         )
+        // 宿主要求了底部避让（超过 1 像素）时，输入栏下方让出的那段不挡宿主的点击和滑动。
+        let pixel = 1 / max(1, view.traitCollection.displayScale)
+        chatPanelView.passesTouchesBelowViewport = effectiveHostReservedBottomHeight > pixel
 
         let shiftedBounds = view.bounds.offsetBy(dx: 0, dy: -keyboardLift)
         let layout = AppAgentChatPanelContainerLayout(
@@ -118,9 +136,10 @@ extension AppAgentViewController {
         chatPanelView.decisionCardBottomInset = max(0, panelBottomInView - inputBarFrame.minY + 8)
     }
 
-    /// inputBar 展开态相对无键盘底部位置实际上移的距离；其他输入框触发键盘时结果为 0。
+    /// inputBar 展开态相对无键盘静止位置（含此刻让出的宿主预留高度）实际上移的距离；其他输入框触发键盘时结果为 0。
     private func chatPanelKeyboardLift(for inputBarExpandedFrame: CGRect) -> CGFloat {
         let restingInputBarBottom = view.bounds.maxY - max(0, view.safeAreaInsets.bottom)
+            - hostReservedBottomLift
         return max(0, restingInputBarBottom - inputBarExpandedFrame.maxY)
     }
 
@@ -143,26 +162,31 @@ extension AppAgentViewController {
     // MARK: - 消息通路
 
     /// 发送分发：UI 调试模式走模拟回路，否则走真实 session；两者使用同一个 ChatPanel 列表。
+    /// 输入栏里待发送的图片 / 文件随这一条一起发出（打字发送与语音转文字都走这里）。
     func dispatchOutgoingMessage(text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let attachments = inputBar.attachments
+        guard !trimmed.isEmpty || !attachments.isEmpty else {
+            return
+        }
         if usesFixedDebugReply {
-            sendFixedDebugReply(to: trimmed)
+            sendFixedDebugReply(to: trimmed, attachments: attachments)
         } else {
-            sendMessage(text: trimmed)
+            sendMessage(text: trimmed, attachments: attachments)
         }
     }
 
-    /// 发送后收尾：清空草稿并收起键盘（两条发送通路共用，别各写一份）。
+    /// 发送后收尾：清空草稿与附件并收起键盘（两条发送通路共用，别各写一份）。
     func finishInputBarAfterSend() {
         inputBar.clearText()
-        inputBar.textField.resignFirstResponder()
+        inputBar.removeAllAttachments()
+        inputBar.textView.resignFirstResponder()
     }
 
-    private func sendFixedDebugReply(to text: String) {
+    private func sendFixedDebugReply(to text: String, attachments: [AIAgentMessage.Attachment]) {
         finishInputBarAfterSend()
 
-        let userMessage = ChatMessage(role: .user, text: text)
+        let userMessage = ChatMessage(role: .user, text: text, attachments: attachments)
         chatMessages.append(userMessage)
         chatPanelView.listView.append(userMessage, followLatest: false)
 

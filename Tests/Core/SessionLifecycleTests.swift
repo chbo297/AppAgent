@@ -130,7 +130,7 @@ final class SessionLifecycleTests: XCTestCase {
         await rejects { try await nextA.sessionManager.purgeArchivedSession(sb.id) }
         let current = try XCTUnwrap(nextA.session(id: sa.id))
         for op in ["read", "rename", "set_model", "archive", "restore"] {
-            let output = try await SessionManageTool().execute(
+            let output = try await SessionTool().execute(
                 arguments: ["op": .string(op), "session_id": .string(sb.id),
                             "title": .string("stolen"), "model": .string("none/model")], session: current)
             guard case .error = output else { return XCTFail("Cross-owner \(op) accepted") }
@@ -171,7 +171,7 @@ final class SessionLifecycleTests: XCTestCase {
         let restored = try await owner.sessionManager.restoreArchivedSession(source.id)
         await storage.fail("save")
         for op in ["create", "rename"] {
-            let result = try await SessionManageTool().execute(
+            let result = try await SessionTool().execute(
                 arguments: ["op": .string(op), "session_id": .string(restored.id),
                             "title": .string("changed")], session: caller)
             guard case .error = result else { return XCTFail("Storage error hidden by \(op)") }

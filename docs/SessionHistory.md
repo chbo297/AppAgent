@@ -1,16 +1,15 @@
 # Session history and recoverable Trash
 
 AppAgent keeps conversation history separate from general-purpose file access.
-`session_manage` provides `list`, `read`, `create`, `switch`, `rename`, `archive`,
+`session` provides `search`, `list`, `read`, `create`, `switch`, `rename`, `archive`,
 `delete`, `archived`, `restore` and `merge`, plus `models` and `set_model`.
-`session_search` searches active history owned by the current agent.
 
 ## Archive and restore
 
 `archive` moves a session into recoverable Trash. `delete` is an alias for the
 same operation, never permanent deletion. Trash is not automatically emptied.
 
-Example arguments to `session_manage`:
+Example arguments to `session`:
 
 ```json
 {"op": "archive", "session_id": "<idle-session-id>"}

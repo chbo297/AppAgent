@@ -14,6 +14,7 @@ public actor MemoryStore {
 
     /// In-memory cache of long-term entries to avoid repeated file reads.
     private var cachedEntries: [MemoryEntry]?
+    private var cacheGeneration: UInt64 = 0
 
     public init(config: MemoryConfig, storage: any MemoryStorage) {
         self.config = config
@@ -27,12 +28,13 @@ public actor MemoryStore {
     public func addLongTerm(_ entry: MemoryEntry) async throws {
         guard config.longTermEnabled else { return }
         try await storage.append(entry)
+        cacheGeneration &+= 1
         cachedEntries = nil // invalidate cache
     }
 
     /// Search long-term memory by case-insensitive substring matching on content and tags.
     public func searchLongTerm(query: String, limit: Int = 10) async -> [MemoryEntry] {
-        guard config.longTermEnabled else { return [] }
+        guard config.longTermEnabled, limit > 0 else { return [] }
         let entries = await loadCached()
         let lowered = query.lowercased()
         let matched = entries.filter { entry in
@@ -57,7 +59,10 @@ public actor MemoryStore {
     public func removeLongTerm(id: String) async throws -> Bool {
         guard config.longTermEnabled else { return false }
         let removed = try await storage.remove(id: id)
-        if removed { cachedEntries = nil }
+        if removed {
+            cacheGeneration &+= 1
+            cachedEntries = nil
+        }
         return removed
     }
 
@@ -104,7 +109,7 @@ public actor MemoryStore {
         // Long-term memory
         if config.longTermEnabled {
             let entries = await loadCached()
-            let maxEntries = limit ?? config.longTermMaxEntries
+            let maxEntries = max(0, limit ?? config.longTermMaxEntries)
             let recent = entries
                 .sorted { $0.createdAt > $1.createdAt }
                 .prefix(maxEntries)
@@ -138,11 +143,17 @@ public actor MemoryStore {
     }
 
     private func loadCached() async -> [MemoryEntry] {
-        if let cached = cachedEntries {
-            return cached
+        while true {
+            if Task.isCancelled { return [] }
+            if let cached = cachedEntries { return cached }
+            let generation = cacheGeneration
+            let entries: [MemoryEntry]
+            do { entries = try await storage.loadAll() }
+            catch { return [] } // A transient read failure must not become a permanent empty cache.
+            // A storage await allows add/remove to invalidate this read's snapshot.
+            guard generation == cacheGeneration else { continue }
+            cachedEntries = entries
+            return entries
         }
-        let entries = (try? await storage.loadAll()) ?? []
-        cachedEntries = entries
-        return entries
     }
 }

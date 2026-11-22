@@ -16,7 +16,7 @@ import Foundation
 public enum ToolGroups {
     /// Core assistant tools (clarify, memory, todo).
     public static let core = "core"
-    /// Sandboxed working-directory file tools (file_read/file_write/file_search).
+    /// Logical agent and host resources exposed through the unified file tool.
     public static let file = "file"
     /// Skills discovery and management.
     public static let skills = "skills"
@@ -26,7 +26,7 @@ public enum ToolGroups {
     public static let web = "web"
     /// System tools (clipboard, haptic).
     public static let system = "system"
-    /// Session self-inspection (session_manage, session_search).
+    /// Session discovery, search, and lifecycle.
     public static let session = "session"
     /// Host runtime introspection: UI hierarchy, classes, KVC read/write, invoke.
     public static let hostRuntime = "host-runtime"
@@ -34,6 +34,12 @@ public enum ToolGroups {
     public static let hostStorage = "host-storage"
     /// Uncategorized custom tools.
     public static let custom = "custom"
+
+    /// 按需加载组 debug：调试与诊断工具，平时不发给模型，`load_tools` 后才可用。
+    /// 宿主的调试工具也可以把 `deferredGroup` 设成它。
+    public static let debug = "debug"
+    static let debugSummary = "debugging and diagnosis — app runtime objects and reflection, H5 page inspection, "
+        + "UserDefaults, and debug tools the host app adds."
 
     /// The host-introspection groups — everything that lets the agent read or
     /// modify the host app's live state. Useful to toggle as a unit.

@@ -120,8 +120,8 @@ final class AppAgentDebugLogTests: XCTestCase {
                 "authorization": "Custom \"opaque value\" tail",
                 "token": "plain-token-value",
                 "password": "tiny",
-                "comate_custom_header": "custom-header-value",
-                "X-Zt-Authorization": "gateway-credential"
+                "x_custom_header": "custom-header-value",
+                "X-Gateway-Authorization": "gateway-credential"
             ]
             let credentials = String(decoding: try encoder.encode(credentialValues), as: UTF8.self)
             let escapedCredentials = String(decoding: try encoder.encode(credentials), as: UTF8.self)
@@ -298,6 +298,57 @@ final class AppAgentDebugLogTests: XCTestCase {
         XCTAssertEqual(Array(head), [0x50, 0x4B])
         XCTAssertTrue(bundle.manifest.contains { $0.contains("模型调用记录 1 条") }, "\(bundle.manifest)")
         XCTAssertTrue(bundle.manifest.contains { $0.hasPrefix("run-logs/ — 运行日志 1") }, "\(bundle.manifest)")
+    }
+
+    /// 宿主补充方在导出时拿到自己的 host/<name>/ 目录写入，返回的说明进清单；抛错只记失败不中断导出。
+    func testDiagnosticsHostContributorWritesIntoItsDirectory() throws {
+        let name = "contrib-\(UUID().uuidString.prefix(8))"
+        let written = Locked<Bool>(wrappedValue: false)
+        AppAgentDiagnostics.registerHostContributor(name: name) { directory in
+            let file = directory.appendingPathComponent("status.json")
+            try Data("{}".utf8).write(to: file)
+            written.mutate { value in
+                value = FileManager.default.fileExists(atPath: file.path)
+            }
+            return "宿主状态摘要"
+        }
+        AppAgentDiagnostics.registerHostContributor(name: name + "-fail") { _ in
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        let bundle = try AppAgentDiagnostics.exportSync(debugLog: AppAgentDebugLog(capacity: 1))
+        defer {
+            try? FileManager.default.removeItem(at: bundle.url)
+        }
+
+        XCTAssertTrue(written.wrappedValue)
+        XCTAssertTrue(bundle.manifest.contains("host/\(name)/ — 宿主状态摘要"), "\(bundle.manifest)")
+        XCTAssertTrue(bundle.manifest.contains { line in
+            line.hasPrefix("host/\(name)-fail/ — 宿主补充失败")
+        }, "\(bundle.manifest)")
+    }
+
+    func testRecentFileCopyKeepsNewestWithinByteLimit() throws {
+        let fm = FileManager.default
+        let source = fm.temporaryDirectory.appendingPathComponent("host-dir-\(UUID().uuidString)", isDirectory: true)
+        let dest = fm.temporaryDirectory.appendingPathComponent("host-copy-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        defer {
+            try? fm.removeItem(at: source)
+            try? fm.removeItem(at: dest)
+        }
+        let now = Date()
+        for (index, name) in ["old.json", "mid.json", "new.json"].enumerated() {
+            let url = source.appendingPathComponent(name)
+            try Data(repeating: 0x61, count: 40).write(to: url)
+            try fm.setAttributes([.modificationDate: now.addingTimeInterval(Double(index) * 10)], ofItemAtPath: url.path)
+        }
+
+        let result = AppAgentDiagnostics.copyRecentFiles(source, to: dest, maxBytes: 100)
+
+        XCTAssertEqual(result.copied, 2)
+        XCTAssertEqual(result.total, 3)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: dest.path).sorted(), ["mid.json", "new.json"])
     }
 }
 

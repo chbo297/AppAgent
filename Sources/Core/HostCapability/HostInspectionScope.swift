@@ -28,15 +28,33 @@ public enum HostInspectionScope: String, CaseIterable, Codable, Hashable, Sendab
     )
 }
 
+/// 结果给谁看。`product`：说页面名、功能和控件文字，类名只在页面没有任何说明时兜底（app_ui）；
+/// `implementation`：带上类名等实现细节，并附页面说明（app_runtime_inspect）。
+public enum HostInspectionPresentation: String, Sendable, Equatable {
+    case product
+    case implementation
+}
+
 /// Immutable per-call target boundary. Creating a context is not itself an approval;
 /// tools obtain it through HostInspectionAccess before calling a provider.
 public struct HostInspectionContext: Sendable, Equatable {
     public let scope: HostInspectionScope
     public let sceneIdentifier: String?
+    public let presentation: HostInspectionPresentation
 
-    public init(scope: HostInspectionScope = .host, sceneIdentifier: String? = nil) {
+    public init(
+        scope: HostInspectionScope = .host,
+        sceneIdentifier: String? = nil,
+        presentation: HostInspectionPresentation = .implementation
+    ) {
         self.scope = scope
         self.sceneIdentifier = sceneIdentifier
+        self.presentation = presentation
+    }
+
+    /// 同一边界，换一种呈现方式。
+    public func presenting(_ presentation: HostInspectionPresentation) -> HostInspectionContext {
+        HostInspectionContext(scope: scope, sceneIdentifier: sceneIdentifier, presentation: presentation)
     }
 }
 
@@ -278,6 +296,6 @@ final class HostInspectionAuthorization: AppAgentRuntimeOwned, @unchecked Sendab
     }
 
     private static func isApproval(_ outcome: DecisionOutcome) -> Bool {
-        outcome == .allowOnce || outcome == .allowForSession
+        outcome == .allowOnce || outcome == .allowForSession || outcome == .allowAlways
     }
 }

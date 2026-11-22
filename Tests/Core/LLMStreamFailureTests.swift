@@ -134,6 +134,24 @@ final class LLMStreamFailureTests: XCTestCase {
         XCTAssertEqual(session.turnRecord(turnID: 1)?.outcome, .answered)
     }
 
+    /// 换模型后重放给备用模型的历史要重新整理：最新请求带上下文包装，不是原始文本。
+    func testFallbackReplaysPreparedProviderViewNotRawHistory() async throws {
+        let central = ModelProviderCentral()
+        let primary = PartialFailureProvider(failures: 1)
+        let fallback = PartialFailureProvider(name: "fallback", failures: 0)
+        await central.register(name: "p", provider: primary)
+        await central.register(name: "q", provider: fallback)
+        let agent = makeAgent(central: central, policy: ModelPolicy(primary: "p/m", fallbacks: ["q/m"]))
+        let session = await agent.createSession(title: "回退视图")
+        let executor = LLMExecutor(session: session, retryPolicy: RetryPolicy(maxRetries: 0))
+        for await _ in executor.run("测试") {}
+
+        let primaryUser = try XCTUnwrap(primary.requests.first?.last { $0.role == .user })
+        let replayUser = try XCTUnwrap(fallback.requests.last?.last { $0.role == .user })
+        XCTAssertNotEqual(primaryUser.text, "测试", "首轮请求本来就带上下文包装")
+        XCTAssertEqual(replayUser.text, primaryUser.text)
+    }
+
     func testSSEErrorsPreserveProtocolDetailsAndRetryOnlyKnownTransientFailures() throws {
         let cases: [(APIProtocol, String, String?, String?, FailoverReason, Bool)] = [
             (.anthropicMessages, #"{"type":"error","error":{"type":"overloaded_error","message":"原始错误"}}"#,
@@ -256,10 +274,121 @@ final class LLMStreamFailureTests: XCTestCase {
             let event = SSEEvent(event: "", data: terminal)
             if terminal == "[DONE]" {
                 XCTAssertTrue(try OpenAIResponsesMapper.parseSSEEvent(event, activeToolCalls: &calls).isEmpty)
+            } else if terminal.contains("max_output_tokens") {
+                // 撞输出上限：半截调用丢弃，交给执行器续写。
+                let events = try OpenAIResponsesMapper.parseSSEEvent(event, activeToolCalls: &calls)
+                XCTAssertFalse(events.contains { if case .toolCall = $0 { return true }; return false })
+                XCTAssertTrue(events.contains { if case .done(.maxTokens) = $0 { return true }; return false })
             } else {
                 XCTAssertThrowsError(try OpenAIResponsesMapper.parseSSEEvent(event, activeToolCalls: &calls))
             }
             XCTAssertTrue(calls.isEmpty)
+        }
+    }
+
+    /// Anthropic 在 max_tokens 截断时仍会发 content_block_stop：半截参数先挂起，按 stop_reason 定性。
+    func testAnthropicTruncatedToolCallIsDiscardedOnlyWhenOutputLimitHit() throws {
+        for (stop, shouldThrow) in [("max_tokens", false), ("tool_use", true)] {
+            var calls: [Int: (id: String, name: String, jsonAccumulator: String)] = [:]
+            let lines: [(String, String)] = [
+                ("content_block_start", #"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"file"}}"#),
+                ("content_block_delta", #"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a"}}"#),
+                ("content_block_stop", #"{"type":"content_block_stop","index":0}"#)
+            ]
+            for (name, data) in lines {
+                XCTAssertTrue(try AnthropicMapper.parseSSEEvent(SSEEvent(event: name, data: data), activeToolCalls: &calls).isEmpty)
+            }
+            let delta = SSEEvent(event: "message_delta", data: #"{"type":"message_delta","delta":{"stop_reason":""# + stop + #""}}"#)
+            if shouldThrow {
+                XCTAssertThrowsError(try AnthropicMapper.parseSSEEvent(delta, activeToolCalls: &calls))
+            } else {
+                let events = try AnthropicMapper.parseSSEEvent(delta, activeToolCalls: &calls)
+                XCTAssertEqual(events.count, 2)
+                guard case .discardedToolCall("file") = events.first, case .done(.maxTokens) = events.last else {
+                    return XCTFail("应报被丢弃的调用名 + maxTokens，交给执行器续写")
+                }
+            }
+            XCTAssertTrue(calls.isEmpty)
+        }
+    }
+
+    /// 单次输出撞上限：保留已输出部分，插一句不展示的续写指令，最多续 3 次，正文直接接上。
+    func testOutputLimitAutoContinuesWithHiddenNoteAndJoinsText() async throws {
+        for (limitHits, expectedRequests, expectedText) in [(1, 2, "前半后半"), (9, 4, "段段段段")] {
+            let steps: [ScriptedProvider.Step] = (0..<limitHits).map { _ in
+                .events([.textDelta(limitHits == 1 ? "前半" : "段"), .done(stopReason: .maxTokens)])
+            } + [.events([.textDelta("后半"), .done(stopReason: .endTurn)])]
+            let provider = ScriptedProvider(steps: steps)
+            let central = ModelProviderCentral()
+            await central.register(name: "p", provider: provider)
+            let agent = makeAgent(central: central, policy: ModelPolicy(primary: "p/m"))
+            let session = await agent.createSession(title: "输出上限续写")
+            let executor = LLMExecutor(session: session, retryPolicy: RetryPolicy(maxRetries: 0))
+            var finalText: String?
+            for await event in executor.run("写长文") {
+                if case .completed(let finish) = event { finalText = finish.text }
+            }
+            XCTAssertEqual(provider.requests.count, expectedRequests)
+            XCTAssertEqual(finalText, expectedText)
+            let note = try XCTUnwrap(provider.requests.last?.last)
+            XCTAssertTrue(note.isAgentNote)
+            XCTAssertEqual(note.displayPolicy, .hidden)
+            XCTAssertTrue(note.text.contains("Output token limit hit"))
+            XCTAssertFalse(note.isGenuineUserInput)
+            let record = try XCTUnwrap(session.turnRecord(turnID: 1))
+            XCTAssertEqual(record.outcome, .answered)
+            XCTAssertEqual(record.notices?.count, expectedRequests == 2 ? 1 : 4, "每次续写一条提示，超限再一条")
+        }
+    }
+
+    /// 续写重复了断点前的几个字（实测 DeepSeek）：接缝只留一份；无重叠或只重叠 1 个字时原样拼接。
+    func testContinuationJoinDropsRepeatedSeam() {
+        XCTAssertEqual(AIAgentMessage.joiningContinuation("中午路上少见行人，只有", "只有知了在唱"), "中午路上少见行人，只有知了在唱")
+        XCTAssertEqual(AIAgentMessage.joiningContinuation("整条街都醉醺醺", "醉醺醺的。"), "整条街都醉醺醺的。")
+        XCTAssertEqual(AIAgentMessage.joiningContinuation("周而复始", "地转着"), "周而复始地转着")
+        XCTAssertEqual(AIAgentMessage.joiningContinuation("哈", "哈哈"), "哈哈哈")
+        XCTAssertEqual(AIAgentMessage.joiningContinuation("", "开头"), "开头")
+    }
+
+    /// 推理模型把额度全花在思考上、续写也是空的：连续两次空就停，不把 3 次续写都烧完。
+    func testOutputLimitStopsAfterTwoEmptyContinuations() async throws {
+        let provider = ScriptedProvider(steps: [
+            .events([.textDelta("前半"), .done(stopReason: .maxTokens)]),
+            .events([.reasoningDelta("想"), .done(stopReason: .maxTokens)])
+        ])
+        let central = ModelProviderCentral()
+        await central.register(name: "p", provider: provider)
+        let agent = makeAgent(central: central, policy: ModelPolicy(primary: "p/m"))
+        let session = await agent.createSession(title: "空续写")
+        let executor = LLMExecutor(session: session, retryPolicy: RetryPolicy(maxRetries: 0))
+        var finalText: String?
+        for await event in executor.run("写长文") {
+            if case .completed(let finish) = event { finalText = finish.text }
+        }
+        XCTAssertEqual(provider.requests.count, 3)
+        XCTAssertEqual(finalText, "前半")
+        XCTAssertTrue(session.turnRecord(turnID: 1)?.notices?.last?.contains("思考过程") ?? false)
+    }
+
+    /// 上下文超长报错：压缩一次再试；还超就收尾，不把同一个超长请求反复发。
+    func testContextOverflowCompactsOnceInsteadOfBlindRetry() async throws {
+        let overflow = ModelError.httpError(statusCode: 413, body: "prompt is too long")
+        for (failures, expectedRequests, answered) in [(1, 2, true), (5, 2, false)] {
+            let steps: [ScriptedProvider.Step] = Array(repeating: .fail(overflow), count: failures)
+                + [.events([.textDelta("好"), .done(stopReason: .endTurn)])]
+            let provider = ScriptedProvider(steps: steps)
+            let central = ModelProviderCentral()
+            await central.register(name: "p", provider: provider)
+            let agent = makeAgent(central: central, policy: ModelPolicy(primary: "p/m"))
+            let session = await agent.createSession(title: "超长压缩")
+            let executor = LLMExecutor(
+                session: session, retryPolicy: RetryPolicy(maxRetries: 3, baseDelay: 0, jitterFactor: 0)
+            )
+            for await _ in executor.run("测试") {}
+            XCTAssertEqual(provider.requests.count, expectedRequests)
+            let record = try XCTUnwrap(session.turnRecord(turnID: 1))
+            XCTAssertEqual(record.outcome == .answered, answered)
+            XCTAssertEqual(record.notices?.count, 1)
         }
     }
 
@@ -273,6 +402,49 @@ final class LLMStreamFailureTests: XCTestCase {
             memoryStorage: InMemoryMemoryStorage(),
             sessionStorage: InMemorySessionStorage()
         )
+    }
+}
+
+private final class ScriptedProvider: ModelProvider, @unchecked Sendable {
+    enum Step {
+        case events([ProviderStreamEvent])
+        case fail(Error)
+    }
+
+    let name = "scripted"
+    let baseURL = ""
+    let apiKey = ""
+    let apiProtocol: APIProtocol = .anthropicMessages
+    let customHeaders: [String: String] = [:]
+    let models = [ModelSpec(id: "m", contextWindow: 10_000)]
+    let requestTimeout: TimeInterval = 5
+    let steps: [Step]
+    @Locked private(set) var requests: [[AIAgentMessage]] = []
+
+    init(steps: [Step]) {
+        self.steps = steps
+    }
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        let index = $requests.mutate { requests in
+            requests.append(messages)
+            return requests.count - 1
+        }
+        let step = steps[min(index, steps.count - 1)]
+        return AsyncThrowingStream { continuation in
+            switch step {
+            case .events(let events):
+                events.forEach { continuation.yield($0) }
+                continuation.finish()
+            case .fail(let error):
+                continuation.finish(throwing: error)
+            }
+        }
     }
 }
 

@@ -171,13 +171,23 @@ public struct AppAgentInputBarFramePanEndContext {
 /// inputBar 对外事件代理：文本发送、输入源变化、语音手势、展开收起 frame 意图都通过这里通知宿主。
 @MainActor
 public protocol AppAgentInputBarDelegate: AnyObject {
+    /// 点发送 / 键盘发送键。带附件时 `text` 可以为空，附件从 `bar.attachments` 读。
     func inputBar(_ bar: AppAgentInputBar, didSendText text: String)
     func inputBarDidTapVoice(_ bar: AppAgentInputBar)
+    /// 点了加号。inputBar 自己负责展开 / 收起加号面板，这里只是通知。
     func inputBarDidTapPlus(_ bar: AppAgentInputBar)
+    /// 在加号面板里点了一项能力（图片 / 文件）。面板已收起，宿主负责弹出对应的系统选择器，
+    /// 选完用 `addAttachments(_:)` 放回输入栏。
+    func inputBar(_ bar: AppAgentInputBar, didSelectAttachmentSource source: AppAgentInputBarAttachmentSource)
+    /// 用户在发送前移除了附件（点 ×、或再选一个文件把旧的替换掉）。发送后的清空不走这里。
+    /// 宿主据此删掉已经拷进工作区的文件。
+    func inputBar(_ bar: AppAgentInputBar, didDiscardAttachments attachments: [AIAgentMessage.Attachment])
     /// loop 运行中且输入框为空时，右侧圆形按钮变为停止按钮，点击走这里。
     func inputBarDidTapStop(_ bar: AppAgentInputBar)
     func inputBar(_ bar: AppAgentInputBar, didChangeInputSource source: AppAgentInputBarInputSource)
     func inputBar(_ bar: AppAgentInputBar, didChangeTextInputFocus isFocused: Bool)
+    /// 草稿行数、输入源或动作槽变化使展开态应有高度（`expandedHeight(forWidth:)`）变了，宿主据此重排 frame。
+    func inputBarDidChangeExpandedHeight(_ bar: AppAgentInputBar)
     func inputBar(_ bar: AppAgentInputBar, didReceiveVoiceInputGesture event: AppAgentInputBarVoiceGestureEvent)
     func inputBarDidRequestExpand(_ bar: AppAgentInputBar)
     func inputBarDidRequestCollapse(_ bar: AppAgentInputBar)
@@ -197,9 +207,12 @@ public extension AppAgentInputBarDelegate {
     func inputBar(_ bar: AppAgentInputBar, didSendText text: String) {}
     func inputBarDidTapVoice(_ bar: AppAgentInputBar) {}
     func inputBarDidTapPlus(_ bar: AppAgentInputBar) {}
+    func inputBar(_ bar: AppAgentInputBar, didSelectAttachmentSource source: AppAgentInputBarAttachmentSource) {}
+    func inputBar(_ bar: AppAgentInputBar, didDiscardAttachments attachments: [AIAgentMessage.Attachment]) {}
     func inputBarDidTapStop(_ bar: AppAgentInputBar) {}
     func inputBar(_ bar: AppAgentInputBar, didChangeInputSource source: AppAgentInputBarInputSource) {}
     func inputBar(_ bar: AppAgentInputBar, didChangeTextInputFocus isFocused: Bool) {}
+    func inputBarDidChangeExpandedHeight(_ bar: AppAgentInputBar) {}
     func inputBar(_ bar: AppAgentInputBar, didReceiveVoiceInputGesture event: AppAgentInputBarVoiceGestureEvent) {}
     func inputBarDidRequestExpand(_ bar: AppAgentInputBar) {}
     func inputBarDidRequestCollapse(_ bar: AppAgentInputBar) {}
@@ -217,6 +230,9 @@ public extension AppAgentInputBarDelegate {
 // MARK: - AppAgentInputBar
 
 /// 胶囊输入栏视图：内部负责按钮、输入区、语音输入区布局和手势识别，外部宿主负责最终 frame 约束与落位。
+///
+/// 草稿较长时输入区按行长高，最多 `AppAgentTextView.maximumVisibleLineCount` 行，超过后框内滚动；
+/// 两侧按钮贴底跟着最后一行。展开态应有高度由 `expandedHeight(forWidth:)` 给出，变化时通知宿主重排。
 public final class AppAgentInputBar: UIView {
 
     // MARK: - Layout Constants
@@ -248,13 +264,29 @@ public final class AppAgentInputBar: UIView {
     private static let collapsedPlusVisibleWidth: CGFloat =
         AppAgentInputBarMetrics.innerPadding * 3 + AppAgentInputBarMetrics.buttonSize * 2
 
+    /// 输入区（文字区 / 语音「按住说话」区）与 bar 上下边缘的间距，与两侧按钮一致：(56 - 40) / 2 = 8。
+    private static let inputAreaVerticalPadding: CGFloat =
+        (AppAgentInputBarMetrics.barHeight - AppAgentInputBarMetrics.buttonSize) / 2
+
+    /// 输入区最小高度，与按钮等高；文字超出后输入区随文字长高，上下间距仍是 8。
+    private static let inputAreaMinimumHeight: CGFloat = AppAgentInputBarMetrics.buttonSize
+
+    /// 一次最多带几张图、几个文件。
+    public static let maximumImageAttachmentCount = 4
+    public static let maximumFileAttachmentCount = 1
+
+    /// 附件条占的顶部区域：上留 4pt，下面直接接输入区原有的 8pt 上边距；高度含叉的外伸。
+    private static let attachmentStripTopPadding: CGFloat = 4
+    private static var attachmentRegionHeight: CGFloat {
+        attachmentStripTopPadding + AppAgentAttachmentThumbnailView.removableSize.height
+    }
+
     private static let panDirectionThreshold: CGFloat = 6
     private static let collapsedHoldPositionThreshold: CGFloat = 4
     private static let collapsedHoldDuration: TimeInterval = 0.3
     private static let collapsedHoldSlowVelocityThreshold: CGFloat = 50
     private static let resizeToCollapsedMoveHoldDuration: TimeInterval = 0.1
 
-    private let inputAreaHeight: CGFloat = 36
 
     // MARK: - State
 
@@ -282,6 +314,9 @@ public final class AppAgentInputBar: UIView {
     }
 
     private var lastLaidOutSize: CGSize = .zero
+    /// 上一次布局时文字区排版用的文字高度；草稿变长但 bar 尺寸不变（如一两行在 40pt 输入区内换行）时，
+    /// 用它判断文字区 frame 是否需要重排，不能只按 size 短路。
+    private var lastLaidOutTextHeight: CGFloat = 0
     private var inputBarPanStartRegion: InputBarPanStartRegion = .bar
     private var inputBarPanMode: InputBarPanMode = .undecided
     private var inputBarPanStartedCollapsed = false
@@ -300,6 +335,10 @@ public final class AppAgentInputBar: UIView {
     private var voiceInputCommittedSincePrewarm = false
     private var frameAnimator: UIViewPropertyAnimator?
 
+    /// 最近一次测量的文字区宽度与对应的文字高度；草稿变化时作废。
+    /// 宿主每次布局都会问一遍展开高度，缓存让文字排版测量只在宽度或草稿真正变化时发生。
+    private var textHeightCache: (width: CGFloat, height: CGFloat)?
+
     // MARK: - Delegate
 
     public weak var delegate: AppAgentInputBarDelegate?
@@ -308,7 +347,7 @@ public final class AppAgentInputBar: UIView {
 
     public let menuButton = AppAgentMenuButton()
     public let inputAreaContainer = UIView()
-    public let textField = AppAgentTextField()
+    public let textView = AppAgentTextView()
     public let voiceInputHoldButton = UIButton(type: .custom)
     public let inputSourceButton = UIButton(type: .system)
     public let plusButton = UIButton(type: .system)
@@ -322,6 +361,18 @@ public final class AppAgentInputBar: UIView {
     /// 等于把背景绘制权让给系统、再补一层 background configuration 还原外观，收益是负的。
     /// 图标既然不属于按钮自身的渲染内容，highlight 就与它无关：不变暗，也不依赖废弃 API。
     private let trailingActionIcon = UIImageView()
+    /// 选好的图片 / 文件，排在输入栏最上面一行。
+    let attachmentStrip = AppAgentAttachmentStripView()
+    /// 加号面板，第一次展开时才创建；展开时挂在 `textView.inputView` 上顶替键盘。
+    private var attachmentPanel: AppAgentAttachmentPanelView?
+
+    /// 面板展开时点输入框切回键盘（同微信）：已是第一响应者时点文字区不会再走 begin editing。
+    private lazy var attachmentPanelDismissTap: UITapGestureRecognizer = {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleAttachmentPanelDismissTap))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        return tap
+    }()
 
     private lazy var inputBarPan: UIPanGestureRecognizer = {
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handleInputBarPan(_:)))
@@ -361,10 +412,12 @@ public final class AppAgentInputBar: UIView {
     // MARK: - Public API
 
     public var text: String {
-        get { textField.text ?? "" }
+        get {
+            textView.text
+        }
         set {
-            textField.text = newValue
-            updateTrailingAction()
+            textView.text = newValue
+            draftDidChange()
         }
     }
 
@@ -374,15 +427,33 @@ public final class AppAgentInputBar: UIView {
     /// inputBar 自己不猜，只据此决定右侧槽显示加号还是停止。
     public private(set) var isRunActive = false
 
-    /// 右侧动作槽当前形态：草稿优先，其次运行中，否则加号。
+    /// 右侧动作槽当前形态：草稿（文字或附件）优先，其次运行中，否则加号。
     public var trailingAction: AppAgentInputBarTrailingAction {
-        if hasDraftText { return .send }
+        if hasDraftText || !attachments.isEmpty {
+            return .send
+        }
         return isRunActive ? .stop : .plus
+    }
+
+    /// 待发送的图片 / 文件，按选择顺序。发送后由宿主 `removeAllAttachments()` 清空。
+    public private(set) var attachments: [AIAgentMessage.Attachment] = []
+
+    /// 还能再选几张图。
+    public var remainingImageAttachmentSlots: Int {
+        let imageCount = attachments.filter { attachment in
+            attachment.kind == .image
+        }.count
+        return max(0, Self.maximumImageAttachmentCount - imageCount)
+    }
+
+    /// 加号面板当前是否顶替键盘显示着。
+    public var isShowingAttachmentPanel: Bool {
+        attachmentPanel != nil && textView.inputView === attachmentPanel
     }
 
     /// 输入框里是否有可发送的内容（纯空白不算）。
     private var hasDraftText: Bool {
-        !(textField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !textView.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     public func setRunActive(_ active: Bool) {
@@ -396,12 +467,113 @@ public final class AppAgentInputBar: UIView {
     }
 
     public func clearText() {
-        textField.text = ""
+        textView.text = ""
+        draftDidChange()
+    }
+
+    /// 放进待发送附件。图片超过 `maximumImageAttachmentCount` 的部分丢弃；
+    /// 文件一次只带一个，再选一个就替换掉旧的。
+    public func addAttachments(_ incoming: [AIAgentMessage.Attachment]) {
+        var result = attachments
+        for attachment in incoming {
+            switch attachment.kind {
+            case .image:
+                let imageCount = result.filter { item in
+                    item.kind == .image
+                }.count
+                guard imageCount < Self.maximumImageAttachmentCount else {
+                    continue
+                }
+                result.append(attachment)
+            case .file:
+                result.removeAll { item in
+                    item.kind == .file
+                }
+                result.append(attachment)
+            }
+        }
+        discardAttachments(replacedBy: result)
+        setAttachments(result)
+    }
+
+    /// 用户移除一个待发送附件；文件附件会通过代理通知宿主删掉暂存文件。
+    public func removeAttachment(id: String) {
+        let remaining = attachments.filter { item in
+            item.id != id
+        }
+        discardAttachments(replacedBy: remaining)
+        setAttachments(remaining)
+    }
+
+    /// 发送后清空。附件已经随消息发出，暂存文件要留着给后续轮次读，所以不通知丢弃。
+    public func removeAllAttachments() {
+        setAttachments([])
+    }
+
+    private func discardAttachments(replacedBy remaining: [AIAgentMessage.Attachment]) {
+        let keptIDs = Set(remaining.map(\.id))
+        let dropped = attachments.filter { item in
+            !keptIDs.contains(item.id)
+        }
+        guard !dropped.isEmpty else {
+            return
+        }
+        delegate?.inputBar(self, didDiscardAttachments: dropped)
+    }
+
+    private func setAttachments(_ value: [AIAgentMessage.Attachment]) {
+        guard value.map(\.id) != attachments.map(\.id) else {
+            return
+        }
+        attachments = value
+        attachmentStrip.showsAddButton = remainingImageAttachmentSlots > 0
+        attachmentStrip.setAttachments(value)
         updateTrailingAction()
+        // 附件条出现 / 消失时 bar 高度变了，先按当前尺寸摆一遍，再让宿主按新高度重排整条 bar。
+        if bounds.width > 0, bounds.height > 0 {
+            layoutContent(for: bounds.size)
+        }
+        notifyExpandedHeightChangeIfNeeded()
+    }
+
+    /// 展开态在给定宽度下应有的高度：文字放得进与按钮等高的输入区时是 `barHeight`；
+    /// 放不下时 = 文字高度 + 上下各 8，最多到最大可见行数。语音模式或输入区被压没时恒为单行。
+    /// 有附件时在最上面再加一行缩略图（单行草稿也因此长高）。
+    public func expandedHeight(forWidth width: CGFloat) -> CGFloat {
+        let barHeight = AppAgentInputBarMetrics.barHeight
+        let areaWidth = inputAreaWidth(forBarWidth: width)
+        guard areaWidth > 0 else {
+            return barHeight
+        }
+        let attachmentHeight = attachments.isEmpty ? 0 : Self.attachmentRegionHeight
+        guard inputSource == .keyboard else {
+            return barHeight + attachmentHeight
+        }
+        let textHeight = textHeight(forWidth: areaWidth)
+        return max(barHeight, textHeight + Self.inputAreaVerticalPadding * 2) + attachmentHeight
+    }
+
+    /// 当前 bar 高度下附件条实际占的高度。resize 收窄时高度会线性回落到单行，附件区跟着让出，
+    /// 输入区永远保有至少一行。
+    private func attachmentRegionHeight(forBarHeight height: CGFloat) -> CGFloat {
+        guard !attachments.isEmpty else {
+            return 0
+        }
+        return min(Self.attachmentRegionHeight, max(0, height - AppAgentInputBarMetrics.barHeight))
+    }
+
+    /// 文字在给定宽度下排版所需的高度：至少一行，最多到最大可见行数（之后框内滚动）。
+    private func textHeight(forWidth width: CGFloat) -> CGFloat {
+        if let cache = textHeightCache, abs(cache.width - width) < 0.5 {
+            return cache.height
+        }
+        let height = min(textView.fittingHeight(forWidth: width), textView.maximumHeight)
+        textHeightCache = (width, height)
+        return height
     }
 
     public func setInputEnabled(_ enabled: Bool) {
-        textField.isEnabled = enabled
+        textView.isEditable = enabled
         menuButton.isEnabled = enabled
         inputSourceButton.isEnabled = enabled
         voiceInputHoldButton.isEnabled = enabled
@@ -496,11 +668,23 @@ public final class AppAgentInputBar: UIView {
         layer.shadowOffset = CGSize(width: 0, height: -2)
         layer.borderWidth = 1
 
-        plusButton.setImage(
-            Self.systemSymbolImage(primary: "plus.circle", fallbacks: ["plus"]),
-            for: .normal
-        )
+        updatePlusButtonIcon()
+        #if targetEnvironment(macCatalyst)
+        // Mac 上没有软键盘，`inputView` 顶替键盘这条路不成立，加号直接弹系统菜单。
+        plusButton.menu = makeAttachmentMenu()
+        plusButton.showsMenuAsPrimaryAction = true
+        #else
         plusButton.addTarget(self, action: #selector(plusTapped), for: .touchUpInside)
+        #endif
+
+        attachmentStrip.onRemove = { [weak self] id in
+            self?.removeAttachment(id: id)
+        }
+        // 缩略图右边的加号：直接再选图，不再绕回面板。
+        attachmentStrip.onAdd = { [weak self] in
+            self?.selectAttachmentSource(.photoLibrary)
+        }
+        attachmentStrip.isHidden = true
 
         // 发送 / 停止共用这一个实心圆按钮：圆比加号里的圆再大一圈（半径 +4pt），居中在加号那一格里，
         // 点按范围靠 BOUIKit 外扩回整格 40pt（约定：命中区用 bo_，不手写 hitTest）。
@@ -523,19 +707,17 @@ public final class AppAgentInputBar: UIView {
 
         inputAreaContainer.clipsToBounds = true
 
-        textField.placeholder = Self.inactiveTextInputPlaceholder
-        textField.font = .systemFont(ofSize: 15)
-        textField.returnKeyType = .send
-        textField.borderStyle = .none
-        textField.delegate = self
-        // 草稿有无决定右侧槽形态；`.editingChanged` 只覆盖用户输入，程序化改文本走 `text` / `clearText`。
-        textField.addTarget(self, action: #selector(textFieldEditingChanged), for: .editingChanged)
+        textView.font = .systemFont(ofSize: 15)
+        textView.returnKeyType = .send
+        // 草稿变化走 `textViewDidChange`（用户输入）与 `text` / `clearText`（程序化）两条路。
+        textView.delegate = self
+        textView.addGestureRecognizer(attachmentPanelDismissTap)
 
         voiceInputHoldButton.setTitle("按住说话", for: .normal)
         voiceInputHoldButton.titleLabel?.font = .boldSystemFont(ofSize: 16)
         voiceInputHoldButton.titleLabel?.textAlignment = .center
         voiceInputHoldButton.contentHorizontalAlignment = .center
-        voiceInputHoldButton.layer.cornerRadius = inputAreaHeight / 2
+        voiceInputHoldButton.layer.cornerRadius = Self.inputAreaMinimumHeight / 2
         voiceInputHoldButton.layer.masksToBounds = true
         voiceInputHoldButton.accessibilityLabel = "按住说话"
         voiceInputHoldButton.addGestureRecognizer(voiceModePressGesture)
@@ -545,10 +727,11 @@ public final class AppAgentInputBar: UIView {
         addSubview(plusButton)
         addSubview(inputSourceButton)
         addSubview(inputAreaContainer)
-        inputAreaContainer.addSubview(textField)
+        inputAreaContainer.addSubview(textView)
         inputAreaContainer.addSubview(voiceInputHoldButton)
         addSubview(menuButton)
         addSubview(trailingActionButton)
+        addSubview(attachmentStrip)
         addGestureRecognizer(inputBarPan)
         // 键盘模式长按需要同时覆盖输入区域和输入源按钮，因此由 inputBar 统一接收，再由代理过滤起点。
         addGestureRecognizer(keyboardModeLongPressGesture)
@@ -571,9 +754,9 @@ public final class AppAgentInputBar: UIView {
         layer.shadowColor = AppAgentAppearance.inputBarShadow.resolvedColor(with: traitCollection).cgColor
         layer.shadowOpacity = AppAgentAppearance.inputBarShadowOpacity(for: traitCollection)
 
-        textField.textColor = AppAgentAppearance.primaryText
-        textField.tintColor = AppAgentAppearance.accent
-        updateTextFieldPlaceholder()
+        textView.textColor = AppAgentAppearance.primaryText
+        textView.tintColor = AppAgentAppearance.accent
+        updatePlaceholder()
         plusButton.tintColor = AppAgentAppearance.icon
         inputSourceButton.tintColor = AppAgentAppearance.icon
         trailingActionButton.backgroundColor = AppAgentAppearance.actionButtonBackground
@@ -607,14 +790,19 @@ public final class AppAgentInputBar: UIView {
         guard let hit = super.hitTest(point, with: event) else { return nil }
         // 只接管「打在 bar 白色背景上」的触点，menuButton / plusButton / inputSourceButton
         // 等控件的命中一律原样返回。
-        guard hit === self, isUserInteractionEnabled else { return hit }
+        // 输入区自身（文字区上下的留白）同样转交，点留白也能弹键盘。
+        guard hit === self || hit === inputAreaContainer, isUserInteractionEnabled else {
+            return hit
+        }
 
         let extended = extendedInputAreaHitRect
         guard !extended.isNull, extended.contains(point) else { return hit }
 
-        // 触点在输入区上下的空白里，先把 y 夹进输入区自身 bounds 再做一次命中。
+        // 触点在输入区上下的空白里，先把 y 夹进可交互控件的范围再做一次命中：
+        // 键盘模式夹进文字区，语音模式夹进输入区（「按住说话」占满底部那一行）。
+        let target = inputSource == .keyboard ? textView.frame : inputAreaContainer.bounds
         var local = convert(point, to: inputAreaContainer)
-        local.y = min(max(0, local.y), max(0, inputAreaContainer.bounds.height - 0.5))
+        local.y = min(max(target.minY, local.y), max(target.minY, target.maxY - 0.5))
         return inputAreaContainer.hitTest(local, with: event) ?? hit
     }
 
@@ -623,12 +811,29 @@ public final class AppAgentInputBar: UIView {
 
         let size = bounds.size
         guard size.width > 0, size.height > 0 else { return }
-        guard size != lastLaidOutSize else { return }
+        let textHeight = textHeight(forWidth: inputAreaWidth(forBarWidth: size.width))
+        guard size != lastLaidOutSize || abs(textHeight - lastLaidOutTextHeight) > 0.5 else {
+            return
+        }
         lastLaidOutSize = size
+        lastLaidOutTextHeight = textHeight
 
         layoutContent(for: size)
         updateCapsuleCornerRadius(for: size)
         updateControlInteractionState()
+    }
+
+    /// 输入区在给定 bar 宽度下的宽度：两侧按钮之外的剩余；语音按钮让位（有草稿）时向右扩到动作槽前。
+    /// bar 窄到放不下输入区时为 0。布局与展开高度测量共用这一份，保证测量宽度就是实际排版宽度。
+    private func inputAreaWidth(forBarWidth barWidth: CGFloat) -> CGFloat {
+        let width = max(barWidth, AppAgentInputBarMetrics.collapsedMinWidth)
+        guard width >= Self.normalZeroInputAreaWidth else {
+            return 0
+        }
+        let sourceSlotWidth = inputSourceButton.isHidden
+            ? AppAgentInputBarMetrics.buttonSize + AppAgentInputBarMetrics.innerPadding
+            : 0
+        return width - Self.normalZeroInputAreaWidth + sourceSlotWidth
     }
 
     private func layoutContent(for size: CGSize) {
@@ -636,57 +841,70 @@ public final class AppAgentInputBar: UIView {
         let barHeight = AppAgentInputBarMetrics.barHeight
         let innerPadding = AppAgentInputBarMetrics.innerPadding
         let buttonSize = AppAgentInputBarMetrics.buttonSize
-        let contentY = size.height >= barHeight ? (size.height - barHeight) / 2 : 0
-        let buttonY = contentY + (barHeight - buttonSize) / 2
-        let inputAreaY = contentY + (barHeight - inputAreaHeight) / 2
+        let minimumAreaHeight = Self.inputAreaMinimumHeight
+        // 多行时 bar 向上长高：按钮留在底部那一排，与最后一行文字对齐；输入区上下与 bar 始终相距 8。
+        let bottomRowY = max(0, size.height - barHeight)
+        let buttonY = bottomRowY + (barHeight - buttonSize) / 2
+        // 附件条在最上面一行，输入区与按钮排在它下面的剩余高度里。
+        let attachmentHeight = attachmentRegionHeight(forBarHeight: size.height)
+        let contentHeight = size.height - attachmentHeight
+        let inputAreaHeight = max(minimumAreaHeight, contentHeight - Self.inputAreaVerticalPadding * 2)
 
         let menuX = innerPadding
         let inputAreaX: CGFloat
-        let inputAreaWidth: CGFloat
+        let inputAreaWidth = inputAreaWidth(forBarWidth: width)
         let inputSourceX: CGFloat
         let plusX: CGFloat
 
         if width >= Self.normalZeroInputAreaWidth {
             inputAreaX = menuX + buttonSize + innerPadding
-            inputAreaWidth = width - Self.normalZeroInputAreaWidth
             plusX = width - innerPadding - buttonSize
             inputSourceX = plusX - innerPadding - buttonSize
         } else if width >= Self.compressedTextGapWidth {
             let compressedMenuTextGap = width - Self.compressedTextGapWidth
             inputAreaX = menuX + buttonSize + compressedMenuTextGap
-            inputAreaWidth = 0
             inputSourceX = inputAreaX + innerPadding
             plusX = inputSourceX + buttonSize + innerPadding
         } else if width >= Self.collapsedPlusVisibleWidth {
             inputAreaX = menuX + buttonSize
-            inputAreaWidth = 0
             inputSourceX = width - buttonSize * 2 - innerPadding * 2
             plusX = width - buttonSize - innerPadding
         } else {
             inputAreaX = menuX + buttonSize
-            inputAreaWidth = 0
             inputSourceX = menuX
             plusX = width - buttonSize - innerPadding
         }
 
         inputAreaContainer.frame = CGRect(
             x: inputAreaX,
-            y: inputAreaY,
-            width: max(0, inputAreaWidth),
+            y: attachmentHeight + (contentHeight - inputAreaHeight) / 2,
+            width: inputAreaWidth,
             height: inputAreaHeight
         )
-        textField.frame = CGRect(
+        attachmentStrip.isHidden = attachmentHeight < 1
+        // 附件条横跨整条 bar：左边与最左侧的圆形按钮对齐，右边留同样的内边距，不必让出按钮那一列。
+        attachmentStrip.frame = CGRect(
+            x: menuX,
+            y: Self.attachmentStripTopPadding,
+            width: max(0, width - innerPadding - menuX),
+            height: AppAgentAttachmentThumbnailView.removableSize.height
+        )
+        // 文字区贴合文字本身的高度并在输入区里垂直居中；文字区外的空白不属于文字区，
+        // 滚动时不会从边上露出半行。
+        let textHeight = min(textHeight(forWidth: inputAreaWidth), inputAreaHeight)
+        textView.frame = CGRect(
             x: 0,
-            y: 0,
-            width: max(inputAreaWidth, AppAgentInputBarMetrics.minimumInputAreaWidth),
-            height: inputAreaHeight
+            y: (inputAreaHeight - textHeight) / 2,
+            width: inputAreaWidth,
+            height: textHeight
         )
         voiceInputHoldButton.frame = CGRect(
             x: 0,
-            y: 0,
-            width: max(inputAreaWidth, AppAgentInputBarMetrics.minimumInputAreaWidth),
-            height: inputAreaHeight
+            y: inputAreaHeight - minimumAreaHeight,
+            width: inputAreaWidth,
+            height: minimumAreaHeight
         )
+        alignTextViewContentAfterResize()
 
         plusButton.frame = CGRect(x: plusX, y: buttonY, width: buttonSize, height: buttonSize)
         inputSourceButton.frame = CGRect(x: inputSourceX, y: buttonY, width: buttonSize, height: buttonSize)
@@ -699,6 +917,7 @@ public final class AppAgentInputBar: UIView {
             0,
             1
         )
+        attachmentStrip.alpha = inputAreaContainer.alpha
         inputSourceButton.alpha = AppAgentGeometry.clamp(
             (width - Self.collapsedPlusVisibleWidth)
                 / (Self.compressedTextGapWidth - Self.collapsedPlusVisibleWidth),
@@ -713,6 +932,17 @@ public final class AppAgentInputBar: UIView {
         )
         // 发送 / 停止占的就是加号那一格，几何与淡出进度跟着它走。
         applyTrailingActionGeometry()
+    }
+
+    /// 输入框尺寸变了之后校正滚动位置：放得下全部文字就回到顶部（避免长高后首行被滚出去），
+    /// 放不下且正在编辑就把光标滚进可见区。
+    private func alignTextViewContentAfterResize() {
+        textView.layoutIfNeeded()
+        if !textView.isContentScrollable {
+            textView.contentOffset = .zero
+        } else if textView.isFirstResponder {
+            textView.scrollRangeToVisible(textView.selectedRange)
+        }
     }
 
     /// 右侧动作槽与加号共用同一格和同一条淡出进度：布局改了和形态改了都要同步一次。
@@ -749,7 +979,7 @@ public final class AppAgentInputBar: UIView {
     /// 根据收起状态、输入源和控件启用状态更新交互；不依赖 alpha 等视觉表现参数。
     private func updateControlInteractionState() {
         let allowsExpandedControls = !isCollapsed
-        textField.isUserInteractionEnabled = textField.isEnabled
+        textView.isUserInteractionEnabled = textView.isEditable
             && allowsExpandedControls
             && inputSource == .keyboard
         voiceInputHoldButton.isUserInteractionEnabled = voiceInputHoldButton.isEnabled
@@ -772,7 +1002,14 @@ public final class AppAgentInputBar: UIView {
         let showsPlus = action == .plus
         plusButton.isHidden = !showsPlus
         trailingActionButton.isHidden = showsPlus
-        inputSourceButton.isHidden = action == .send
+        let hidesInputSource = action == .send
+        if inputSourceButton.isHidden != hidesInputSource {
+            inputSourceButton.isHidden = hidesInputSource
+            // 语音按钮让出的那一格归输入区：只在显隐切换时重排一次，不随每次按键布局。
+            if bounds.width > 0, bounds.height > 0 {
+                layoutContent(for: bounds.size)
+            }
+        }
 
         switch action {
         case .plus:
@@ -797,7 +1034,7 @@ public final class AppAgentInputBar: UIView {
         guard inputSource != source else {
             updateInputSourceAppearance(animated: animated, notifyDelegate: false)
             if focusKeyboard, source == .keyboard {
-                textField.becomeFirstResponder()
+                textView.becomeFirstResponder()
             }
             return
         }
@@ -808,11 +1045,13 @@ public final class AppAgentInputBar: UIView {
 
         inputSource = source
         if source == .voice {
-            textField.resignFirstResponder()
+            textView.resignFirstResponder()
         }
         updateInputSourceAppearance(animated: animated, notifyDelegate: true)
+        // 语音模式恒为单行，切回键盘再按草稿行数长高。
+        notifyExpandedHeightChangeIfNeeded()
         if focusKeyboard, source == .keyboard {
-            textField.becomeFirstResponder()
+            textView.becomeFirstResponder()
         }
     }
 
@@ -831,12 +1070,12 @@ public final class AppAgentInputBar: UIView {
         inputSourceButton.setImage(sourceIcon, for: .normal)
         inputSourceButton.accessibilityLabel = keyboardMode ? "切换到语音输入" : "切换到键盘输入"
 
-        textField.isHidden = !keyboardMode
-        textField.alpha = 1
+        textView.isHidden = !keyboardMode
+        textView.alpha = 1
         voiceInputHoldButton.isHidden = keyboardMode
         voiceInputHoldButton.alpha = 1
         inputAreaContainer.bringSubviewToFront(voiceInputHoldButton)
-        updateTextFieldPlaceholder()
+        updatePlaceholder()
         updateControlInteractionState()
 
         if notifyDelegate {
@@ -844,14 +1083,38 @@ public final class AppAgentInputBar: UIView {
         }
     }
 
-    private func updateTextFieldPlaceholder() {
-        let text = textField.isFirstResponder
+    private func updatePlaceholder() {
+        let text = textView.isFirstResponder
             ? Self.activeTextInputPlaceholder
             : Self.inactiveTextInputPlaceholder
-        textField.attributedPlaceholder = NSAttributedString(
+        textView.placeholder = NSAttributedString(
             string: text,
-            attributes: [.foregroundColor: AppAgentAppearance.placeholderText]
+            attributes: [
+                .foregroundColor: AppAgentAppearance.placeholderText,
+                .font: textView.font ?? .systemFont(ofSize: 15)
+            ]
         )
+    }
+
+    /// 草稿变了（用户输入或程序化赋值）：刷新右侧槽，并重排文字区；行数变化时再通知宿主重排高度。
+    private func draftDidChange() {
+        textHeightCache = nil
+        updateTrailingAction()
+        // 文字在 40pt 输入区内换行时 bar 高度不变，但文字区 frame 要跟着内容长高，不能等宿主改尺寸。
+        setNeedsLayout()
+        layoutIfNeeded()
+        notifyExpandedHeightChangeIfNeeded()
+    }
+
+    /// 当前宽度下的展开高度与实际高度不一致才通知宿主；收起态与胶囊等高，不参与。
+    private func notifyExpandedHeightChangeIfNeeded() {
+        guard !isCollapsed, bounds.width > 0 else {
+            return
+        }
+        guard abs(expandedHeight(forWidth: bounds.width) - bounds.height) > 0.5 else {
+            return
+        }
+        delegate?.inputBarDidChangeExpandedHeight(self)
     }
 
     private func setVoiceInputHolding(_ holding: Bool) {
@@ -881,25 +1144,109 @@ public final class AppAgentInputBar: UIView {
     }
 
     @objc private func plusTapped() {
+        toggleAttachmentPanel()
         delegate?.inputBarDidTapPlus(self)
+    }
+
+    // MARK: - Attachment panel
+
+    /// 加号：面板没展开就展开（顶替键盘），图标随之变成叉；点叉收起面板，键盘也不弹。
+    public func toggleAttachmentPanel() {
+        if isShowingAttachmentPanel {
+            hideAttachmentPanel(showKeyboard: false)
+            textView.resignFirstResponder()
+        } else {
+            showAttachmentPanel()
+        }
+    }
+
+    /// 加号 / 叉两种形态只看面板是否展开；`inputView` 每次变化后都要同步一次。
+    private func updatePlusButtonIcon() {
+        let showsClose = isShowingAttachmentPanel
+        plusButton.setImage(
+            showsClose
+                ? Self.systemSymbolImage(primary: "xmark.circle", fallbacks: ["xmark"])
+                : Self.systemSymbolImage(primary: "plus.circle", fallbacks: ["plus"]),
+            for: .normal
+        )
+        plusButton.accessibilityLabel = showsClose ? "收起" : "更多"
+    }
+
+    public func showAttachmentPanel() {
+        guard textView.isEditable else {
+            return
+        }
+        if inputSource == .voice {
+            setInputSource(.keyboard, animated: true, focusKeyboard: false)
+        }
+        let panel = attachmentPanel ?? makeAttachmentPanel()
+        attachmentPanel = panel
+        textView.inputView = panel
+        updatePlusButtonIcon()
+        if textView.isFirstResponder {
+            textView.reloadInputViews()
+        } else {
+            textView.becomeFirstResponder()
+        }
+    }
+
+    /// 收起面板。`showKeyboard` 为真且输入框仍在编辑时换回系统键盘，否则只是摘掉面板。
+    public func hideAttachmentPanel(showKeyboard: Bool) {
+        guard textView.inputView != nil else {
+            return
+        }
+        textView.inputView = nil
+        updatePlusButtonIcon()
+        if showKeyboard, textView.isFirstResponder {
+            textView.reloadInputViews()
+        }
+    }
+
+    private func makeAttachmentPanel() -> AppAgentAttachmentPanelView {
+        let panel = AppAgentAttachmentPanelView(sources: AppAgentInputBarAttachmentSource.allCases)
+        panel.onSelect = { [weak self] source in
+            self?.selectAttachmentSource(source)
+        }
+        return panel
+    }
+
+    private func makeAttachmentMenu() -> UIMenu {
+        let actions = AppAgentInputBarAttachmentSource.allCases.map { source in
+            UIAction(title: source.title, image: UIImage(systemName: source.symbolName)) { [weak self] _ in
+                self?.selectAttachmentSource(source)
+            }
+        }
+        return UIMenu(children: actions)
+    }
+
+    /// 选了面板里的一项：先收起面板和输入焦点，系统选择器才能干净地盖上来。
+    private func selectAttachmentSource(_ source: AppAgentInputBarAttachmentSource) {
+        hideAttachmentPanel(showKeyboard: false)
+        textView.resignFirstResponder()
+        delegate?.inputBar(self, didSelectAttachmentSource: source)
+    }
+
+    @objc private func handleAttachmentPanelDismissTap() {
+        guard isShowingAttachmentPanel else {
+            return
+        }
+        hideAttachmentPanel(showKeyboard: true)
     }
 
     /// 右侧圆形按钮：形态决定语义，别在外部再判一遍草稿。
     @objc private func trailingActionTapped() {
         switch trailingAction {
         case .plus:
-            delegate?.inputBarDidTapPlus(self)
+            plusTapped()
         case .send:
-            let text = (textField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return }
+            let text = textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty || !attachments.isEmpty else {
+                return
+            }
             delegate?.inputBar(self, didSendText: text)
         case .stop:
             delegate?.inputBarDidTapStop(self)
         }
-    }
-
-    @objc private func textFieldEditingChanged() {
-        updateTrailingAction()
     }
 
     @objc private func handleVoiceModePress(_ gr: UILongPressGestureRecognizer) {
@@ -1020,9 +1367,9 @@ public final class AppAgentInputBar: UIView {
             // 键盘已激活或仍有草稿文字时，不触发语音输入：前者保留原生文本编辑手势，
             // 后者避免收起键盘后长按误开启语音。空白字符也属于已输入内容，不做 trim。
             return inputSource == .keyboard
-                && textField.isEnabled
-                && !textField.isFirstResponder
-                && (textField.text ?? "").isEmpty
+                && textView.isEditable
+                && !textView.isFirstResponder
+                && textView.text.isEmpty
         }
     }
 
@@ -1101,16 +1448,16 @@ public final class AppAgentInputBar: UIView {
     private func updateTextInputFocusPanIfNeeded(delta: CGPoint) {
         guard inputBarPanMode == .textInputFocus else { return }
 
-        if delta.y > 0, textField.isFirstResponder {
-            textField.resignFirstResponder()
+        if delta.y > 0, textView.isFirstResponder {
+            textView.resignFirstResponder()
             return
         }
 
         if delta.y < 0,
            inputBarPanStartRegion == .inputArea,
            inputSource == .keyboard,
-           !textField.isFirstResponder {
-            textField.becomeFirstResponder()
+           !textView.isFirstResponder {
+            textView.becomeFirstResponder()
         }
     }
 
@@ -1215,7 +1562,7 @@ public final class AppAgentInputBar: UIView {
         case .menuButton:
             if direction == .horizontal {
                 inputBarPanMode = .expandedMenuResize
-            } else if delta.y > 0, textField.isFirstResponder {
+            } else if delta.y > 0, textView.isFirstResponder {
                 inputBarPanMode = .textInputFocus
             } else {
                 inputBarPanMode = .ignored
@@ -1231,15 +1578,15 @@ public final class AppAgentInputBar: UIView {
                 return
             }
 
-            if delta.y > 0, textField.isFirstResponder {
+            if delta.y > 0, textView.isFirstResponder {
                 inputBarPanMode = .textInputFocus
-            } else if delta.y < 0, !textField.isFirstResponder {
+            } else if delta.y < 0, !textView.isFirstResponder {
                 inputBarPanMode = .textInputFocus
             } else {
                 inputBarPanMode = .ignored
             }
         case .bar:
-            if direction == .vertical, delta.y > 0, textField.isFirstResponder {
+            if direction == .vertical, delta.y > 0, textView.isFirstResponder {
                 inputBarPanMode = .textInputFocus
             } else {
                 inputBarPanMode = .ignored
@@ -1327,25 +1674,41 @@ public final class AppAgentInputBar: UIView {
 
 }
 
-// MARK: - UITextFieldDelegate
+// MARK: - UITextViewDelegate
 
-/// 处理 textField 的输入状态变化和键盘发送行为。
-extension AppAgentInputBar: UITextFieldDelegate {
-    public func textFieldDidBeginEditing(_ textField: UITextField) {
-        updateTextFieldPlaceholder()
+/// 处理输入框的输入状态变化和键盘发送行为。
+extension AppAgentInputBar: UITextViewDelegate {
+    public func textViewDidBeginEditing(_ textView: UITextView) {
+        updatePlaceholder()
         delegate?.inputBar(self, didChangeTextInputFocus: true)
     }
 
-    public func textFieldDidEndEditing(_ textField: UITextField) {
-        updateTextFieldPlaceholder()
+    public func textViewDidEndEditing(_ textView: UITextView) {
+        // 面板只在这一次编辑里顶替键盘；下次点输入框还是先出键盘。
+        textView.inputView = nil
+        updatePlusButtonIcon()
+        updatePlaceholder()
         delegate?.inputBar(self, didChangeTextInputFocus: false)
     }
 
-    public func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-        guard let text = textField.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !text.isEmpty else { return true }
-        delegate?.inputBar(self, didSendText: text)
-        return true
+    public func textViewDidChange(_ textView: UITextView) {
+        draftDidChange()
+    }
+
+    /// 键盘的「发送」键同样产出换行符：拦下来当发送，不写进草稿。粘贴进来的多行文字不受影响。
+    public func textView(
+        _ textView: UITextView,
+        shouldChangeTextIn range: NSRange,
+        replacementText text: String
+    ) -> Bool {
+        guard text == "\n" else {
+            return true
+        }
+        let draft = textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !draft.isEmpty || !attachments.isEmpty {
+            delegate?.inputBar(self, didSendText: draft)
+        }
+        return false
     }
 }
 
@@ -1357,6 +1720,9 @@ extension AppAgentInputBar: UIGestureRecognizerDelegate {
         if gestureRecognizer === voiceInputTouchProbe {
             // 被动探针：接收所有触点，预热 / 取消预热的判定在 onTouchDown / onTouchUp 里做。
             return true
+        }
+        if gestureRecognizer === attachmentPanelDismissTap {
+            return isShowingAttachmentPanel
         }
         if gestureRecognizer === keyboardModeLongPressGesture {
             // 手指刚按下：只允许键盘模式、键盘未激活且无草稿时，
@@ -1406,12 +1772,20 @@ extension AppAgentInputBar: UIGestureRecognizerDelegate {
 
             switch inputBarPanStartRegion {
             case .bar:
-                return isVertical && velocity.y > 0 && textField.isFirstResponder
+                return isVertical && velocity.y > 0 && textView.isFirstResponder
             case .inputArea:
                 guard inputSource == .keyboard else { return false }
                 if !isVertical { return false }
-                if velocity.y > 0, textField.isFirstResponder { return true }
-                if velocity.y < 0, !textField.isFirstResponder { return true }
+                // 草稿超过最大行数时，输入区里的竖向拖动留给输入框自己滚动查看。
+                if textView.isContentScrollable {
+                    return false
+                }
+                if velocity.y > 0, textView.isFirstResponder {
+                    return true
+                }
+                if velocity.y < 0, !textView.isFirstResponder {
+                    return true
+                }
                 return false
             case .menuButton:
                 return true
@@ -1451,6 +1825,10 @@ extension AppAgentInputBar: UIGestureRecognizerDelegate {
     ) -> Bool {
         // 被动探针不参与竞争，但需与真实手势并存，否则会被系统判为互斥而收不到触点。
         if gestureRecognizer === voiceInputTouchProbe || otherGestureRecognizer === voiceInputTouchProbe {
+            return true
+        }
+        // 切回键盘的轻点不能吃掉文字区自己的点按（移动光标）。
+        if gestureRecognizer === attachmentPanelDismissTap || otherGestureRecognizer === attachmentPanelDismissTap {
             return true
         }
         return false

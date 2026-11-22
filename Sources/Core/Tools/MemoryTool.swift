@@ -64,6 +64,9 @@ public struct MemoryTool: ToolProtocol {
 
         switch actionStr {
         case "add":
+            guard memoryStore.config.longTermEnabled else {
+                return .error("Long-term memory is disabled; the entry was not saved.")
+            }
             guard let content = arguments["content"]?.stringValue, !content.isEmpty else {
                 return .error("Missing required parameter: content (for action 'add')")
             }

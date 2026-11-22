@@ -18,6 +18,11 @@ public enum AppAgentVoiceRecognitionLoadingReason: Sendable {
 public struct AppAgentVoiceRecognitionLoadingContext: Sendable {
     public let reason: AppAgentVoiceRecognitionLoadingReason
     public let timestamp: TimeInterval
+
+    public init(reason: AppAgentVoiceRecognitionLoadingReason, timestamp: TimeInterval) {
+        self.reason = reason
+        self.timestamp = timestamp
+    }
 }
 
 public struct AppAgentVoiceRecognitionRecordingContext: Sendable {
@@ -26,6 +31,20 @@ public struct AppAgentVoiceRecognitionRecordingContext: Sendable {
     public let combinedText: String
     public let audioLevel: Double
     public let timestamp: TimeInterval
+
+    public init(
+        partialText: String,
+        finalText: String,
+        combinedText: String,
+        audioLevel: Double,
+        timestamp: TimeInterval
+    ) {
+        self.partialText = partialText
+        self.finalText = finalText
+        self.combinedText = combinedText
+        self.audioLevel = audioLevel
+        self.timestamp = timestamp
+    }
 }
 
 public enum AppAgentVoiceRecognitionEndReason: Sendable {
@@ -42,6 +61,12 @@ public struct AppAgentVoiceRecognitionEndContext: Sendable {
     public let reason: AppAgentVoiceRecognitionEndReason
     public let finalText: String
     public let timestamp: TimeInterval
+
+    public init(reason: AppAgentVoiceRecognitionEndReason, finalText: String, timestamp: TimeInterval) {
+        self.reason = reason
+        self.finalText = finalText
+        self.timestamp = timestamp
+    }
 }
 
 public enum AppAgentVoiceRecognitionEvent: Sendable {
@@ -65,7 +90,10 @@ private struct AppAgentSpeechTranscriptSnapshot: Sendable {
 
 /// 语音识别服务抽象：协调层依赖此协议，便于替身测试与替换实现。
 /// 事件必须在主线程投递；识别热路径的实现细节（队列、权限、音频会话）由实现方自理。
-protocol AppAgentVoiceRecognitionProviding: AnyObject {
+///
+/// 系统识别（`AppAgentVoiceRecognitionManager`）是内置实现；其他识别引擎
+/// 实现本协议后经 `AppAgentVoiceRecognitionCentral.register(_:)` 注册，用户在设置页切换。
+public protocol AppAgentVoiceRecognitionProviding: AnyObject {
     /// 识别语言优先级列表，按顺序取第一个系统可用的识别器。
     var preferredLocales: [Locale] { get set }
 
@@ -92,7 +120,7 @@ protocol AppAgentVoiceRecognitionProviding: AnyObject {
 }
 
 extension AppAgentVoiceRecognitionProviding {
-    func startRecording() -> AsyncStream<AppAgentVoiceRecognitionEvent> {
+    public func startRecording() -> AsyncStream<AppAgentVoiceRecognitionEvent> {
         startRecording(locale: nil)
     }
 }
@@ -264,13 +292,13 @@ public final class AppAgentVoiceRecognitionManager: NSObject, @unchecked Sendabl
         await stopRecording(reason: .userStopped)
     }
 
-    func requestStopRecording(reason: AppAgentVoiceRecognitionEndReason) {
+    public func requestStopRecording(reason: AppAgentVoiceRecognitionEndReason) {
         audioQueue.async { [weak self] in
             self?.finishCurrentRecording(reason: reason, resumes: nil)
         }
     }
 
-    func requestFinishRecording(trailingCapture: TimeInterval, finalizationTimeout: TimeInterval) {
+    public func requestFinishRecording(trailingCapture: TimeInterval, finalizationTimeout: TimeInterval) {
         audioQueue.async { [weak self] in
             self?.beginFinalizing(
                 trailingCapture: max(0, trailingCapture),

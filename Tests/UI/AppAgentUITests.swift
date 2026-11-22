@@ -37,11 +37,109 @@ final class AppAgentUITests: XCTestCase {
         inputBar.frame = CGRect(x: 0, y: 0, width: 160, height: 56)
         inputBar.layoutIfNeeded()
         XCTAssertEqual(inputBar.inputAreaContainer.alpha, 0, accuracy: 0.001)
-        XCTAssertTrue(inputBar.textField.isUserInteractionEnabled)
+        XCTAssertTrue(inputBar.textView.isUserInteractionEnabled)
 
         inputBar.frame = CGRect(x: 0, y: 0, width: AppAgentInputBarMetrics.collapsedMinWidth, height: 56)
         inputBar.layoutIfNeeded()
-        XCTAssertFalse(inputBar.textField.isUserInteractionEnabled)
+        XCTAssertFalse(inputBar.textView.isUserInteractionEnabled)
+    }
+
+    /// 语音按钮因草稿让位时，那一格归输入区：输入区右边界扩到动作槽前，不留空白。
+    func testInputBarInputAreaExtendsWhenVoiceButtonHides() {
+        let inputBar = AppAgentInputBar(frame: CGRect(x: 0, y: 0, width: 360, height: AppAgentInputBarMetrics.barHeight))
+        inputBar.layoutIfNeeded()
+        let emptyWidth = inputBar.inputAreaContainer.frame.width
+
+        inputBar.text = "draft"
+        XCTAssertTrue(inputBar.inputSourceButton.isHidden)
+        XCTAssertEqual(
+            inputBar.inputAreaContainer.frame.width,
+            emptyWidth + AppAgentInputBarMetrics.buttonSize + AppAgentInputBarMetrics.innerPadding,
+            accuracy: 0.5
+        )
+        XCTAssertEqual(
+            inputBar.inputAreaContainer.frame.maxX + AppAgentInputBarMetrics.innerPadding,
+            inputBar.plusButton.frame.minX,
+            accuracy: 0.5
+        )
+
+        inputBar.clearText()
+        XCTAssertEqual(inputBar.inputAreaContainer.frame.width, emptyWidth, accuracy: 0.5)
+    }
+
+    /// 草稿变长时展开高度逐行长高，到最大可见行数封顶；语音模式恒为单行。
+    func testInputBarExpandedHeightGrowsWithDraftAndCaps() {
+        let width: CGFloat = 360
+        let inputBar = AppAgentInputBar(frame: CGRect(x: 0, y: 0, width: width, height: AppAgentInputBarMetrics.barHeight))
+        inputBar.layoutIfNeeded()
+        XCTAssertEqual(inputBar.expandedHeight(forWidth: width), AppAgentInputBarMetrics.barHeight, accuracy: 0.5)
+
+        // 一至两行文字放得进与按钮等高的输入区，bar 不长高。
+        inputBar.text = "第一行\n第二行"
+        XCTAssertEqual(inputBar.expandedHeight(forWidth: width), AppAgentInputBarMetrics.barHeight, accuracy: 0.5)
+
+        // 放不下时 = 文字高度 + 上下各 8；折行按输入区实际宽度算（有草稿后输入源按钮让位，输入区变宽）。
+        inputBar.text = Array(repeating: "很长的一段草稿内容", count: 5).joined()
+        inputBar.layoutIfNeeded()
+        let areaWidth = inputBar.inputAreaContainer.frame.width
+        let multiLine = inputBar.expandedHeight(forWidth: width)
+        XCTAssertEqual(
+            multiLine,
+            inputBar.textView.fittingHeight(forWidth: areaWidth) + 16,
+            accuracy: 1
+        )
+        XCTAssertGreaterThan(multiLine, AppAgentInputBarMetrics.barHeight)
+
+        // 到最大可见行数封顶（7 行，参考地图 LUI 输入栏并放宽）。
+        inputBar.text = Array(repeating: "很长的一段草稿", count: 40).joined()
+        let capped = inputBar.expandedHeight(forWidth: width)
+        XCTAssertEqual(capped, inputBar.textView.maximumHeight + 16, accuracy: 0.5)
+        XCTAssertGreaterThan(capped, multiLine)
+        XCTAssertEqual(capped, inputBar.textView.lineHeight * 7 + 16, accuracy: 1)
+
+        // 输入区上下与 bar 始终相距 8；文字区与文字等高，没有额外留白。
+        inputBar.frame.size.height = capped
+        inputBar.layoutIfNeeded()
+        XCTAssertEqual(inputBar.inputAreaContainer.frame.minY, 8, accuracy: 0.5)
+        XCTAssertEqual(inputBar.bounds.height - inputBar.inputAreaContainer.frame.maxY, 8, accuracy: 0.5)
+        XCTAssertEqual(inputBar.textView.frame.height, inputBar.inputAreaContainer.frame.height, accuracy: 0.5)
+
+        inputBar.setInputSource(.voice, animated: false)
+        XCTAssertEqual(inputBar.expandedHeight(forWidth: width), AppAgentInputBarMetrics.barHeight, accuracy: 0.5)
+    }
+
+    /// 展开态贴底向上长高；收窄到收起宽度时高度回到单行，与胶囊等高不跳变。
+    func testFramePolicyExpandedHeightAnchorsBottomAndShrinksTowardCapsule() {
+        var context = AppAgentInputBarFramePolicy.Context(
+            bounds: CGRect(x: 0, y: 0, width: 393, height: 852),
+            safeAreaInsets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0),
+            keyboardHeight: 0,
+            storedExpandedWidth: nil,
+            storedCollapsedPlacement: nil
+        )
+        let singleLine = AppAgentInputBarFramePolicy.preferredExpandedFrame(context)
+        context.expandedBarHeight = 92
+        let multiLine = AppAgentInputBarFramePolicy.preferredExpandedFrame(context)
+        XCTAssertEqual(multiLine.height, 92, accuracy: 0.001)
+        XCTAssertEqual(multiLine.maxY, singleLine.maxY, accuracy: 0.001)
+
+        let collapsedWidthFrame = AppAgentInputBarFramePolicy.constrainedExpandedFrame(
+            CGRect(x: 0, y: 0, width: AppAgentInputBarMetrics.collapsedMinWidth, height: 92),
+            context: context
+        )
+        XCTAssertEqual(collapsedWidthFrame.height, AppAgentInputBarMetrics.barHeight, accuracy: 0.001)
+    }
+
+    /// 宿主挂上 overlay 后立刻要求收起：视图已加载、但还没做第一次布局。首帧布局不能把它改回展开。
+    func testCollapseRequestedBeforeFirstLayoutSurvivesFirstLayout() {
+        let viewController = AppAgentViewController()
+        viewController.loadViewIfNeeded()
+        viewController.setInputBarCollapsed(true, animated: false)
+
+        viewController.view.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        viewController.view.layoutIfNeeded()
+
+        XCTAssertTrue(viewController.inputBar.isCollapsed)
     }
 
     func testInputBarKeyboardModeLongPressRequiresEmptyText() throws {
@@ -152,9 +250,16 @@ final class AppAgentUITests: XCTestCase {
     /// 否则那张卡片会一直挂着等一个已经死掉的回合，executor 的 Task 也回不来。
     func testDecisionWaitUnblocksAndDismissesOnCancellation() async {
         let dismissed = expectation(description: "卡片被撤下")
-        let presenter = AppAgentDecisionPresenter(
-            present: { _, _, _, _ in true },   // 假装贴出来了，但永远不回调
-            dismiss: { _ in dismissed.fulfill() }
+        let presenter = AppAgentDecisionPresenter()
+        let surface = NSObject()
+        presenter.attach(
+            surface,
+            present: { _, _, _, _ in
+                true   // 假装贴出来了，但永远不回调
+            },
+            dismiss: { _ in
+                dismissed.fulfill()
+            }
         )
         let session = AISession(id: "cancel-while-waiting")
 
@@ -173,46 +278,57 @@ final class AppAgentUITests: XCTestCase {
         await fulfillment(of: [dismissed], timeout: 2)
     }
 
-    /// 呈现不了（面板没挂载）时立刻返回 nil，让责任链往下走。
-    func testDecisionReturnsNilWhenPresentationFails() async {
-        let presenter = AppAgentDecisionPresenter(
-            present: { _, _, _, _ in false },
-            dismiss: { _ in }
-        )
+    /// 进程里从没有面板 attach 过（纯 headless 集成）：没人能回答，立刻交回责任链。
+    func testDecisionReturnsNilWithoutAnySurface() async {
+        let presenter = AppAgentDecisionPresenter()
         let outcome = await presenter.respond(
             to: .clarification(question: "选哪个？", choices: []),
-            session: AISession(id: "cannot-present")
+            session: AISession(id: "no-surface")
         )
         XCTAssertNil(outcome)
     }
 
-    /// 面板销毁时，在飞的等待必须被兜底结清。
-    ///
-    /// continuation 只活在 presenter 的在飞表里（面板拿到的只是 complete 闭包），
-    /// 面板一死那些闭包就没了——不结清就是永久挂死 + 运行时 "leaked its continuation"。
-    /// 注意这里**不能**靠 presenter 自己析构来触发：等待期间
-    /// `AISession.requestDecision` 的 `responders` 强引用数组一直持着它，
-    /// 所以必须由面板显式发信号（`AppAgentViewController.deinit` 里就是这么做的）。
-    func testPendingDecisionsSettleWhenPanelGoesAway() async {
-        let presenter = AppAgentDecisionPresenter(
-            present: { _, _, _, _ in true },   // 假装贴出来了，但永远不回调
-            dismiss: { _ in }
+    /// 展示卡片的面板被释放：请求不结束、不替用户拍板，会话一直挂起；
+    /// 下一个面板 attach 进来时把它重新贴出来，用户在那里作答。
+    func testPendingDecisionSurvivesPanelReleaseAndReappears() async throws {
+        let presenter = AppAgentDecisionPresenter()
+        var firstPanel: NSObject? = NSObject()
+        presenter.attach(
+            try XCTUnwrap(firstPanel),
+            present: { _, _, _, _ in
+                true   // 贴出来了，但用户没选
+            },
+            dismiss: { _ in
+            }
         )
-        let session = AISession(id: "panel-dies-while-waiting")
-
+        let session = AISession(id: "panel-released-while-waiting")
         let task = Task {
             await presenter.respond(
                 to: .toolAuthorization(tool: "app_hotfix", safetyLevel: .dangerous, detail: nil),
                 session: session
             )
         }
-        // 让 respond 真的进到「已呈现、正在等」的状态。
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        firstPanel = nil
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(presenter.pendingCount, 1, "面板没了，请求必须继续等用户")
 
-        presenter.settlePendingDecisions()   // 面板销毁时 deinit 发的那一刀
-
+        var presentedSession: String?
+        let secondPanel = NSObject()
+        presenter.attach(
+            secondPanel,
+            present: { _, sessionId, _, complete in
+                presentedSession = sessionId
+                complete(.allowOnce)
+                return true
+            },
+            dismiss: { _ in
+            }
+        )
         let outcome = await task.value
-        XCTAssertNil(outcome, "面板消失后应交回责任链兜底，而不是挂死")
+        XCTAssertEqual(presentedSession, session.id)
+        XCTAssertEqual(outcome, .allowOnce)
+        XCTAssertEqual(presenter.pendingCount, 0)
     }
 }
 #endif

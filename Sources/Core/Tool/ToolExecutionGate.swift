@@ -5,6 +5,8 @@ import Foundation
 /// Implementations must not perform tool effects or request authorization here.
 /// Use the session's currentTurnID and genuine user messages for turn-specific policy;
 /// model-produced tool arguments are not evidence of user authorization.
+/// Threading: called from the executor's nonisolated context, not the main thread; hop to the
+/// main actor yourself before reading UI state.
 public protocol ToolExecutionGate: Sendable {
     func rejection(
         for tool: any ToolProtocol,

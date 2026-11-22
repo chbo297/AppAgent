@@ -1,5 +1,5 @@
 //
-//  SessionSearchTool.swift
+//  SessionSearchExecutor.swift
 //  AppAgent
 //
 
@@ -7,17 +7,17 @@ import Foundation
 
 /// Tool for searching past conversation sessions.
 ///
-/// Reference: hermes-agent `session_search` tool.
-public struct SessionSearchTool: ToolProtocol {
-    public let name = "session_search"
+/// Internal implementation used by the unified `session` tool.
+struct SessionSearchExecutor: ToolProtocol {
+    let name = "session.search"
 
-    public let description = """
+    let description = """
         Search past conversation sessions or browse recent sessions. \
         With no query: returns recent sessions with titles and timestamps. \
         With a query: searches message content across all past sessions. \
         Use this proactively when the user references something from a past conversation.
         """
-    public let parameters = Tool.Schema(
+    let parameters = Tool.Schema(
         properties: [
             "query": .string(
                 description: "Search keywords. Omit to browse recent sessions."
@@ -30,12 +30,12 @@ public struct SessionSearchTool: ToolProtocol {
         ],
         required: []
     )
-    public let group: String = "session"
-    public let safetyLevel: Tool.SafetyLevel = .safe
+    let group: String = "session"
+    let safetyLevel: Tool.SafetyLevel = .safe
 
-    public init() {}
+    init() {}
 
-    public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
+    func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
         guard let agent = session.agentMask?.agent else {
             return .error("No agent available for session search.")
         }
@@ -116,6 +116,8 @@ public struct SessionSearchTool: ToolProtocol {
                 return result.content
             case .hostContext:
                 return nil
+            case .attachment(let attachment):
+                return attachment.name
             }
         }
     }

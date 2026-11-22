@@ -45,12 +45,15 @@ public struct SessionSnapshot: Sendable, Codable {
     public let executionPolicy: AIAgentExecutionPolicy?
     public let archivedAt: Date?
     public let ownerAgentID: String?
+    /// 「在本会话中允许」的权限 id。后加的键，旧快照缺它就是没有授权。
+    public let permissionGrants: [String]?
 
     public init(id: String, title: String, createdAt: Date, updatedAt: Date,
                 messages: [AIAgentMessage], metadata: [String: String]? = nil,
                 turnRecords: [AIAgentTurnRecord]? = nil,
                 executionPolicy: AIAgentExecutionPolicy? = nil,
-                archivedAt: Date? = nil, ownerAgentID: String? = nil) {
+                archivedAt: Date? = nil, ownerAgentID: String? = nil,
+                permissionGrants: [String]? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -61,6 +64,7 @@ public struct SessionSnapshot: Sendable, Codable {
         self.executionPolicy = executionPolicy
         self.archivedAt = archivedAt
         self.ownerAgentID = ownerAgentID
+        self.permissionGrants = permissionGrants
     }
 
     /// 手写解码只为一件事：**turnRecords 解不开不能拖垮整个快照**。
@@ -79,13 +83,15 @@ public struct SessionSnapshot: Sendable, Codable {
         self.executionPolicy = try? container.decodeIfPresent(AIAgentExecutionPolicy.self, forKey: .executionPolicy)
         self.archivedAt = try container.decodeIfPresent(Date.self, forKey: .archivedAt)
         self.ownerAgentID = try container.decodeIfPresent(String.self, forKey: .ownerAgentID)
+        self.permissionGrants = try? container.decodeIfPresent([String].self, forKey: .permissionGrants)
     }
 
     func withArchivedAt(_ date: Date?) -> SessionSnapshot {
         SessionSnapshot(id: id, title: title, createdAt: createdAt, updatedAt: updatedAt,
                         messages: messages, metadata: metadata, turnRecords: turnRecords,
                         executionPolicy: executionPolicy,
-                        archivedAt: date, ownerAgentID: ownerAgentID)
+                        archivedAt: date, ownerAgentID: ownerAgentID,
+                        permissionGrants: permissionGrants)
     }
 }
 

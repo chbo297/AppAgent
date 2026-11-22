@@ -20,7 +20,7 @@
 
 仓库内部的 `AppAgentFailureDemoViewController`（报错演示页）确实把聊天 VC 当子 VC 嵌了一层——那是
 AppAgent 自己的调试页，跑在 AppAgent 自己的窗口里，不是宿主集成路径；它必须
-`registersDecisionPresenter = false`，否则两份面板会抢同一条决策责任链。
+`registersDecisionPresenter = false`，否则两块面板会同时 attach 到 `AppAgentDecisionPresenter.shared`，抢着展示同一个请求。
 
 ### 展示状态上报：宿主怎么知道自己被挡住了
 
@@ -115,6 +115,31 @@ AppAgent 自己的调试页，跑在 AppAgent 自己的窗口里，不是宿主�
 
 `Tests/UI/AppAgentMarkdownTests.swift` 断言的就是渲染出来的字符串（块要各占一行、表格不粘连），改渲染逻辑先跑它。
 
+## 输入栏多行草稿：按行长高，7 行封顶
+
+输入区是 `AppAgentTextView`（`UITextView`），键盘「发送」键产出的 `\n` 被拦下当发送，粘贴的多行文字照常写入。
+
+- **高度只有一个出口**：`AppAgentInputBar.expandedHeight(forWidth:)`。输入区与按钮等高（40pt），上下与 bar
+  各距 8pt；文字放得进 40pt（一两行）时 bar 保持 `barHeight`，放不下时 bar = 文字高度 + 16，
+  到 `AppAgentTextView.maximumVisibleLineCount`（7 行，参考地图 LUI 输入栏并放宽）封顶，之后框内滚动。
+  语音模式恒为单行。测量宽度与布局共用 `inputAreaWidth(forBarWidth:)`，二者不会算出两个宽度。
+- **只在真正变化时布局**：测量结果按输入区宽度缓存，草稿变化才作废。草稿变化后先重排一次文字区
+  （文字在一两行内换行时 bar 高度不变，但文字区要跟着内容长高），高度与当前 bounds 不同才回调
+  `inputBarDidChangeExpandedHeight` 让控制器重排整条 bar。语音按钮显隐切换（有无草稿）时重排一次输入区。
+- **文字容器宽度跟随 frame**：`AppAgentTextView.layoutSubviews` 把 `textContainer.size.width` 同步成
+  frame 宽度。UITextView 的折行、`sizeThatFits`、`contentSize` 都看容器宽度，不同步就会按旧宽度排版，
+  出现「测出来的行数与画出来不一致」。
+- **贴底向上长高**：`AppAgentInputBarFramePolicy.Context.expandedBarHeight` 决定展开态高度，frame 底边不动。
+  resize 收窄时高度随宽度从多行线性回到单行（`expandedHeight(forWidth:context:)`），与输入区淡出同步，
+  收成胶囊时不跳变。
+- **面板跟着让位**：`AppAgentChatPanelGeometry.inputBarHeight` 进入 `listBottomInset`、peek 高度和 peek 紧凑框高度，
+  长高的输入栏不盖住最后一条消息，peek 的拖拽条也不被挡。
+- **文字区没有任何内边距**：`textContainerInset` 为 0、`lineFragmentPadding` 为 0，文字区高度贴合文字并在
+  输入区里垂直居中；输入区左右已有按钮间距，不再额外留白。滚动时下一行不会从边距露出半截；点文字区外的
+  空白由 `hitTest` 转交给文字区。
+- **滚动判定不用 `contentSize`**：它要等下一轮 layout 才更新，frame 刚长高时还是旧值；用内容排版高度判断，
+  需要滚动才滚动、不需要就把内容钉回顶部，不会在长高瞬间把首行滚掉。草稿超过可见行数（`isContentScrollable`）时，输入区里的竖向拖动交给文字区滚动，不触发上滑弹键盘 / 下滑收键盘。
+
 ## 输入栏右侧动作槽：加号 / 发送 / 停止
 
 对照另一个 agent app（ChatGPT iOS）的输入栏：右下角那一格是**一个槽三种形态**，不是三个按钮堆在一起。
@@ -150,6 +175,30 @@ AppAgent 自己的调试页，跑在 AppAgent 自己的窗口里，不是宿主�
   `applyTrailingActionGeometry` 同时让 frame 和淡出 alpha 跟着 `plusButton` 走，bar 收窄 / 收起时一起淡出。
   `Tests/UI/AppAgentUITests.swift` 锁住三态、圆的尺寸与居中，以及「格子角上仍算命中」。
 
+## 加号面板与附件条
+
+参考微信「更多」面板：点加号，输入栏下方出现一块面板顶替键盘，图标 + 文字的方格 4 列排开（现在只有「图片」「文件」两格）。
+
+- **面板就是输入框的 `inputView`**，不是另摆一块视图。键盘与面板互切由系统动画负责，控制器「随键盘顶起」的链路
+  （`keyboardWillChangeFrame` → `layoutInputBar(reason: .keyboard)`）原样生效，面板高度就是新的键盘高度。
+  面板展开时加号变成叉（`updatePlusButtonIcon`，跟着 `inputView` 每次变化同步），点叉收起面板且不弹键盘，再点加号又展开；
+  点输入框切回键盘。失焦时摘掉 `inputView`，下次聚焦还是先出键盘。面板与输入栏同底色，方格用浅灰块区分。
+  Mac Catalyst 没有软键盘，加号改成系统菜单。
+- **选了一格先收面板再弹选择器**：`inputBar(_:didSelectAttachmentSource:)` 之前 inputBar 已经收起面板并让出焦点。
+  图片用 PHPicker（`selectionLimit` = 剩余张数，无需相册权限），文件用 `UIDocumentPickerViewController(asCopy:)`，
+  都在 `AppAgentAttachmentPicker` 里，选完 `addAttachments(_:)` 放回输入栏。
+- **附件条在 bar 最上面一行**：`expandedHeight(forWidth:)` 在原高度上加一行缩略图（含叉的外伸），单行草稿也因此长高；
+  输入区与按钮排在它下面，按钮仍贴底。附件条左边与最左侧圆形按钮对齐、横跨整条 bar。resize 收窄时附件区和多行一样线性让出。缩略图 72pt；
+  图片不满 4 张时最后一张右边有个加号格，点它直接弹相册，选满后隐藏。
+- **附件也算草稿**：有附件就给发送按钮，文字可以为空；`dispatchOutgoingMessage` 从 `inputBar.attachments` 取附件，
+  打字发送和语音转文字都会带上，`finishInputBarAfterSend()` 一并清空。
+- **文件附件的暂存文件谁来删**：选文件时就拷进 `agent://workspace/attachments/<id>/`。发送前点 × 或再选一个文件替换旧的，
+  inputBar 回调 `inputBar(_:didDiscardAttachments:)`，控制器调 `AttachmentFileStaging.discard` 删掉那个目录。
+  发送后的 `removeAllAttachments()` 不回调，文件要留给后续轮次用 `file` 工具读。漏删的（进程中途被杀、会话被永久删除）
+  由 `AIAgent.restoreAll()` 之后的启动清扫兜底：没有任何会话（内存 + 存储里的活跃与废纸篓）引用、且放了超过 24 小时的目录才删。
+- **气泡里的缩略图按附件 id 缓存**（`AppAgentAttachmentImageCache`）：消息里存的是整张 JPEG 的 base64，滚动时不能每次整张解码。
+  附件 id 也进 `ChatMessageHeightCache.Input` 和 `hasEquivalentContent`，否则行高不会因附件重测。
+
 ## 语音输入：太快松手算误触
 
 `AppAgentVoiceInputCoordinator` 从 `begin`（= 面板亮起）开始计时，松手时不足
@@ -163,6 +212,17 @@ AppAgent 自己的调试页，跑在 AppAgent 自己的窗口里，不是宿主�
 - 键盘模式还叠着长按自身的 0.2s，所以那条路径实际要按住约 0.5s 才算一次有效语音输入。
 - 用例：`Tests/UI/AppAgentVoiceInputCoordinatorTests.swift` 锁「0.2s 松手作废且无尾音请求」与
   「0.31s 照常进收尾」。
+
+## 语音输入：识别引擎可切换
+
+- 协调器不持有固定识别器：每次开始识别时向 `AppAgentVoiceRecognitionCentral.default.activeRecognizer`
+  要一个，之后的停止 / 收尾请求都发给开始时那个（`activeRecognizer`），中途切换引擎不会串线。
+  预热判断按**当前选择**问 `canPrewarmNow`，不问上一次会话的引擎。
+- 选中的引擎没注册（这次打包没带）或 `isConfigured()` 为假时回退系统识别，语音输入永远可用。
+  用例：`Tests/UI/AppAgentVoiceRecognitionCentralTests.swift`。
+- 引擎实现要和系统识别守同一套时序：`requestFinishRecording` 先补录 `trailingCapture`，再等最终结果，
+  超时用当前最好文本发 `.ended`；收尾期出错也按 `.userStopped` 结束，不丢已识别内容。
+- 第三方引擎放独立 product（不进 `Sources/`），只依赖 public API；网络引擎可把等最终结果的下限调高。
 
 ## 面板几何与写入判等
 
@@ -195,6 +255,42 @@ BOUIKit 0.2.0 起还提供几何层：`bo_setFrame` / `bo_setBounds` / `bo_setCe
 
 其余 frame 写入点**不必**逐个包：它们多数已在更粗粒度上短路（`AppAgentChatPanelView.applyLayout` 的 `guard layout != appliedLayout`、容器与 `AppAgentInputBar.setInputBarFrame` 的 `isApproximatelyEqual`、`applyTableViewFrame` 的自带判等），剩下的只在 `layoutSubviews` 里跑一次，包一层只是噪音。
 
+### 宿主底部预留高度：只在 peek 让出，展开时随面板回到安全区
+
+`AppAgentViewController.hostReservedBottomHeight` 表示宿主底部控件（如地图首页 tab 栏）占用、要求 SDK
+让出的高度。它**不是安全区**：系统底部安全区由 SDK 自己避让，本值叠加在安全区之上，命名上刻意不带
+inset / safeArea。
+
+- **取值协议（宿主提供、SDK 拉取）**：值来自 `AppAgentPresentationDelegate.appAgentHostReservedBottomHeight()`，
+  设置 `presentationDelegate` 时取一次；宿主页面切换、底部遮挡变化后调用
+  `invalidateHostReservedBottomHeight()`，SDK 重新取值，有变化才重排。SDK 不感知具体页面。
+- **配套页面展开时不让出**：`navigationAccessory.isActive == true` 表示宿主配套页面（如工作区）盖在宿主页面上，
+  `effectiveHostReservedBottomHeight` 取 0，输入栏回到安全区位置；收起后自动恢复缓存值，宿主不必为此改返回值。
+- **变化时 0.2 秒过渡**：生效值变了（上面两种情况）就走 `relayoutForHostReservedBottomChange`，在一个
+  `UIView.animate(0.2, .curveEaseInOut)` 块里重排。输入栏 frame、面板容器、peek 展示高度都在块内写入，一起移动；
+  首帧前或没有 window 时只标记布局。
+- **停在 peek 就跟到新 peek**：`AppAgentChatPanelCoordinator.updateLayout` 发现静止在旧 peek、且 peek 高度变了，
+  用非动画 `scroll(toDisplayHeight:)` 落到新 peek（继承外层动画块）。BODragScroll 改档位时会保留原展示高度，
+  不补这一步面板会比下沉后的输入栏高出一截。拖拽、减速中不打断。
+
+- **peek**：展开态输入栏按此抬高；面板几何把这段加进 `peekHeight`，紧凑框与抬高后的输入栏对齐。
+- **peek → half 过渡**：输入栏实际让出量 = 预留高度 × 面板 `compactProgress`（`hostReservedBottomLift`），
+  随面板底部延伸同步降为 0。面板发布新展示高度时经 `onViewportChanged` 在同一帧重排输入栏，
+  因此与面板共用 BODragScroll 的动画上下文。
+- **half / full**：面板铺到屏幕底部，输入栏按安全区落位，与没有预留高度时一致。
+- **键盘**：输入栏贴键盘，不叠加预留高度；`chatPanelKeyboardLift` 以「含此刻让出量的静止位置」为基准，
+  所以键盘弹起时在 peek 也能保持紧凑框与输入栏对齐。收起态胶囊与拖动边界不受影响。
+- **触摸穿透**：面板在 peek 仍铺到屏幕底部，输入栏下方那段是透明的。预留高度超过 1 像素时，
+  `AppAgentChatPanelView.point(inside:)` 对 viewport 下沿以下一律返回 false，BODragScroll 据此放行，
+  宿主底部控件照常可点可滑；预留为 0（只有系统安全区）时保持原样由面板承接。
+
+面板 bounds 不再随预留高度变矮，几何只多了一个静态的 peek 增量，不随动画逐帧变化，和上面键盘不许改展示高度
+的约束不冲突。面板四角在任何展示高度都保持圆角（展开 20、收起过渡插值到输入栏的 16）。用例
+`testHostReservedBottomHeightLiftsInputBarOnlyAtPeekAndNotKeyboardOrCollapsedFrame`、
+`testHostReservedBottomHeightOnlyRaisesPeekAndKeepsHalfDetent`。
+
+输入框获得焦点时，面板若停在 peek 档，自动弹到 half 档（`didChangeTextInputFocus`）。
+
 ### 键盘顶起：只把容器整体上移，面板几何一概不动
 
 **键盘的动画参数要整份拿过来用**：`AppAgentKeyboardObserver.Animation` 同时带 `duration` 和
@@ -218,7 +314,7 @@ BOUIKit 0.2.0 起还提供几何层：`bo_setFrame` / `bo_setBounds` / `bo_setCe
 **派生写入一律直接提交、继承调用方的动画上下文**。三条硬约定（都是实测踩出来的，别再回头加 trick）：
 
 - **不剥动画**。面板内部几何曾经走 `UIView.performWithoutAnimation`，于是裁切窗口瞬跳到终态、内容再慢慢滑上来，看起来就是「先落后键盘、再跳一下」。
-- **裁切与圆角用 `clipsToBounds` + `layer.cornerRadius` + `maskedCorners`，不用 `layer.mask`**。`layer.mask` 拿不到 UIKit 动画块的隐式动画（实测 `animationKeys()` 恒空，`CATransaction.setDisableActions(false)` 也救不了），而它又是唯一的裁切者；手工给 mask 补 `CABasicAnimation` 能治全屏那次跳动，但 `path` 那条会在半屏高度制造「内容重绘半截闪白」。面板背景同理改成 `layer.backgroundColor` + `cornerRadius`、**不设 `shadowPath`**（让 UIKit 从 layer 形状自己推，形状变化才跟着 frame 一起动）。上下圆角只有「四角同半径」和「只上两角」两种形态，正好用 `maskedCorners` 表达，`AppAgentChatPanelShapePath` 因此整个删掉了。
+- **裁切与圆角用 `clipsToBounds` + `layer.cornerRadius`，不用 `layer.mask`**。`layer.mask` 拿不到 UIKit 动画块的隐式动画（实测 `animationKeys()` 恒空，`CATransaction.setDisableActions(false)` 也救不了），而它又是唯一的裁切者；手工给 mask 补 `CABasicAnimation` 能治全屏那次跳动，但 `path` 那条会在半屏高度制造「内容重绘半截闪白」。面板背景同理改成 `layer.backgroundColor` + `cornerRadius`、**不设 `shadowPath`**（让 UIKit 从 layer 形状自己推，形状变化才跟着 frame 一起动）。面板四角始终同半径，只用一个 `cornerRadius`，`AppAgentChatPanelShapePath` 因此整个删掉了。
 - **列表不做「高度冻结 + 按锚点平移」的中间态**。`updateVisibleArea` 直接写 tableView 高度，然后在「原来贴底」时 `scrollToBottom(animated: false)`；顺序不能反——视口变矮会把贴底的 offset 极限推高，落点必须在高度写入之后才算得对。曾经为此加过裁切容器 + 冻结高度 + 位移 + 收尾复位的一整套，结果它和 viewport 的裁切各走一条时间线，反而更跳。
 
 `Tests/UI/AppAgentChatPanelGeometryTests.swift` 锁住三条：键盘抬起既不改面板高度也不改展示高度；容器随键盘整体上移；viewport 用 `clipsToBounds` + 圆角而不是 mask 裁切。

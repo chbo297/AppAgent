@@ -38,7 +38,7 @@ extension AppAgentOverlay: AppAgentRuntimeOwned {}
 extension AppAgentViewController: AppAgentRuntimeOwned {}
 extension AppAgentInputBar: AppAgentRuntimeOwned {}
 extension AppAgentMenuButton: AppAgentRuntimeOwned {}
-extension AppAgentTextField: AppAgentRuntimeOwned {}
+extension AppAgentTextView: AppAgentRuntimeOwned {}
 extension AppAgentKeyboardObserver: AppAgentRuntimeOwned {}
 extension AppAgentVoiceRecognitionManager: AppAgentRuntimeOwned {}
 extension AppAgentDebugViewController: AppAgentRuntimeOwned {}

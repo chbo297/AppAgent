@@ -15,6 +15,8 @@ public struct AppAgentActivityItem: Equatable {
     public enum Kind: Equatable {
         case thinking
         case tool
+        /// 执行器给用户的说明（会话压缩、输出上限续写），来自 `AIAgentTurnRecord.notices`。
+        case notice
     }
 
     public enum State: Equatable {
@@ -182,6 +184,20 @@ public struct AppAgentActivityTimeline: Equatable {
         }
     }
 
+    /// 追加执行器说明。`index` 是它在本轮记录 `notices` 里的序号：实时事件与重建共用同一身份，
+    /// 合并时不会出现两条。
+    public mutating func appendNotice(_ text: String, index: Int) {
+        let id = "notice-\(index)"
+        guard !text.isEmpty, !items.contains(where: { $0.kind == .notice && $0.id == id }) else { return }
+        closeRunningThinking()
+        items.append(AppAgentActivityItem(
+            id: id, kind: .notice, title: text, state: .done, finishedAt: Date()
+        ))
+    }
+
+    /// 已有的执行器说明条数（实时事件按它给下一条编号）。
+    public var noticeCount: Int { items.filter { $0.kind == .notice }.count }
+
     /// 工具开始执行；同时把仍在进行的思考步骤收尾。
     public mutating func startTool(id: String, name: String, argumentsPreview: String) {
         closeRunningThinking()
@@ -290,6 +306,7 @@ public struct AppAgentActivityTimeline: Equatable {
                 case .tool where last.state == .failed: return "调用失败 · \(last.title)，继续处理…"
                 case .tool: return "已完成 \(last.title)，继续思考…"
                 case .thinking: return "思考中…"
+                case .notice: return last.title
                 }
             }
             switch stage {

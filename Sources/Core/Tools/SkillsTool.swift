@@ -5,20 +5,40 @@
 
 import Foundation
 
-// MARK: - SkillsListTool
+// MARK: - SkillTool
 
-/// Lists available skills (name + description only, for token efficiency).
+/// Unified skill discovery, loading, and user-skill management tool.
 ///
-/// Reference: hermes-agent `skills_list` tool (progressive disclosure Tier 1).
-public struct SkillsListTool: ToolProtocol {
-    public let name = "skills_list"
+/// The default operation is `catalog`, which only returns category summaries.
+/// Models can progressively expand a category with `list`, load one skill with
+/// `load`, and access linked resources with the same operation.
+public struct SkillTool: ToolProtocol {
+    public let name = "skill"
     public let description = """
-        List available skills (name + description). \
-        Use skill_view(name) to load a skill's full content.
+        Discover and load AppAgent skills progressively. \
+        Use op='catalog' for compact category summaries, op='list' to expand one category, \
+        and op='load' to read one skill's SKILL.md or a linked resource. \
+        Use op='create' or 'delete' only when managing user skills.
         """
     public let parameters = Tool.Schema(
         properties: [
-            "category": .string(description: "Optional category filter to narrow results.")
+            "op": .string(
+                description: "Operation.",
+                enumValues: ["catalog", "list", "load", "create", "delete"],
+                defaultValue: .string("catalog")
+            ),
+            "category": .string(
+                description: "Category to expand for op='list' or the category for op='create'."
+            ),
+            "name": .string(
+                description: "Skill name for op='load', 'create', or 'delete'."
+            ),
+            "file_path": .string(
+                description: "Optional linked resource path for op='load'."
+            ),
+            "content": .string(
+                description: "Complete SKILL.md content for op='create'."
+            )
         ],
         required: []
     )
@@ -31,175 +51,144 @@ public struct SkillsListTool: ToolProtocol {
         self.manager = manager
     }
 
-    public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
-        let category = arguments["category"]?.stringValue
-        let skills = await manager.listSkills(category: category)
+    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        switch arguments["op"]?.stringValue ?? "catalog" {
+        case "catalog", "list", "load":
+            return .safe
+        case "create", "delete":
+            return .sensitive
+        default:
+            return .safe
+        }
+    }
 
-        if skills.isEmpty {
-            return .json(.object([
-                "skills": .array([]),
-                "message": .string(category != nil
-                    ? "No skills found in category '\(category!)'."
-                    : "No skills available.")
-            ]))
+    public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
+        let op = arguments["op"]?.stringValue ?? "catalog"
+
+        switch op {
+        case "catalog":
+            return await catalog()
+        case "list":
+            return await list(category: arguments["category"]?.stringValue)
+        case "load":
+            return await load(
+                name: arguments["name"]?.stringValue,
+                filePath: arguments["file_path"]?.stringValue
+            )
+        case "create":
+            return try await create(
+                name: arguments["name"]?.stringValue,
+                category: arguments["category"]?.stringValue,
+                content: arguments["content"]?.stringValue
+            )
+        case "delete":
+            return try await delete(name: arguments["name"]?.stringValue)
+        default:
+            return .error("Unknown op '\(op)'. Use catalog, list, load, create, or delete.")
+        }
+    }
+
+    private func catalog() async -> Tool.Output {
+        let skills = await manager.listSkills()
+        var counts: [String: Int] = [:]
+        for skill in skills {
+            let category = skill.category ?? "uncategorized"
+            counts[category, default: 0] += 1
         }
 
-        let items: [JSONValue] = skills.map { skill in
-            var obj: [String: JSONValue] = [
-                "name": .string(skill.name),
-                "description": .string(skill.description)
-            ]
-            if let cat = skill.category {
-                obj["category"] = .string(cat)
-            }
-            return .object(obj)
+        let categories = counts.keys.sorted().map { category in
+            JSONValue.object([
+                "category": .string(category),
+                "count": .number(Double(counts[category] ?? 0))
+            ])
         }
 
         return .json(.object([
+            "categories": .array(categories),
+            "skill_count": .number(Double(skills.count)),
+            "next": .string("Use op='list' with a category before loading a specific skill.")
+        ]))
+    }
+
+    private func list(category: String?) async -> Tool.Output {
+        let skills = await manager.listSkills(category: category)
+        let items = skills.map { skill in
+            var item: [String: JSONValue] = [
+                "name": .string(skill.name),
+                "description": .string(skill.description)
+            ]
+            if let category = skill.category {
+                item["category"] = .string(category)
+            }
+            return JSONValue.object(item)
+        }
+
+        return .json(.object([
+            "category": category.map(JSONValue.string) ?? .null,
             "skills": .array(items),
             "count": .number(Double(items.count))
         ]))
     }
-}
 
-// MARK: - SkillViewTool
-
-/// Loads a skill's full SKILL.md content or a linked file.
-///
-/// Reference: hermes-agent `skill_view` tool (progressive disclosure Tier 2-3).
-public struct SkillViewTool: ToolProtocol {
-    public let name = "skill_view"
-    public let description = """
-        Load a skill's full content or access its linked files (references, templates, scripts). \
-        First call returns SKILL.md content plus a list of linked files. \
-        To access linked files, call again with file_path.
-        """
-    public let parameters = Tool.Schema(
-        properties: [
-            "name": .string(description: "The skill name."),
-            "file_path": .string(
-                description: "Optional: path to a linked file (e.g., 'references/api.md'). Omit to get the main SKILL.md."
-            )
-        ],
-        required: ["name"]
-    )
-    public let group: String = "skills"
-    public let safetyLevel: Tool.SafetyLevel = .safe
-
-    private let manager: SkillsManager
-
-    public init(manager: SkillsManager) {
-        self.manager = manager
-    }
-
-    public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
-        guard let skillName = arguments["name"]?.stringValue, !skillName.isEmpty else {
-            return .error("Missing required parameter: name")
+    private func load(name: String?, filePath: String?) async -> Tool.Output {
+        guard let name, !name.isEmpty else {
+            return .error("Missing required parameter: name for op='load'.")
+        }
+        guard let skill = await manager.skill(named: name) else {
+            return .error("Skill '\(name)' not found. Use op='catalog' or op='list' first.")
         }
 
-        guard let skill = await manager.skill(named: skillName) else {
-            return .error("Skill '\(skillName)' not found. Use skills_list to see available skills.")
-        }
-
-        // If file_path is provided, return that linked file
-        if let filePath = arguments["file_path"]?.stringValue, !filePath.isEmpty {
-            if let fileContent = skill.linkedFiles[filePath] {
-                return .json(.object([
-                    "skill": .string(skillName),
-                    "file_path": .string(filePath),
-                    "content": .string(fileContent)
-                ]))
-            } else {
-                let available = skill.linkedFiles.keys.sorted()
-                return .error("File '\(filePath)' not found in skill '\(skillName)'. Available: \(available.joined(separator: ", "))")
+        if let filePath, !filePath.isEmpty {
+            guard let content = skill.linkedFiles[filePath] else {
+                let available = skill.linkedFiles.keys.sorted().joined(separator: ", ")
+                return .error("Linked file '\(filePath)' not found. Available: \(available)")
             }
+            return .json(.object([
+                "name": .string(skill.name),
+                "file_path": .string(filePath),
+                "content": .string(content)
+            ]))
         }
 
-        // Return full skill content + linked file list
         var result: [String: JSONValue] = [
             "name": .string(skill.name),
             "description": .string(skill.description),
             "content": .string(skill.content)
         ]
-        if let cat = skill.category {
-            result["category"] = .string(cat)
+        if let category = skill.category {
+            result["category"] = .string(category)
         }
         if !skill.linkedFiles.isEmpty {
-            result["linked_files"] = .array(skill.linkedFiles.keys.sorted().map { .string($0) })
+            result["linked_files"] = .array(
+                skill.linkedFiles.keys.sorted().map { JSONValue.string($0) }
+            )
         }
-
         return .json(.object(result))
     }
-}
 
-// MARK: - SkillManageTool
-
-/// Manages skills — create, edit, delete.
-///
-/// Reference: hermes-agent `skill_manage` tool.
-public struct SkillManageTool: ToolProtocol {
-    public let name = "skill_manage"
-    public let description = """
-        Manage skills (create, delete). Skills are reusable instruction documents for recurring task types. \
-        Create when: complex task succeeded, non-trivial workflow discovered, or user asks to remember a procedure. \
-        Confirm with user before creating or deleting.
-        """
-    public let parameters = Tool.Schema(
-        properties: [
-            "action": .string(
-                description: "The action to perform.",
-                enumValues: ["create", "delete"]
-            ),
-            "name": .string(
-                description: "Skill name (lowercase, hyphens allowed, max 64 chars)."
-            ),
-            "content": .string(
-                description: "Full SKILL.md content (YAML frontmatter + markdown body). Required for 'create'."
-            ),
-            "category": .string(
-                description: "Optional category for organizing (e.g., 'devops', 'data-science'). Only for 'create'."
-            )
-        ],
-        required: ["action", "name"]
-    )
-    public let group: String = "skills"
-    public let safetyLevel: Tool.SafetyLevel = .sensitive
-
-    private let manager: SkillsManager
-
-    public init(manager: SkillsManager) {
-        self.manager = manager
+    private func create(name: String?, category: String?, content: String?) async throws -> Tool.Output {
+        guard let name, !name.isEmpty else {
+            return .error("Missing required parameter: name for op='create'.")
+        }
+        guard let content, !content.isEmpty else {
+            return .error("Missing required parameter: content for op='create'.")
+        }
+        try await manager.createSkill(name: name, content: content, category: category)
+        return .json(.object([
+            "success": .bool(true),
+            "name": .string(name),
+            "category": category.map(JSONValue.string) ?? .null
+        ]))
     }
 
-    public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
-        guard let action = arguments["action"]?.stringValue else {
-            return .error("Missing required parameter: action")
+    private func delete(name: String?) async throws -> Tool.Output {
+        guard let name, !name.isEmpty else {
+            return .error("Missing required parameter: name for op='delete'.")
         }
-        guard let skillName = arguments["name"]?.stringValue, !skillName.isEmpty else {
-            return .error("Missing required parameter: name")
-        }
-
-        switch action {
-        case "create":
-            guard let content = arguments["content"]?.stringValue, !content.isEmpty else {
-                return .error("Missing required parameter: content (for action 'create')")
-            }
-            let category = arguments["category"]?.stringValue
-            try await manager.createSkill(name: skillName, content: content, category: category)
-            return .json(.object([
-                "success": .bool(true),
-                "message": .string("Skill '\(skillName)' created successfully.")
-            ]))
-
-        case "delete":
-            try await manager.deleteSkill(name: skillName)
-            return .json(.object([
-                "success": .bool(true),
-                "message": .string("Skill '\(skillName)' deleted.")
-            ]))
-
-        default:
-            return .error("Unknown action: '\(action)'. Use 'create' or 'delete'.")
-        }
+        try await manager.deleteSkill(name: name)
+        return .json(.object([
+            "success": .bool(true),
+            "name": .string(name)
+        ]))
     }
 }

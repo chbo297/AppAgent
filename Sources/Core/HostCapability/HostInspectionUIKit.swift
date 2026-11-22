@@ -295,7 +295,7 @@ final class HostInspectionHandleRegistry<Object: AnyObject>: AppAgentRuntimeOwne
 }
 
 enum UIKitInspectionError: Error, LocalizedError {
-    case sceneUnavailable, ambiguousScene, outsideScope, unsafeObjectChain
+    case sceneUnavailable, ambiguousScene, outsideScope, unsafeObjectChain, undeclaredKey
 
     var errorDescription: String? {
         switch self {
@@ -303,6 +303,9 @@ enum UIKitInspectionError: Error, LocalizedError {
         case .ambiguousScene: return "Inspection denied: multiple active scenes; bind the session to a scene."
         case .outsideScope: return "Inspection denied: target is outside the inspection scope."
         case .unsafeObjectChain: return "Inspection denied: unsafe object/collection traversal in a limited scope."
+        case .undeclaredKey:
+            return "Inspection denied: key is not a declared property/ivar of the target "
+                + "(methods are never invoked; dictionary keys and array indexes are accepted)."
         }
     }
 }

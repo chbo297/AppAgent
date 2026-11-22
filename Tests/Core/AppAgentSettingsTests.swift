@@ -224,7 +224,159 @@ final class AppAgentSettingsTests: XCTestCase {
             contextWindow: 1000, maxTokens: 100
         )
         XCTAssertFalse(result.isAvailable)
-        XCTAssertEqual(result.failureReason, "接口地址、API Key 或模型 id 无效")
+        XCTAssertEqual(result.failureReason, "接口地址、API Key、模型 id 或 token 上限无效")
+    }
+
+    func testClearCancelsRunAndRevokesExistingAndNewSessionsWithoutDeletingHistory() async throws {
+        let entered = expectation(description: "Run captured its provider")
+        let gate = ReadySignal()
+        let preparations = Locked(wrappedValue: 0)
+        let agent = makeAgent(profile: .init(
+            additionalPromptBuilders: [PromptBuilder("hold-first-run") { _ in
+                let first = preparations.mutate { count in
+                    count += 1
+                    return count == 1
+                }
+                if first {
+                    entered.fulfill()
+                    await gate.wait()
+                }
+                return nil
+            }],
+            autoPersist: false,
+            registerBuiltInTools: false
+        ))
+        await agent.applyEndpointSettings(validSettings())
+        let provider = SettingsCountingProvider()
+        await agent.providerCentral.register(name: "host", provider: provider)
+        let session = await agent.createSession(title: "Keep this history")
+        XCTAssertTrue(session.switchModel(provider: provider, modelId: "a", reference: "host/a"))
+        let stream = session.sendMessage("Keep this question")
+        await fulfillment(of: [entered], timeout: 2)
+        let history = session.messages.map(\.id)
+        XCTAssertFalse(history.isEmpty)
+
+        await agent.applyEndpointSettings(AppAgentEndpointSettings())
+        await gate.signal()
+        var cancellations = 0
+        for await event in stream {
+            if case .error(let error) = event, case .cancelled = error as? AIAgentError {
+                cancellations += 1
+            }
+        }
+        XCTAssertEqual(cancellations, 1)
+        XCTAssertFalse(session.isRunning)
+        XCTAssertEqual(session.messages.map(\.id), history)
+        XCTAssertEqual(session.title, "Keep this history")
+        XCTAssertNil(session.provider)
+        XCTAssertNil(session.modelId)
+        XCTAssertNil(agent.modelPolicy)
+        let activeReference: String? = session.uiState.get(SessionUIState.activeModelKey)
+        XCTAssertNil(activeReference)
+        let registeredNames = await agent.providerCentral.registeredNames
+        XCTAssertEqual(registeredNames, ["host"])
+
+        let newSession = await agent.createSession()
+        let explicitSession = await agent.createSession(modelReference: "host/a")
+        for candidate in [session, newSession, explicitSession] {
+            XCTAssertNil(candidate.provider, "Cleared agents must not select a host default")
+            XCTAssertNil(candidate.modelId)
+            var errors = 0
+            for await event in candidate.sendMessage("No model configured") {
+                if case .error = event {
+                    errors += 1
+                }
+            }
+            XCTAssertEqual(errors, 1)
+        }
+        XCTAssertEqual(provider.requests.wrappedValue, 0)
+    }
+
+    func testClearRejectsLateSelectionAndValidSaveReconfiguresSessions() async throws {
+        let agent = makeAgent()
+        await agent.applyEndpointSettings(validSettings())
+        let session = await agent.createSession()
+        let oldSelection = session.modelSelectionSnapshot()
+        let oldProvider = try XCTUnwrap(oldSelection.provider)
+        await agent.applyEndpointSettings(AppAgentEndpointSettings())
+        XCTAssertFalse(session.switchModel(provider: oldProvider, modelId: "a", reference: "old/a"))
+
+        var replacement = validSettings()
+        replacement.enabledModels[0].modelId = "replacement"
+        await agent.applyEndpointSettings(replacement)
+        XCTAssertFalse(session.switchModel(
+            provider: oldProvider, modelId: "a", reference: "old/a",
+            expectedGeneration: oldSelection.generation
+        ))
+        XCTAssertEqual(session.modelId, "replacement")
+        XCTAssertEqual(agent.modelPolicy, replacement.modelPolicy)
+        let newSession = await agent.createSession()
+        XCTAssertEqual(newSession.modelId, "replacement")
+    }
+
+    func testCapturedRunProviderStaysRevokedAfterNewValidConfiguration() async throws {
+        let agent = makeAgent()
+        await agent.applyEndpointSettings(validSettings())
+        let provider = SettingsCountingProvider()
+        let session = await agent.sessionManager.createSession(provider: provider, modelId: "a")
+        let captured = try XCTUnwrap(session.modelSelectionSnapshot().provider)
+
+        // Ordinary valid updates preserve the running snapshot.
+        await agent.applyEndpointSettings(validSettings())
+        for try await _ in captured.streamCompletion(messages: [], system: [], tools: [], modelId: "a") {
+        }
+        XCTAssertEqual(provider.requests.wrappedValue, 1)
+
+        await agent.applyEndpointSettings(AppAgentEndpointSettings())
+        await agent.applyEndpointSettings(validSettings())
+        do {
+            for try await _ in captured.streamCompletion(messages: [], system: [], tools: [], modelId: "a") {
+            }
+            XCTFail("A new valid configuration must not revive an old run's credentials")
+        } catch {
+            guard case .cancelled = error as? AIAgentError else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(provider.requests.wrappedValue, 1)
+    }
+
+    func testOverlappingApplyThenClearCannotPublishLateProvider() async {
+        let agent = makeAgent()
+        let settings = validSettings()
+        let session = await agent.createSession()
+        for _ in 0..<40 {
+            let applying = Task {
+                await agent.applyEndpointSettings(settings)
+            }
+            // Observe registration before issuing clear, without waiting for apply's caller.
+            var observedRegistration = false
+            for _ in 0..<1000 {
+                if await agent.providerCentral.provider(named: "appagent-openai-completions") != nil {
+                    observedRegistration = true
+                    break
+                }
+                await Task.yield()
+            }
+            XCTAssertTrue(observedRegistration)
+            await agent.applyEndpointSettings(AppAgentEndpointSettings())
+            await applying.value
+            XCTAssertNil(session.provider)
+            XCTAssertNil(session.modelId)
+            XCTAssertNil(agent.modelPolicy)
+            let names = await agent.providerCentral.registeredNames
+            XCTAssertTrue(names.isEmpty)
+        }
+    }
+
+    private func makeAgent(
+        profile: AIAgentProfile = .init(autoPersist: false, registerBuiltInTools: false)
+    ) -> AIAgent {
+        AIAgent(
+            id: "settings-\(UUID().uuidString)", profile: profile,
+            toolCentral: ToolCentral(), providerCentral: ModelProviderCentral(),
+            memoryStorage: InMemoryMemoryStorage(), sessionStorage: InMemorySessionStorage()
+        )
     }
 
     private func validSettings() -> AppAgentEndpointSettings {
@@ -233,5 +385,32 @@ final class AppAgentSettingsTests: XCTestCase {
             apiKey: "test-key",
             enabledModels: [AppAgentModelRef(modelId: "a", apiProtocol: .openaiCompletions)]
         )
+    }
+}
+
+private struct SettingsCountingProvider: ModelProvider {
+    let name = "host"
+    let baseURL = "https://example.com"
+    let apiKey = "test-key"
+    let apiProtocol: APIProtocol = .openaiCompletions
+    let customHeaders: [String: String] = [:]
+    let models = [ModelSpec(id: "a")]
+    let requestTimeout: TimeInterval = 1
+    let requests = Locked(wrappedValue: 0)
+
+    func streamCompletion(
+        messages: [AIAgentMessage],
+        system: [ContentOrCacheControl<SystemPrompt>],
+        tools: [ContentOrCacheControl<any ToolProtocol>],
+        modelId: String
+    ) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
+        requests.mutate {
+            $0 += 1
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.textDelta("Unexpected request"))
+            continuation.yield(.done(stopReason: .endTurn))
+            continuation.finish()
+        }
     }
 }

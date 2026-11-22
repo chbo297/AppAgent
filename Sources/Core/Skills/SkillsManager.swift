@@ -25,7 +25,7 @@ public actor SkillsManager {
 
     private let bundledSkillsURL: URL?
     private let userSkillsURL: URL
-    private var cachedSkills: [String: Skill]?
+    private var cachedMetadata: [String: SkillMetadata]?
 
     /// Initialize with optional custom paths.
     public init(bundledSkillsURL: URL? = nil, userSkillsURL: URL? = nil) {
@@ -38,29 +38,41 @@ public actor SkillsManager {
         }
     }
 
-    /// List all available skills (name + description only, for token efficiency).
-    public func listSkills(category: String? = nil) -> [Skill] {
-        let all = loadAllSkills()
+    /// List metadata only. Bodies and linked resources are never loaded here.
+    public func listSkills(category: String? = nil) -> [SkillMetadata] {
+        let all = loadMetadata()
         if let category {
-            return StableSort.byName(all.values.filter { $0.category == category }) { $0.name }
+            // `catalog` groups skills without a category under "uncategorized"; that name must list them.
+            let includesUncategorized = category == "uncategorized"
+            return StableSort.byName(all.values.filter {
+                $0.category == category || (includesUncategorized && $0.category == nil)
+            }) { $0.name }
         }
         return StableSort.byName(Array(all.values)) { $0.name }
     }
 
     /// Load a skill's full content by name.
     public func skill(named name: String) -> Skill? {
-        loadAllSkills()[name]
+        guard let metadata = loadMetadata()[name] else {
+            return nil
+        }
+        return loadSkill(named: name, metadata: metadata)
     }
 
     /// Get a linked file's content within a skill.
     public func linkedFile(skillName: String, filePath: String) -> String? {
-        guard let skill = loadAllSkills()[skillName] else { return nil }
-        return skill.linkedFiles[filePath]
+        guard let metadata = loadMetadata()[skillName],
+              metadata.linkedFiles.contains(filePath),
+              let url = skillURL(named: skillName, metadata: metadata)?
+                .appendingPathComponent(filePath) else {
+            return nil
+        }
+        return try? String(contentsOf: url, encoding: .utf8)
     }
 
-    /// Invalidate the cache (e.g., after skill_manage creates/edits a skill).
+    /// Invalidate the metadata cache after a skill changes.
     public func invalidateCache() {
-        cachedSkills = nil
+        cachedMetadata = nil
     }
 
     // MARK: - Skill Management
@@ -81,7 +93,7 @@ public actor SkillsManager {
         try FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
         let destination = try validatedMutationTarget(skillFile)
         try content.write(to: destination, atomically: true, encoding: .utf8)
-        cachedSkills = nil
+        cachedMetadata = nil
     }
 
     /// Delete a user skill.
@@ -103,7 +115,7 @@ public actor SkillsManager {
             }
 
         guard let skillDir = possiblePaths?.first else {
-            throw AIAgentError.toolExecutionFailed(toolName: "skill_manage", underlying:
+            throw AIAgentError.toolExecutionFailed(toolName: "skill", underlying:
                 NSError(domain: "SkillsManager", code: 404,
                         userInfo: [NSLocalizedDescriptionKey: "Skill '\(name)' not found in user skills"]))
         }
@@ -113,7 +125,7 @@ public actor SkillsManager {
             throw mutationError("Target is not a user skill.")
         }
         try fm.removeItem(at: skillDir)
-        cachedSkills = nil
+        cachedMetadata = nil
     }
 
     // MARK: - Private
@@ -142,24 +154,26 @@ public actor SkillsManager {
         NSError(domain: "SkillsManager", code: 403, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
-    private func loadAllSkills() -> [String: Skill] {
-        if let cached = cachedSkills { return cached }
+    private func loadMetadata() -> [String: SkillMetadata] {
+        if let cached = cachedMetadata {
+            return cached
+        }
 
-        var skills: [String: Skill] = [:]
+        var skills: [String: SkillMetadata] = [:]
 
         // Load bundled skills
         if let bundled = bundledSkillsURL {
-            loadSkillsFrom(directory: bundled, into: &skills)
+            loadMetadataFrom(directory: bundled, into: &skills)
         }
 
         // Load user skills (override bundled with same name)
-        loadSkillsFrom(directory: userSkillsURL, into: &skills)
+        loadMetadataFrom(directory: userSkillsURL, into: &skills)
 
-        cachedSkills = skills
+        cachedMetadata = skills
         return skills
     }
 
-    private func loadSkillsFrom(directory: URL, into skills: inout [String: Skill]) {
+    private func loadMetadataFrom(directory: URL, into skills: inout [String: SkillMetadata]) {
         let fm = FileManager.default
         guard let contents = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey]) else {
             return
@@ -172,7 +186,11 @@ public actor SkillsManager {
             let skillFile = item.appendingPathComponent("SKILL.md")
             if fm.fileExists(atPath: skillFile.path) {
                 // Direct skill directory
-                if let skill = parseSkillFile(at: skillFile, dirName: item.lastPathComponent, category: nil) {
+                if let skill = parseMetadata(
+                    at: skillFile,
+                    dirName: item.lastPathComponent,
+                    category: nil
+                ) {
                     skills[skill.name] = skill
                 }
             } else {
@@ -183,8 +201,11 @@ public actor SkillsManager {
                         guard subIsDir else { continue }
                         let subSkillFile = subItem.appendingPathComponent("SKILL.md")
                         if fm.fileExists(atPath: subSkillFile.path) {
-                            if let skill = parseSkillFile(at: subSkillFile, dirName: subItem.lastPathComponent,
-                                                          category: item.lastPathComponent) {
+                            if let skill = parseMetadata(
+                                at: subSkillFile,
+                                dirName: subItem.lastPathComponent,
+                                category: item.lastPathComponent
+                            ) {
                                 skills[skill.name] = skill
                             }
                         }
@@ -194,51 +215,144 @@ public actor SkillsManager {
         }
     }
 
-    private func parseSkillFile(at url: URL, dirName: String, category: String?) -> Skill? {
+    private func parseMetadata(
+        at url: URL,
+        dirName: String,
+        category: String?
+    ) -> SkillMetadata? {
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
 
-        // Parse YAML frontmatter
         var name = dirName
         var description = ""
         var skillCategory = category
-        var body = raw
 
-        if raw.hasPrefix("---") {
-            let parts = raw.components(separatedBy: "---")
-            if parts.count >= 3 {
-                let frontmatter = parts[1]
-                body = parts.dropFirst(2).joined(separator: "---").trimmingCharacters(in: .whitespacesAndNewlines)
-
-                for line in frontmatter.components(separatedBy: .newlines) {
-                    let trimmed = line.trimmingCharacters(in: .whitespaces)
-                    if trimmed.hasPrefix("name:") {
-                        name = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                    } else if trimmed.hasPrefix("description:") {
-                        description = trimmed.dropFirst(12).trimmingCharacters(in: .whitespaces)
-                    } else if trimmed.hasPrefix("category:") {
-                        skillCategory = trimmed.dropFirst(9).trimmingCharacters(in: .whitespaces)
-                    }
+        let lines = raw.components(separatedBy: "\n")
+        if lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "---",
+           let closing = lines.indices.dropFirst().first(where: {
+               lines[$0].trimmingCharacters(in: .whitespacesAndNewlines) == "---"
+           }) {
+            let frontmatter = lines[1..<closing]
+            for line in frontmatter {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix("name:") {
+                    name = Self.metadataValue(trimmed.dropFirst(5))
+                } else if trimmed.hasPrefix("description:") {
+                    description = Self.metadataValue(trimmed.dropFirst(12))
+                } else if trimmed.hasPrefix("category:") {
+                    skillCategory = Self.metadataValue(trimmed.dropFirst(9))
                 }
             }
         }
 
-        // Load linked files (references/, templates/, scripts/, assets/)
+        return SkillMetadata(
+            name: name,
+            description: description,
+            category: skillCategory,
+            linkedFiles: linkedFilePaths(in: url.deletingLastPathComponent())
+        )
+    }
+
+    private func loadSkill(named name: String, metadata: SkillMetadata) -> Skill? {
+        guard let url = skillURL(named: name, metadata: metadata),
+              let raw = try? String(contentsOf: url, encoding: .utf8) else {
+            return nil
+        }
+        let lines = raw.components(separatedBy: "\n")
+        let body: String
+        if lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "---",
+           let closing = lines.indices.dropFirst().first(where: {
+               lines[$0].trimmingCharacters(in: .whitespacesAndNewlines) == "---"
+           }) {
+            body = lines.dropFirst(closing + 1)
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            body = raw
+        }
         var linkedFiles: [String: String] = [:]
-        let skillDir = url.deletingLastPathComponent()
-        let fm = FileManager.default
-        for subdir in ["references", "templates", "scripts", "assets"] {
-            let subdirURL = skillDir.appendingPathComponent(subdir)
-            if let files = try? fm.contentsOfDirectory(at: subdirURL, includingPropertiesForKeys: nil) {
-                for file in files {
-                    if let content = try? String(contentsOf: file, encoding: .utf8) {
-                        let relativePath = "\(subdir)/\(file.lastPathComponent)"
-                        linkedFiles[relativePath] = content
+        for path in metadata.linkedFiles {
+            if let content = try? String(
+                contentsOf: url.deletingLastPathComponent().appendingPathComponent(path),
+                encoding: .utf8
+            ) {
+                linkedFiles[path] = content
+            }
+        }
+        return Skill(
+            name: metadata.name,
+            description: metadata.description,
+            category: metadata.category,
+            content: body,
+            linkedFiles: linkedFiles
+        )
+    }
+
+    private func skillURL(named name: String, metadata: SkillMetadata) -> URL? {
+        let roots = [userSkillsURL, bundledSkillsURL].compactMap { $0 }
+        for root in roots {
+            let direct = root.appendingPathComponent(name).appendingPathComponent("SKILL.md")
+            if FileManager.default.fileExists(atPath: direct.path) {
+                return direct
+            }
+            if let categories = try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey]
+            ) {
+                for category in categories {
+                    let candidate = category
+                        .appendingPathComponent(name)
+                        .appendingPathComponent("SKILL.md")
+                    if FileManager.default.fileExists(atPath: candidate.path) {
+                        return candidate
                     }
                 }
             }
         }
+        return nil
+    }
 
-        return Skill(name: name, description: description, category: skillCategory,
-                      content: body, linkedFiles: linkedFiles)
+    private func linkedFilePaths(in skillDirectory: URL) -> [String] {
+        let fileManager = FileManager.default
+        var result: [String] = []
+        for directory in ["references", "templates", "scripts", "assets"] {
+            let root = skillDirectory.appendingPathComponent(directory)
+            guard let files = try? fileManager.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+            for case let file as URL in files {
+                guard (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+                      let relative = relativePath(of: file, from: skillDirectory) else {
+                    continue
+                }
+                result.append(relative)
+            }
+        }
+        return result.sorted()
+    }
+
+    private func relativePath(of file: URL, from root: URL) -> String? {
+        guard SandboxPathResolver.contains(file, in: root) else {
+            return nil
+        }
+        return file.pathComponents
+            .dropFirst(root.pathComponents.count)
+            .joined(separator: "/")
+    }
+
+    private static func metadataValue(_ raw: Substring) -> String {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.count >= 2 else { return value }
+        if value.first == "\"", value.last == "\"" {
+            return (try? JSONDecoder().decode(String.self, from: Data(value.utf8)))
+                ?? String(value.dropFirst().dropLast())
+        }
+        if value.first == "'", value.last == "'" {
+            return value.dropFirst().dropLast().replacingOccurrences(of: "''", with: "'")
+        }
+        return value
     }
 }

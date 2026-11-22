@@ -61,6 +61,8 @@ enum SessionHistoryMerge {
                         )
                     case .hostContext(let payload):
                         return .hostContext(payload)
+                    case .attachment(let attachment):
+                        return .attachment(attachment)
                     }
                 }
                 // Block identity in this model is messageID + block index; a fresh message ID
@@ -76,7 +78,6 @@ enum SessionHistoryMerge {
                         displayPolicy: message.displayPolicy,
                         trigger: message.trigger,
                         eventId: message.eventId,
-                        stateCursor: message.stateCursor,
                         causedByToolCallId: message.causedByToolCallId.map {
                             remappedCallID($0, turn: turn)
                         }

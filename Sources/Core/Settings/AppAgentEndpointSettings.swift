@@ -90,6 +90,7 @@ public struct AppAgentEndpointSettings: Codable, Sendable, Equatable {
     /// 所有入口共用的最低要求：有效地址、密钥及至少一个有效模型。
     public var isUsable: Bool {
         hasUsableBaseURL && hasUsableAPIKey && hasUsableModels
+            && contextWindow > 0 && maxTokens > 0
     }
 
     public var hasUsableModels: Bool {

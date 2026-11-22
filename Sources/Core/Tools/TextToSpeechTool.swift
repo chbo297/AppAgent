@@ -46,20 +46,17 @@ public struct TextToSpeechTool: ToolProtocol {
         }
 
         #if canImport(AVFoundation)
+        try Task.checkCancellation()
         let language = arguments["language"]?.stringValue ?? "en-US"
         let rate = Float(arguments["rate"]?.numberValue ?? 0.5)
-
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: language)
-        utterance.rate = max(0, min(1, rate)) * AVSpeechUtteranceMaximumSpeechRate
-
-        let synthesizer = AVSpeechSynthesizer()
         let speechDelegate = SpeechCompletionDelegate()
-        synthesizer.delegate = speechDelegate
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            speechDelegate.attach(continuation)
-            synthesizer.speak(utterance)
-        }
+        let playback = await SpeechPlayback(completion: speechDelegate)
+        try await speechDelegate.wait(start: {
+            Task { @MainActor in playback.start(text: text, language: language, rate: rate) }
+        }, stop: {
+            Task { @MainActor in playback.stop() }
+        })
+        try Task.checkCancellation()
 
         return .json(.object([
             "success": .bool(true),
@@ -75,34 +72,91 @@ public struct TextToSpeechTool: ToolProtocol {
 
 #if canImport(AVFoundation)
 /// Delegate that signals completion when speech finishes or is cancelled.
-private final class SpeechCompletionDelegate: NSObject, AVSpeechSynthesizerDelegate, AppAgentRuntimeOwned {
+final class SpeechCompletionDelegate: NSObject, AVSpeechSynthesizerDelegate, AppAgentRuntimeOwned {
     /// `AVSpeechSynthesizerDelegate` 自带 Sendable 语义，合成器可以从任意队列回调，
     /// 所以 continuation 不能是裸 `var`：必须收进锁里，读-改-写在一个临界区内完成。
-    private let pendingContinuation = Locked<CheckedContinuation<Void, Never>?>(wrappedValue: nil)
+    private struct State: Sendable {
+        var continuation: CheckedContinuation<Void, any Error>?
+        var outcome: Result<Void, any Error>?
+    }
+    private let state = Locked(wrappedValue: State())
+
+    var isFinished: Bool { state.wrappedValue.outcome != nil }
+
+    func wait(start: @escaping @Sendable () -> Void, stop: @escaping @Sendable () -> Void) async throws {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { continuation in
+                if attach(continuation) { start() }
+            }
+        } onCancel: {
+            self.cancel()
+            stop()
+        }
+    }
 
     /// 挂上本次朗读的 continuation（`speak` 之前调用，保证回调一定能取到）。
-    func attach(_ continuation: CheckedContinuation<Void, Never>) {
-        pendingContinuation.wrappedValue = continuation
+    private func attach(_ continuation: CheckedContinuation<Void, any Error>) -> Bool {
+        let outcome = state.mutate { value -> Result<Void, any Error>? in
+            if let outcome = value.outcome { return outcome }
+            value.continuation = continuation
+            return nil
+        }
+        if let outcome { continuation.resume(with: outcome); return false }
+        return true
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                            didFinish utterance: AVSpeechUtterance) {
-        resumeOnce()
+        finish()
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                            didCancel utterance: AVSpeechUtterance) {
-        resumeOnce()
+        cancel()
     }
 
     /// `didFinish` / `didCancel` 都可能到；原子取出保证只 resume 一次（double resume 直接 crash）。
     /// 分成「读 → 判空 → 清空」三步就不是原子的，两条回调撞在一起会各拿到同一个 continuation。
-    private func resumeOnce() {
-        pendingContinuation.mutate { stored -> CheckedContinuation<Void, Never>? in
-            let taken = stored
-            stored = nil
-            return taken
-        }?.resume()
+    func finish() { complete(.success(())) }
+    func cancel() { complete(.failure(CancellationError())) }
+
+    private func complete(_ outcome: Result<Void, any Error>) {
+        let continuation = state.mutate { value -> CheckedContinuation<Void, any Error>? in
+            guard value.outcome == nil else { return nil }
+            value.outcome = outcome
+            let pending = value.continuation
+            value.continuation = nil
+            return pending
+        }
+        continuation?.resume(with: outcome)
+    }
+}
+
+/// AVFoundation objects stay on the main actor; cancellation resumes the waiter immediately.
+@MainActor
+private final class SpeechPlayback {
+    private let completion: SpeechCompletionDelegate
+    private var synthesizer: AVSpeechSynthesizer?
+
+    init(completion: SpeechCompletionDelegate) { self.completion = completion }
+
+    func start(text: String, language: String, rate: Float) {
+        guard !completion.isFinished else { return }
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: language)
+        utterance.rate = max(0, min(1, rate)) * AVSpeechUtteranceMaximumSpeechRate
+        guard !completion.isFinished else { return }
+        let synthesizer = AVSpeechSynthesizer()
+        self.synthesizer = synthesizer
+        synthesizer.delegate = completion
+        guard !completion.isFinished else { stop(); return }
+        synthesizer.speak(utterance)
+    }
+
+    func stop() {
+        synthesizer?.stopSpeaking(at: .immediate)
+        synthesizer = nil
     }
 }
 #endif

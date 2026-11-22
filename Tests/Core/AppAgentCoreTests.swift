@@ -196,7 +196,7 @@ final class AppAgentCoreTests: XCTestCase {
             apiKey: "new-key",
             apiProtocol: .openaiCompletions,
             customHeaders: [
-                "comate_custom_header": "{\"username\":\"test\",\"source\":\"test\"}"
+                "x-custom-header": "{\"username\":\"test\",\"source\":\"test\"}"
             ],
             models: [updated],
             defaultRequestMaxTokens: 1024
@@ -205,7 +205,7 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(provider.baseURL, "https://new.example.com/v1")
         XCTAssertEqual(provider.apiKey, "new-key")
         XCTAssertEqual(provider.apiProtocol, .openaiCompletions)
-        XCTAssertEqual(provider.customHeaders["comate_custom_header"], "{\"username\":\"test\",\"source\":\"test\"}")
+        XCTAssertEqual(provider.customHeaders["x-custom-header"], "{\"username\":\"test\",\"source\":\"test\"}")
         XCTAssertEqual(provider.models.map(\.id), ["new-model"])
         XCTAssertEqual(provider.defaultRequestMaxTokens, 1024)
     }
@@ -274,14 +274,25 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(parsed?.data, "{\"choices\":[]}")
     }
 
-    func testOpenAIChatCompletionsParserTextDelta() {
+    func testSSEParserAcceptsFieldsWithoutSpaceAndPreservesPayloadWhitespace() {
+        var parser = SSEParser()
+        XCTAssertNil(parser.processLine("event:content_block_delta"))
+        XCTAssertNil(parser.processLine("data:  payload"))
+        let event = parser.processLine("")
+        XCTAssertEqual(event?.event, "content_block_delta")
+        XCTAssertEqual(event?.data, " payload", "Only one optional field separator space is removed")
+        XCTAssertNil(parser.processLine("data:[DONE]"))
+        XCTAssertEqual(parser.flush()?.data, "[DONE]")
+    }
+
+    func testOpenAIChatCompletionsParserTextDelta() throws {
         var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let event = SSEEvent(
             event: "",
             data: #"{"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}"#
         )
 
-        let events = OpenAIChatCompletionsMapper.parseSSEEvent(
+        let events = try OpenAIChatCompletionsMapper.parseSSEEvent(
             event,
             activeToolCalls: &activeToolCalls
         )
@@ -312,14 +323,14 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertTrue(classified.shouldFallback)
     }
 
-    func testOpenAIChatCompletionsParserToolCall() {
+    func testOpenAIChatCompletionsParserToolCall() throws {
         var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let event = SSEEvent(
             event: "",
             data: #"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"file_search","arguments":"{\"query\":\"Swift\"}"}}]},"finish_reason":"tool_calls"}]}"#
         )
 
-        let events = OpenAIChatCompletionsMapper.parseSSEEvent(
+        let events = try OpenAIChatCompletionsMapper.parseSSEEvent(
             event,
             activeToolCalls: &activeToolCalls
         )
@@ -339,9 +350,9 @@ final class AppAgentCoreTests: XCTestCase {
         }
     }
 
-    /// 续传分片把 `id` / `name` 写成空串（GLM 系 OneAPI 端点实测如此）时，名字不能被擦掉，
+    /// 续传分片把 `id` / `name` 写成空串（GLM 系 OpenAI 兼容网关实测如此）时，名字不能被擦掉，
     /// 否则收尾时整条调用被丢掉，表现为 `finish_reason=tool_calls` 却 0 个调用。
-    func testOpenAIChatCompletionsParserToolCallWithEmptyContinuationFields() {
+    func testOpenAIChatCompletionsParserToolCallWithEmptyContinuationFields() throws {
         var activeToolCalls: [Int: OpenAIChatCompletionsMapper.ActiveToolCall] = [:]
         let chunks = [
             #"{"choices":[{"index":0,"delta":{"content":"","tool_calls":[{"id":"call_abc","index":0,"type":"function","function":{"name":"app_runtime_inspect","arguments":"{"}}]}}]}"#,
@@ -350,14 +361,14 @@ final class AppAgentCoreTests: XCTestCase {
         ]
 
         for chunk in chunks {
-            let events = OpenAIChatCompletionsMapper.parseSSEEvent(
+            let events = try OpenAIChatCompletionsMapper.parseSSEEvent(
                 SSEEvent(event: "", data: chunk),
                 activeToolCalls: &activeToolCalls
             )
             XCTAssertTrue(events.isEmpty, "工具调用要攒到 finish_reason 才 flush")
         }
 
-        let finish = OpenAIChatCompletionsMapper.parseSSEEvent(
+        let finish = try OpenAIChatCompletionsMapper.parseSSEEvent(
             SSEEvent(event: "", data: #"{"choices":[{"index":0,"delta":{"content":""},"finish_reason":"tool_calls"}]}"#),
             activeToolCalls: &activeToolCalls
         )
@@ -381,19 +392,25 @@ final class AppAgentCoreTests: XCTestCase {
 
     /// 失败 / 被中断的一轮只剩用户那句话，不能再发给模型：实测同一句提问在历史里堆了 4 条，
     /// 模型据此认为「用户问了好几次」，wire 上还出现连续多条 user。
+    /// 只有紧挨当前轮的那一个孤儿轮保留用户原话（用户常在补充或纠正它），后面补一条说明保持交替。
     func testOrphanTurnsAreStrippedBeforeSendingToModel() {
         let messages: [AIAgentMessage] = [
             AIAgentMessage(role: .user, content: [.text("几点了")], turnID: 1),
             AIAgentMessage(role: .assistant, content: [.text("10:07")], turnID: 1),
             AIAgentMessage(role: .user, content: [.text("当前页面有哪些功能")], turnID: 2),
-            AIAgentMessage(role: .user, content: [.text("再问一次")], turnID: 3)
+            AIAgentMessage(role: .user, content: [.text("帮我把写着册的按钮移除")], turnID: 3),
+            AIAgentMessage(role: .user, content: [.text("测试的测")], turnID: 4)
         ]
 
-        // turnID 3 是正在跑的那一轮：它的 assistant 消息还没写进历史，必须留下。
-        let sent = LLMExecutor.strippingOrphanTurns(messages, keeping: 3)
+        // turnID 4 是正在跑的那一轮：它的 assistant 消息还没写进历史，必须留下。
+        let sent = LLMExecutor.strippingOrphanTurns(messages, keeping: 4)
 
-        XCTAssertEqual(sent.map(\.turnID), [1, 1, 3])
-        XCTAssertFalse(sent.contains { $0.text.contains("当前页面") })
+        XCTAssertEqual(sent.map(\.turnID), [1, 1, 3, 3, 4])
+        XCTAssertEqual(sent.map(\.role), [.user, .assistant, .user, .assistant, .user])
+        XCTAssertFalse(sent.contains { message in
+            message.text.contains("当前页面")
+        })
+        XCTAssertTrue(sent[3].text.contains("interrupted"))
     }
 
     /// 旧快照没有 turnID，无从判断归属，一条都不能丢。
@@ -404,6 +421,152 @@ final class AppAgentCoreTests: XCTestCase {
         ]
 
         XCTAssertEqual(LLMExecutor.strippingOrphanTurns(messages, keeping: nil).count, 2)
+    }
+
+    // MARK: - 上下文压缩
+
+    /// 真机：一张 1MB 的截图按 base64 长度被估成 ~345k tokens（网关实际计费 ~28k），误触发压缩。
+    func testCompressorEstimatesImagesByFixedCostNotBase64Length() {
+        let image = AIAgentMessage.ImageAttachment(
+            base64: String(repeating: "A", count: 1_400_000),
+            mediaType: "image/png"
+        )
+        let message = AIAgentMessage(role: .user, content: [
+            .toolResult(AIAgentMessage.ToolCallResult(toolCallId: "shot", content: "ok", images: [image]))
+        ])
+
+        let tokens = SimpleContextCompressor().estimateTokens(messages: [message])
+
+        XCTAssertLessThan(tokens, 2_000)
+    }
+
+    /// 真机：一轮「看图画马」7 张截图全量重发，请求 4.7MB；只给模型留最近两张原图。
+    func testProviderHistoryKeepsOnlyRecentToolImages() {
+        let image = AIAgentMessage.ImageAttachment(base64: "AAAA", mediaType: "image/jpeg")
+        let messages = (0..<4).map { index in
+            AIAgentMessage(role: .user, content: [
+                .toolResult(AIAgentMessage.ToolCallResult(toolCallId: "shot\(index)", content: "view \(index)",
+                                                          images: [image]))
+            ])
+        }
+
+        let retained = SimpleContextCompressor.retainingRecentImages(messages, keep: 2)
+        let results = retained.compactMap { message -> AIAgentMessage.ToolCallResult? in
+            guard case .toolResult(let result)? = message.content.first else {
+                return nil
+            }
+            return result
+        }
+
+        XCTAssertEqual(results.map(\.images.count), [0, 0, 1, 1])
+        XCTAssertTrue(results[0].content.hasPrefix("view 0"))
+        XCTAssertTrue(results[0].content.contains("omitted"))
+        XCTAssertEqual(retained.map(\.id), messages.map(\.id))
+    }
+
+    /// 真机：压缩后尾部只剩最后一个工具单元，当轮请求被挤掉，模型转头回答了更早的「测试的测」。
+    func testCompressorKeepsLatestUserRequest() async {
+        var messages: [AIAgentMessage] = [
+            AIAgentMessage(role: .user, content: [.text("测试的测")], turnID: 1),
+            AIAgentMessage(role: .assistant, content: [.text("我在线")], turnID: 1)
+        ]
+        for index in 0..<6 {
+            let role: AIAgentMessageRole = index.isMultiple(of: 2) ? .user : .assistant
+            messages.append(AIAgentMessage(
+                role: role,
+                content: [.text(String(repeating: "旧", count: 2_000))],
+                turnID: 2 + index / 2
+            ))
+        }
+        messages.append(AIAgentMessage(role: .user, content: [.text("画一匹马")], turnID: 5))
+        for (id, size) in [("big", 5_000), ("small", 10)] {
+            messages.append(AIAgentMessage(
+                role: .assistant,
+                content: [.toolUse(AIAgentMessage.ToolCall(id: id, name: "app_map_draw", arguments: [:]))],
+                turnID: 5
+            ))
+            messages.append(AIAgentMessage(
+                role: .user,
+                content: [.toolResult(AIAgentMessage.ToolCallResult(
+                    toolCallId: id,
+                    content: String(repeating: "x", count: size)
+                ))],
+                turnID: 5
+            ))
+        }
+
+        let compressed = await SimpleContextCompressor().compress(messages: messages, targetTokens: 300)
+        let texts = compressed.map(\.text)
+
+        XCTAssertTrue(texts.contains("画一匹马"))
+        let lastResultID = compressed.last?.content.compactMap { part -> String? in
+            guard case .toolResult(let result) = part else {
+                return nil
+            }
+            return result.toolCallId
+        }.first
+        XCTAssertEqual(lastResultID, "small")
+        XCTAssertFalse(texts.contains { text in
+            text.contains("Respond ONLY")
+        })
+        XCTAssertTrue(texts.contains { text in
+            text.contains("intermediate messages of the current request")
+        })
+    }
+
+    /// 开头那条本身就很大时让位给最近几轮：真实模型上压缩后把「最后一段」答成了第一段。
+    func testCompressorPrefersRecentTurnsOverLargeHead() async {
+        let filler = String(repeating: "背景材料", count: 300)
+        var messages: [AIAgentMessage] = []
+        for (turn, code) in ["青松", "白鹭", "赤霞"].enumerated() {
+            messages.append(AIAgentMessage(role: .user, content: [.text("\(filler) 暗号\(code)")], turnID: turn + 1))
+            messages.append(AIAgentMessage(role: .assistant, content: [.text("收到")], turnID: turn + 1))
+        }
+        messages.append(AIAgentMessage(role: .user, content: [.text("最后一段的暗号是什么？")], turnID: 4))
+
+        let compressed = await SimpleContextCompressor().compress(messages: messages, targetTokens: 1_200)
+        let text = compressed.map(\.text).joined()
+
+        XCTAssertTrue(text.contains("赤霞"), "最近一轮必须留下")
+        XCTAssertFalse(text.contains("青松"), "大块开头不应挤掉最近的内容")
+        XCTAssertEqual(compressed.last?.text, "最后一段的暗号是什么？")
+    }
+
+    /// 最新工具结果超出剩余预算时也必须留下，否则模型看不到刚调用的结果，会反复调用同一个工具。
+    func testCompressorKeepsNewestToolUnitEvenWhenOverBudget() async {
+        var messages: [AIAgentMessage] = [
+            AIAgentMessage(role: .user, content: [.text("开场")], turnID: 1),
+            AIAgentMessage(role: .assistant, content: [.text("好的")], turnID: 1),
+            AIAgentMessage(role: .user, content: [.text("画一匹马")], turnID: 2)
+        ]
+        for (id, size) in [("small", 10), ("big", 5_000)] {
+            messages.append(AIAgentMessage(
+                role: .assistant,
+                content: [.toolUse(AIAgentMessage.ToolCall(id: id, name: "app_map_draw", arguments: [:]))],
+                turnID: 2
+            ))
+            messages.append(AIAgentMessage(
+                role: .user,
+                content: [.toolResult(AIAgentMessage.ToolCallResult(
+                    toolCallId: id,
+                    content: String(repeating: "x", count: size)
+                ))],
+                turnID: 2
+            ))
+        }
+
+        let compressed = await SimpleContextCompressor().compress(messages: messages, targetTokens: 300)
+
+        XCTAssertTrue(compressed.map(\.text).contains("画一匹马"))
+        let resultIDs = compressed.flatMap { message in
+            message.content.compactMap { part -> String? in
+                guard case .toolResult(let result) = part else {
+                    return nil
+                }
+                return result.toolCallId
+            }
+        }
+        XCTAssertEqual(resultIDs.last, "big")
     }
 
     // MARK: - OpenAI Responses protocol
@@ -535,10 +698,7 @@ final class AppAgentCoreTests: XCTestCase {
             eventId: "event-wire-1",
             trigger: "tap",
             action: "open-detail",
-            cursor: StateCursor(epoch: "epoch-2", revision: 7),
-            changes: .object([
-                "page": .string("detail")
-            ])
+            detail: "page=detail"
         )
         let message = AIAgentMessage.hostContext(.event(event))
 
@@ -549,7 +709,7 @@ final class AppAgentCoreTests: XCTestCase {
             if case .hostContext(let payload) = content {
                 return payload.modelText.contains("\"action\":\"open-detail\"")
                     && payload.modelText.contains("\"eventId\":\"event-wire-1\"")
-                    && payload.modelText.contains("\"revision\":7")
+                    && payload.modelText.contains("\"detail\":\"page=detail\"")
             }
             return false
         })
@@ -1431,17 +1591,17 @@ final class AppAgentCoreTests: XCTestCase {
 
     func testPerOperationSafetyLevels() {
         // 同一个工具里「看」和「删」不能共用一个级别
-        let sandbox = AppSandboxFileTool()
-        XCTAssertEqual(sandbox.safetyLevel(for: ["op": .string("list")]), .safe)
-        XCTAssertEqual(sandbox.safetyLevel(for: ["op": .string("read")]), .safe)
-        XCTAssertEqual(sandbox.safetyLevel(for: ["op": .string("write")]), .moderate)
-        XCTAssertEqual(sandbox.safetyLevel(for: ["op": .string("delete")]), .sensitive)
+        let file = FileTool()
+        XCTAssertEqual(file.safetyLevel(for: ["op": .string("catalog")]), .safe)
+        XCTAssertEqual(file.safetyLevel(for: ["op": .string("read")]), .safe)
+        XCTAssertEqual(file.safetyLevel(for: ["op": .string("write")]), .moderate)
+        XCTAssertEqual(file.safetyLevel(for: ["op": .string("delete")]), .sensitive)
 
         let defaults = AppUserDefaultsTool()
         XCTAssertEqual(defaults.safetyLevel(for: ["op": .string("read")]), .safe)
         XCTAssertEqual(defaults.safetyLevel(for: ["op": .string("remove")]), .sensitive)
 
-        let sessions = SessionManageTool()
+        let sessions = SessionTool()
         XCTAssertEqual(sessions.safetyLevel(for: ["op": .string("list")]), .safe)
         XCTAssertEqual(sessions.safetyLevel(for: ["op": .string("delete")]), .sensitive)
 
@@ -1450,13 +1610,13 @@ final class AppAgentCoreTests: XCTestCase {
         XCTAssertEqual(memory.safetyLevel(for: ["action": .string("remove")]), .sensitive)
 
         // 缺 op 时不能降级成 safe，否则模型省掉参数就绕过了闸门
-        XCTAssertGreaterThan(sandbox.safetyLevel(for: [:]), .safe)
+        XCTAssertGreaterThan(file.safetyLevel(for: [:]), .safe)
         XCTAssertGreaterThan(defaults.safetyLevel(for: [:]), .safe)
     }
 
     func testSinglePurposeToolKeepsStaticSafetyLevel() {
-        let write = FileWriteTool()
-        XCTAssertEqual(write.safetyLevel(for: [:]), write.safetyLevel)
+        let device = DeviceInfoTool()
+        XCTAssertEqual(device.safetyLevel(for: [:]), device.safetyLevel)
     }
 
     func testReadOnlyPolicyBlocksAnythingAboveSafe() {
@@ -1473,17 +1633,17 @@ final class AppAgentCoreTests: XCTestCase {
     func testApprovalKeyIsToolPlusOperation() {
         // 工具级太粗（批了 list 等于批了 delete），单次级太细（同一 op 每次都问）
         XCTAssertEqual(
-            LLMExecutor.approvalKey(tool: "app_sandbox_file", arguments: ["op": .string("delete")]),
-            "app_sandbox_file:delete")
+            LLMExecutor.approvalKey(tool: "file", arguments: ["op": .string("delete")]),
+            "file:delete")
         XCTAssertNotEqual(
-            LLMExecutor.approvalKey(tool: "app_sandbox_file", arguments: ["op": .string("list")]),
-            LLMExecutor.approvalKey(tool: "app_sandbox_file", arguments: ["op": .string("delete")]))
+            LLMExecutor.approvalKey(tool: "file", arguments: ["op": .string("read")]),
+            LLMExecutor.approvalKey(tool: "file", arguments: ["op": .string("delete")]))
         // action 型工具（memory / clipboard）走同一套
         XCTAssertEqual(
             LLMExecutor.approvalKey(tool: "memory", arguments: ["action": .string("remove")]),
             "memory:remove")
         // 单 op 工具退化成 "*"
-        XCTAssertEqual(LLMExecutor.approvalKey(tool: "file_write", arguments: [:]), "file_write:*")
+        XCTAssertEqual(LLMExecutor.approvalKey(tool: "file", arguments: [:]), "file:*")
     }
 
     func testClampToolOutputLeavesSmallResultsAlone() {
@@ -2449,7 +2609,7 @@ final class AppAgentCoreTests: XCTestCase {
     /// "Tool 'x' not found" —— 模型只能空转或放弃。
     func testToolOfferedToModelIsAlwaysExecutable() async {
         let provider = ScriptedToolCallProvider(
-            toolName: "app_device_info",
+            toolName: "device_info",
             arguments: ["section": .string("device")]
         )
         let providerCentral = ModelProviderCentral()
@@ -2457,7 +2617,7 @@ final class AppAgentCoreTests: XCTestCase {
 
         // 专用 ToolCentral，避免污染进程级 .default
         let toolCentral = ToolCentral()
-        await toolCentral.register(AppDeviceInfoTool())
+        await toolCentral.register(DeviceInfoTool())
 
         let central = AIAgentCentral()
         let agent = await central.create(
@@ -2475,9 +2635,9 @@ final class AppAgentCoreTests: XCTestCase {
         )
 
         let session = await agent.createSession(title: "Parity")
-        // 造一个「陈旧快照」：清单里还能列出 app_device_info，但执行表是空的。
+        // 造一个「陈旧快照」：清单里还能列出 device_info，但执行表是空的。
         session.syncInstalledTools([])
-        XCTAssertNil(session.tool(named: "app_device_info"), "前置条件：执行表里没有这个工具")
+        XCTAssertNil(session.tool(named: "device_info"), "前置条件：执行表里没有这个工具")
 
         let stream = session.sendMessage("设备信息")
         var completedCall = false
@@ -2487,7 +2647,7 @@ final class AppAgentCoreTests: XCTestCase {
             case .toolCallCompleted:
                 completedCall = true
             case .toolCallFailed(_, let name, _):
-                if name == "app_device_info" { failedCall = true }
+                if name == "device_info" { failedCall = true }
             default:
                 break
             }
@@ -2546,14 +2706,14 @@ final class AppAgentCoreTests: XCTestCase {
     /// 一轮里的用户消息、工具结果、收尾发言共用同一个 turnID。
     func testAgentTrafficSharesItsUserMessageTurnID() async {
         let provider = ScriptedToolCallProvider(
-            toolName: "app_device_info",
+            toolName: "device_info",
             arguments: ["section": .string("device")]
         )
         let providerCentral = ModelProviderCentral()
         await providerCentral.register(name: "mock", provider: provider)
 
         let toolCentral = ToolCentral()
-        await toolCentral.register(AppDeviceInfoTool())
+        await toolCentral.register(DeviceInfoTool())
 
         let central = AIAgentCentral()
         let agent = await central.create(

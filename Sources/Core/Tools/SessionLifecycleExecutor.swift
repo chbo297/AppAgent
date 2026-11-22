@@ -1,5 +1,5 @@
 //
-//  SessionManageTool.swift
+//  SessionLifecycleExecutor.swift
 //  AppAgent
 //
 //  Lets the agent introspect and manage its own sessions: enumerate every
@@ -11,9 +11,10 @@
 
 import Foundation
 
-public struct SessionManageTool: ToolProtocol {
-    public let name = "session_manage"
-    public let description = """
+/// Internal implementation used by the unified `session` tool.
+struct SessionLifecycleExecutor: ToolProtocol {
+    let name = "session.lifecycle"
+    let description = """
         Introspect and manage your own conversation sessions. Choose an 'op':
         - 'list': list every session you own (id, title, message count, created/updated time, \
         whether it is the current session, its runtime status, whether it is streaming, and its model).
@@ -41,7 +42,7 @@ public struct SessionManageTool: ToolProtocol {
         Use this to recall what was discussed in other conversations, to organize them, \
         or to move work onto a different model.
         """
-    public let parameters = Tool.Schema(
+    let parameters = Tool.Schema(
         properties: [
             "op": .string(
                 description: "Operation to perform.",
@@ -64,11 +65,11 @@ public struct SessionManageTool: ToolProtocol {
         ],
         required: ["op"]
     )
-    public let group = "session"
-    public let safetyLevel: Tool.SafetyLevel = .safe
-    public let outputMaxBytes: Int? = 64 * 1024
+    let group = "session"
+    let safetyLevel: Tool.SafetyLevel = .safe
+    let outputMaxBytes: Int? = 64 * 1024
 
-    public func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+    func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
         switch arguments["op"]?.stringValue {
         case "list", "read", "models", "archived": return .safe
         case "create", "rename", "switch", "set_model", "merge", "restore": return .moderate
@@ -77,9 +78,9 @@ public struct SessionManageTool: ToolProtocol {
         }
     }
 
-    public init() {}
+    init() {}
 
-    public func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
+    func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
         guard let agent = session.agentMask?.agent else {
             return .error("Session is not attached to an agent; session management is unavailable.")
         }
@@ -87,7 +88,13 @@ public struct SessionManageTool: ToolProtocol {
         let known: Set<String> = ["op", "session_id", "title", "model", "max_messages",
                                   "offset", "limit", "message_byte_offset", "source_session_ids"]
         guard arguments.keys.allSatisfy({ known.contains($0) }) else {
-            return .error("Unsupported parameter. Permanent deletion is not available; delete only archives.")
+            let unknown = arguments.keys.filter { key in
+                !known.contains(key)
+            }.sorted().joined(separator: ", ")
+            return .error(
+                "Unsupported parameter for op='\(op)': \(unknown). 'query' is only valid for op='search'. "
+                    + "Permanent deletion is not available; delete only archives."
+            )
         }
         for key in ["op", "session_id", "title", "model"] where arguments[key] != nil {
             guard arguments[key]?.stringValue != nil else { return .error("'\(key)' must be a string.") }
@@ -377,6 +384,7 @@ public struct SessionManageTool: ToolProtocol {
                 items.append(.object([
                     "reference": .string("\(name)/\(spec.id)"),
                     "api_protocol": .string(provider.apiProtocol.rawValue),
+                    "endpoint": endpointMetadata(provider),
                     "context_window": .number(Double(spec.contextWindow)),
                     "max_tokens": .number(Double(spec.maxTokens)),
                     "is_current": .bool(
@@ -389,10 +397,51 @@ public struct SessionManageTool: ToolProtocol {
         return .json(.object([
             "count": .number(Double(items.count)),
             "current_model": .string(modelDescription(of: current)),
+            "current_endpoint": current.provider.map(endpointMetadata) ?? .null,
             "policy_primary": policy.map { JSONValue.string($0.primary) } ?? .null,
             "policy_fallbacks": .array((policy?.fallbacks ?? []).map { JSONValue.string($0) }),
             "models": .array(items)
         ]))
+    }
+
+    /// Configuration metadata only: never serialize the provider or its authentication fields.
+    private func endpointMetadata(_ provider: any ModelProvider) -> JSONValue {
+        let snapshot = (provider as? AnthropicProvider)?.endpointConfigurationForDiagnostics
+        let secrets = snapshot?.secrets ?? ([provider.apiKey] + Array(provider.customHeaders.values))
+        func safeURL(_ raw: String?) -> JSONValue {
+            guard let raw, var components = URLComponents(string: raw),
+                  let scheme = components.scheme?.lowercased(),
+                  ["https", "http"].contains(scheme), components.host?.isEmpty == false else {
+                return .null
+            }
+            components.user = nil
+            components.password = nil
+            components.query = nil
+            components.fragment = nil
+            guard let value = components.string else {
+                return .null
+            }
+            // Omit URLs with secrets in the host/path, including nested percent encoding.
+            var decoded = value
+            while true {
+                if secrets.contains(where: {
+                    !$0.isEmpty && decoded.contains($0)
+                }) {
+                    return .null
+                }
+                guard let next = decoded.removingPercentEncoding, next != decoded else {
+                    break
+                }
+                decoded = next
+            }
+            return .string(Logger.redactDiagnostic(value, secrets: secrets))
+        }
+        return .object([
+            "base_url": safeURL(snapshot?.baseURL ?? provider.baseURL),
+            "request_url": safeURL(snapshot?.requestURL?.absoluteString),
+            "api_protocol": .string((snapshot?.apiProtocol ?? provider.apiProtocol).rawValue),
+            "credentials_exposed": .bool(false)
+        ])
     }
 
     private func deleteSession(id: String, agent: AIAgent, current: AISession) async -> Tool.Output {

@@ -57,7 +57,7 @@ final class RuntimeInspectionScopeTests: XCTestCase {
             AppAgentWindow.self, AppAgentRegionDebugWindow.self,
             AppAgentViewController.self, ScopeSDKController.self,
             AppAgentDebugViewController.self, AppAgentRegionDebugViewController.self,
-            AppAgentSettingsViewController.self, AppAgentTextField.self,
+            AppAgentSettingsViewController.self, AppAgentTextView.self,
             AppAgentChatPanelView.self, ChatMessageCell.self,
             AppAgentVoiceInputOverlayView.self
         ]
@@ -113,7 +113,7 @@ final class RuntimeInspectionScopeTests: XCTestCase {
 
     func testKnownSDKComponentOwnsPlainDescendantsWithoutExplicitMark() {
         let root = AppAgentHostNamedView()
-        let field = AppAgentTextField(frame: .zero)
+        let field = AppAgentTextView(frame: .zero)
         let plainChild = UILabel()
         field.addSubview(plainChild)
         root.addSubview(field)
@@ -127,7 +127,7 @@ final class RuntimeInspectionScopeTests: XCTestCase {
 
     func testRuntimeClassFilterUsesKnownIdentitiesWithoutClaimingNamedHostClass() async {
         let provider = DefaultRuntimeInspectProvider()
-        for cls: AnyClass in [AppAgentWindow.self, AppAgentRegionDebugWindow.self, AppAgentTextField.self,
+        for cls: AnyClass in [AppAgentWindow.self, AppAgentRegionDebugWindow.self, AppAgentTextView.self,
                              AIAgent.self, AISession.self, MemoryStore.self] {
             let name = NSStringFromClass(cls)
             XCTAssertTrue(HostInspectionUIKit.isKnownAppAgentClass(cls))
@@ -155,7 +155,7 @@ final class RuntimeInspectionScopeTests: XCTestCase {
     func testClassCandidateFilterChecksOnlyMatchingIdentities() throws {
         // A large nonmatching population must not cause protocol casts/superclass walks.
         let unrelated = Array<AnyClass>(repeating: UIView.self, count: 2_048)
-        let sdkClass: AnyClass = AppAgentTextField.self
+        let sdkClass: AnyClass = AppAgentTextView.self
         let hostClass: AnyClass = AppAgentHostNamedView.self
         let classes = unrelated + [sdkClass, hostClass, BODragScrollView.self]
         for context in [host, sdk, all] {
@@ -183,8 +183,8 @@ final class RuntimeInspectionScopeTests: XCTestCase {
     }
 
     func testShortNameCandidateFilterChecksOnlyExactSuffixAndSkipsMisses() throws {
-        let classes: [AnyClass] = [UIView.self, BODragScrollView.self, AppAgentTextField.self, AppAgentHostNamedView.self]
-        for (suffix, expectedChecks) in [(".AppAgentTextField", 1), (".TextField", 0), (".MissingScopeType", 0)] {
+        let classes: [AnyClass] = [UIView.self, BODragScrollView.self, AppAgentTextView.self, AppAgentHostNamedView.self]
+        for (suffix, expectedChecks) in [(".AppAgentTextView", 1), (".TextField", 0), (".MissingScopeType", 0)] {
             var checks = 0
             let candidates = try XCTUnwrap(DefaultRuntimeInspectProvider.scopedClassCandidates(
                 in: classes, matching: { $0.hasSuffix(suffix) }, context: host,
@@ -201,10 +201,10 @@ final class RuntimeInspectionScopeTests: XCTestCase {
     func testClassListFiltersCaseInsensitivelyAndKeepsRuntimeNames() async {
         let provider = DefaultRuntimeInspectProvider()
         let hostName = String(cString: class_getName(AppAgentHostNamedView.self))
-        let sdkName = String(cString: class_getName(AppAgentTextField.self))
+        let sdkName = String(cString: class_getName(AppAgentTextView.self))
         let hostMatches = await provider.classList(matching: "appagenthostnamedview", context: host)
         let sdkMatches = await provider.classList(matching: "appagenthostnamedview", context: sdk)
-        let allMatches = await provider.classList(matching: "appagenttextfield", context: all)
+        let allMatches = await provider.classList(matching: "appagenttextview", context: all)
         XCTAssertTrue(hostMatches.contains(hostName))
         XCTAssertFalse(sdkMatches.contains(hostName))
         XCTAssertTrue(allMatches.contains(sdkName))
@@ -262,7 +262,7 @@ final class RuntimeInspectionScopeTests: XCTestCase {
         let hostClass: AnyClass = try XCTUnwrap(objc_allocateClassPair(NSObject.self, hostName, 0))
         objc_registerClassPair(hostClass)
         defer { objc_disposeClassPair(hostClass) }
-        let sdkClass: AnyClass = try XCTUnwrap(objc_allocateClassPair(AppAgentTextField.self, sdkName, 0))
+        let sdkClass: AnyClass = try XCTUnwrap(objc_allocateClassPair(AppAgentTextView.self, sdkName, 0))
         objc_registerClassPair(sdkClass)
         defer { objc_disposeClassPair(sdkClass) }
         let identities = [hostName: ObjectIdentifier(hostClass), sdkName: ObjectIdentifier(sdkClass)]
@@ -321,7 +321,7 @@ final class RuntimeInspectionScopeTests: XCTestCase {
             XCTAssertNil(candidates)
             XCTAssertEqual(checks, 0)
             XCTAssertNil(DefaultRuntimeInspectProvider.resolveClass("UIView", context: self.all))
-            XCTAssertNil(DefaultRuntimeInspectProvider.resolveClass("AppAgentTextField", context: self.all))
+            XCTAssertNil(DefaultRuntimeInspectProvider.resolveClass("AppAgentTextView", context: self.all))
             let names = await DefaultRuntimeInspectProvider().classList(matching: nil, context: self.all)
             XCTAssertTrue(names.isEmpty)
         }
@@ -417,6 +417,43 @@ final class RuntimeInspectionScopeTests: XCTestCase {
         XCTAssertTrue(allTree.contains("HOST-TEXT"))
     }
 
+    func testPageNamesFollowPresentation() {
+        defer {
+            HostPageCatalog.describer = nil
+        }
+        HostPageCatalog.describer = { controller in
+            controller is ScopeNamedHomePage ? HostPageDescription(name: "地图首页", purpose: "浏览地图、搜索地点") : nil
+        }
+        let home = ScopeNamedHomePage()
+        let titled = UIViewController()
+        titled.title = "设置"
+        let bare = ScopeBarePage()
+        let product = HostInspectionContext(presentation: .product)
+        let implementation = HostInspectionContext(presentation: .implementation)
+
+        // app_ui：只说页面是什么；宿主没登记时用标题，连标题都没有才给类名。
+        XCTAssertEqual(HostUINaming.page(home, context: product), "「地图首页：浏览地图、搜索地点」")
+        XCTAssertEqual(HostUINaming.page(titled, context: product), "「设置」页")
+        XCTAssertEqual(HostUINaming.page(bare, context: product), "未登记页面 ScopeBarePage")
+        // app_runtime_inspect：类名在前，附上同一份页面说明。
+        XCTAssertEqual(HostUINaming.page(home, context: implementation), "ScopeNamedHomePage（地图首页：浏览地图、搜索地点）")
+        XCTAssertEqual(HostUINaming.page(titled, context: implementation), "UIViewController")
+
+        let nav = UINavigationController(rootViewController: home)
+        nav.view = UIView()
+        var productText = ""
+        DefaultRuntimeInspectProvider.describeVCSkeleton(nav, indent: 0, context: product, into: &productText)
+        XCTAssertTrue(productText.contains("栈顶 = 「地图首页"))
+        XCTAssertFalse(productText.contains("ScopeNamedHomePage"))
+        XCTAssertFalse(productText.contains("UINavigationController"))
+
+        let button = UIButton(type: .system)
+        button.setTitle("搜索", for: .normal)
+        XCTAssertEqual(HostUINaming.view(button, context: product), "按钮")
+        XCTAssertEqual(HostUINaming.view(ScopeLinkView(), context: product), "视图（ScopeLinkView）")
+        XCTAssertEqual(HostUINaming.view(button, context: implementation), "UIButton")
+    }
+
     func testControllerSkeletonCountsAndTitlesExcludeSDK() {
         let hostPage = UIViewController()
         hostPage.title = "HOST-PAGE"
@@ -483,9 +520,19 @@ final class RuntimeInspectionScopeTests: XCTestCase {
         XCTAssertTrue(DefaultRuntimeInspectProvider.readProperty(from: root, keyPath: "payload").hasPrefix("Inspection denied:"))
         XCTAssertThrowsError(try DefaultRuntimeInspectProvider.inspectedDescription(of: root.payload))
         XCTAssertTrue(DefaultRuntimeInspectProvider.readProperty(from: root, keyPath: "subviews.@count").hasPrefix("Inspection denied:"))
-        XCTAssertTrue(DefaultRuntimeInspectProvider.readProperty(from: root, keyPath: "description").hasPrefix("Inspection denied:"))
         XCTAssertEqual(secret.descriptions, 0)
         XCTAssertEqual(try DefaultRuntimeInspectProvider.inspectedDescription(of: NSNumber(value: 3), context: sdk), "3")
+
+        // 读取不设对象链限制：宿主自己的集合可整包读，也能按键/下标逐层读。
+        root.payload = ["shop": ["hours": "10:00-22:00"], "tags": ["mall"]]
+        XCTAssertTrue(DefaultRuntimeInspectProvider.readProperty(from: root, keyPath: "payload").contains("10:00-22:00"))
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: root, keyPath: "payload.shop.hours"), "10:00-22:00")
+        XCTAssertEqual(DefaultRuntimeInspectProvider.readProperty(from: root, keyPath: "payload.tags.0"), "mall")
+        XCTAssertFalse(DefaultRuntimeInspectProvider.readProperty(from: root, keyPath: "description").hasPrefix("Inspection denied:"))
+        // 写入仍只走 UI 对象链。
+        XCTAssertTrue(DefaultRuntimeInspectProvider.writeProperty(
+            on: root, keyPath: "payload.shop", value: "x"
+        ).hasPrefix("Inspection denied:"))
     }
 
     func testSelectorsRejectUnknownChainsClassBypassesAndExcludedTargets() {
@@ -552,13 +599,15 @@ final class RuntimeInspectionScopeTests: XCTestCase {
 
     func testToolsForwardImmutableContextAndDetailNeverWidensScope() async throws {
         let provider = ScopeRecordingRuntimeProvider()
-        let tool = RuntimeInspectTool(provider: provider)
+        let objects = RuntimeInspectTool(provider: provider)
+        let ui = RuntimeInspectTool.ui(provider: provider)
         let session = AISession(id: UUID().uuidString)
         session.inspectionSceneIdentifier = "scene-A"
         session.decisionResponders = DecisionResponderCentral()
         let operations = ["ui_hierarchy", "view_tree", "view_info", "view_set", "view_invoke",
                           "class_list", "method_list", "property_list", "property_value", "property_set", "invoke"]
         for operation in operations {
+            let tool = RuntimeInspectTool.uiOperations.contains(operation) ? ui : objects
             _ = try await tool.execute(arguments: [
                 "op": .string(operation), "detail": .string("full"), "path": .string("0"),
                 "key": .string("tag"), "keyPath": .string("tag"), "value": .string("1"),
@@ -567,9 +616,17 @@ final class RuntimeInspectionScopeTests: XCTestCase {
         }
         let recorded = await provider.contexts
         XCTAssertEqual(recorded.count, operations.count)
-        XCTAssertTrue(recorded.allSatisfy { $0 == HostInspectionContext(sceneIdentifier: "scene-A") })
+        XCTAssertTrue(recorded.allSatisfy { context in
+            context.scope == .host && context.sceneIdentifier == "scene-A"
+        })
+        // app_ui 给产品视角（页面名），app_runtime_inspect 给实现视角（类名）。
+        for (operation, context) in zip(operations, recorded) {
+            let expected: HostInspectionPresentation = RuntimeInspectTool.uiOperations.contains(operation)
+                ? .product : .implementation
+            XCTAssertEqual(context.presentation, expected, operation)
+        }
         do {
-            _ = try await tool.execute(arguments: ["op": .string("ui_hierarchy"), "detail": .string("full"),
+            _ = try await ui.execute(arguments: ["op": .string("ui_hierarchy"), "detail": .string("full"),
                                                   "scope": .string("all")], session: session)
             XCTFail("Scope authorization must precede provider invocation")
         } catch {}
@@ -595,6 +652,10 @@ private final class ScopeLinkView: UIView {
 }
 
 private final class AppAgentHostNamedView: UIView {}
+
+private final class ScopeNamedHomePage: UIViewController {}
+
+private final class ScopeBarePage: UIViewController {}
 
 private final class ScopeHostBox<Value> {}
 

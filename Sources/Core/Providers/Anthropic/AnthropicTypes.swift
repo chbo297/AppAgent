@@ -45,6 +45,8 @@ enum AnthropicContentBlock: Codable, Sendable {
     case text(AnthropicTextBlock)
     case toolUse(AnthropicToolUseBlock)
     case toolResult(AnthropicToolResultBlock)
+    /// 用户附带的图片：与文字块平级放在 user 消息里。
+    case image(AnthropicImageBlock)
 
     private enum CodingKeys: String, CodingKey { case type }
 
@@ -58,6 +60,8 @@ enum AnthropicContentBlock: Codable, Sendable {
             self = .toolUse(try AnthropicToolUseBlock(from: decoder))
         case "tool_result":
             self = .toolResult(try AnthropicToolResultBlock(from: decoder))
+        case "image":
+            self = .image(try AnthropicImageBlock(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container,
                                                    debugDescription: "Unknown block type: \(type)")
@@ -69,6 +73,8 @@ enum AnthropicContentBlock: Codable, Sendable {
         case .text(let block): try block.encode(to: encoder)
         case .toolUse(let block): try block.encode(to: encoder)
         case .toolResult(let block): try block.encode(to: encoder)
+        case .image(let block):
+            try block.encode(to: encoder)
         }
     }
 }
@@ -146,11 +152,11 @@ enum AnthropicToolResultContentBlock: Encodable, Sendable {
 }
 
 /// `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}`
-struct AnthropicImageBlock: Encodable, Sendable {
+struct AnthropicImageBlock: Codable, Sendable {
     let type = "image"
     let source: Source
 
-    struct Source: Encodable, Sendable {
+    struct Source: Codable, Sendable {
         let type = "base64"
         let mediaType: String
         let data: String
@@ -159,10 +165,30 @@ struct AnthropicImageBlock: Encodable, Sendable {
             case type, data
             case mediaType = "media_type"
         }
+
+        init(mediaType: String, data: String) {
+            self.mediaType = mediaType
+            self.data = data
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.mediaType = try container.decode(String.self, forKey: .mediaType)
+            self.data = try container.decode(String.self, forKey: .data)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type, source
     }
 
     init(base64: String, mediaType: String) {
         self.source = Source(mediaType: mediaType, data: base64)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.source = try container.decode(Source.self, forKey: .source)
     }
 }
 

@@ -19,6 +19,7 @@ Package.swift
   product: AppAgent
   target:  AppAgent
   path:    Sources
+  target:  AppAgentObjCSupport (ObjCSupport/; Objective-C exception bridge)
 ```
 
 Use:
@@ -124,7 +125,9 @@ public protocol ModelProvider: Sendable {
 }
 ```
 
-The built-in provider is `AnthropicProvider`.
+The built-in provider is `AnthropicProvider`; it dispatches Anthropic Messages,
+OpenAI Chat Completions and OpenAI Responses wire formats. These are protocol
+mappers inside one provider, not separate provider classes.
 
 ## Tool Layer
 
@@ -154,7 +157,7 @@ Key public types:
 - `AppAgentOverlay`: the host-facing entry point — creates a passthrough overlay window and binds it to an agent/session
 - `AppAgentWindow`: lets taps outside AppAgent UI pass through to the host app
 - `AppAgentViewController`: chat UI backed by `AISession.uiState`; only valid as `AppAgentWindow`'s `rootViewController`, not for embedding in a host hierarchy
-- `AppAgentInputBar`, `AppAgentTextField`, `AppAgentMenuButton`: input controls
+- `AppAgentInputBar`, `AppAgentTextView`, `AppAgentMenuButton`: input controls
 - `ChatMessage`, `ChatMessageCell`: UI message model and table cell
 
 The UI layer is optional at runtime. Apps can ignore it and build directly against `AISession`.

@@ -16,6 +16,8 @@ outcome = .answered | .empty | .failed(stage:message:) | .cancelled | .interrupt
 
 - **写入方只有 executor**：`LLMExecutor` 在 `addUserMessage` 之后 `openTurnRecord`，每次阶段变化 `advanceTurnStage`，终局 `closeTurnRecord`（**首次写入为准**，重复调用是 no-op）。`persistTurnState` 1s 去抖、终局强制落盘。`SessionUIState.runStage` 仍在，但只作为「该刷新了」的通知源，**不再是数据源**。
 - **run 绑定自己分配的 turnID**：`addUserMessage` 返回锁内分配的编号，执行循环、消息归属与兜底收尾均显式传递它，不能在旧任务结束时重读已被新任务推进的 `currentTurnID`。`roundCount` 从 0 开始、进入循环后只增不减，终局后冻结；旧快照缺键为 nil。
+- **历史与发送视图分离**：压缩只能修改 `RunLoopState.providerMessages`；`currentMessages` 保留完整用户输入、工具往返和最终回答，用于 UI 与持久化。重试/换模型不能重新把压缩视图覆盖回历史。`CoreConcurrencyAuditTests` 同时覆盖成功、失败与工具续行。
+- **旧流取消只影响旧 run**：取消和异步准备之后都核对 runID；准备前被替换也明确返回取消，不能交给无结果兜底误报内部失败。并发上限的检查与同步启动由 `AISessionManager.startRunIfAdmitted` 在同一临界区完成。
 - **不许再开第二条状态通路**。UI 侧曾经另从 `uiState.isStreaming / lastError / runStage` 读一份，这套双源正是三个真机 bug 的共同成因：loading 与过程区显示到**上一条**回复上面、指示条走到「完成」而下面的「思考中…」一直转圈、失败了界面上完全没有反馈。现在 `ChatMessageAssembler.assemble(_:turnRecords:streamingText:expandedTurnIDs:collapsedTurnIDs:)` 只吃记录；`streamingText` 是唯一例外（它是还没落盘的**内容**，不是状态）。
 - **每个终局都要有可见的说法**：`ChatMessageAssembler.placeholder(for:hasActivity:)` 把 `.empty` 渲染成「（本轮没有返回任何内容）」、`.cancelled` 成「（已停止）」、`.interrupted` 成「（上次运行被中断…）」；`.failed` 把 `failureMessage` 以 `Error: …` 接在已有正文**后面**（半截答案本身也是线索，不覆盖）。最终流错误由 executor 保存当前尝试已收到的正文，不能把重试/模型回退期间的失败尝试正文或未执行的工具调用塞进下一次请求。
 - **重启不自动重放**：`AISessionManager` 恢复后调 `session.markUnfinishedTurnsAsInterrupted()`，把上次没跑完的轮次标成 `.interrupted`，由用户决定要不要重问。在飞的 SSE 不可续、工具也不幂等，自动接着跑比中断更危险。
@@ -71,3 +73,14 @@ iOS 把 App 切到后台几秒后挂起进程，协作线程池整体停摆，SS
   持续有进展的流不被误杀、上界 `<= 0` 时整层旁路、以及「卡死 → 重试 → 只留最终正文」的端到端
   （判据是「每次尝试开始时 `uiState.streamingText` 必须为空」）。反向验证把 `idleLimit` 改成 0 时这一轮
   永不终止（正是线上现象），用例靠 `withDeadline` 把它转成失败而不是挂住。
+
+## 一轮内的自动恢复提示（notice）
+
+- 自动压缩、输出上限续写这类「agent 自己做了件事、用户该知道」的情况，走 `journal.notice(_:)`：
+  发 `AIAgentEvent.notice`，同时追加到 `AIAgentTurnRecord.notices` 落盘，过程区按条显示。
+  **notice 不是终止事件**，一轮仍然只有一个 `.completed` / `.error`。
+- 输出上限续写插进历史的那句指令是 `AIAgentMessage.agentNote`（role user、source agent、hidden）。
+  它**不开新轮**（`isGenuineUserInput == false`）、不挂消息上下文、不被压缩器当成「最新用户请求」固定，
+  展示层直接跳过，只用来标记「下一段正文接着上一段写，不另起段落」。
+- 用例：`LLMStreamFailureTests` 的 `testOutputLimitAutoContinuesWithHiddenNoteAndJoinsText`、
+  `testContextOverflowCompactsOnceInsteadOfBlindRetry`。

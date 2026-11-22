@@ -32,8 +32,8 @@ denial. SDK approval does not override read-only mode or operation authorization
 | `host` (default) | `AppAgentScreenshots` |
 | `appagent` or `all` | `AppAgent/diagnostics/screenshots` |
 
-SDK/all artifacts remain protected from later host-only `app_sandbox_file`
-calls. The normal `AppAgent/files` workspace and host screenshots remain usable.
+SDK/all artifacts remain protected from later host-only `file` calls on
+`host://` resources. The normal `AppAgent/files` workspace and host screenshots remain usable.
 Saving a screenshot is a mutation; an inline screenshot is a read.
 
 Limited scopes reject mixed-ownership subtrees and backdrop effects rather than

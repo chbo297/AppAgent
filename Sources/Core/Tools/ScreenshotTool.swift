@@ -17,8 +17,8 @@ import UIKit
 public struct ScreenshotTool: ToolProtocol {
     public let name = "screenshot"
     public let description = """
-        Capture one window/view as a PNG; never composites windows. Defaults to host scope and \
-        the session scene's scoped window. Use app_runtime_inspect paths for a subtree. \
+        Capture one window/view; inline captures are JPEG, saved files are PNG. Never composites windows. Defaults to host scope and \
+        the session scene's scoped window. Use app_ui paths for a subtree. \
         appagent/all require approval. Limited scopes reject mixed ownership and backdrop effects. \
         save_as_file returns a saved path instead of an inline image; SDK/all captures go to SDK diagnostics.
         """
@@ -78,8 +78,12 @@ public struct ScreenshotTool: ToolProtocol {
             return .error(error.localizedDescription)
         }
 
-        guard let data = capture.image.pngData() else {
-            return .error("Failed to encode the capture as PNG.")
+        // 内联给模型的用 JPEG：真机一张 1024×2225 的 PNG 是 1MB，模型看图不需要无损。落盘留档仍用 PNG。
+        let encoded = savesFile
+            ? capture.image.pngData()
+            : capture.image.jpegData(compressionQuality: Self.inlineJPEGQuality)
+        guard let data = encoded else {
+            return .error("Failed to encode the capture.")
         }
 
         let scale = capture.image.scale
@@ -94,7 +98,7 @@ public struct ScreenshotTool: ToolProtocol {
             }
             return .image(Tool.ImageOutput(
                 data: data,
-                mediaType: "image/png",
+                mediaType: "image/jpeg",
                 caption: "Screenshot of \(capture.source), scope=\(context.scope.rawValue), \(pixels) px"
             ))
         }
@@ -123,6 +127,8 @@ public struct ScreenshotTool: ToolProtocol {
 
     /// 内联给模型的上限。再大就该落盘或降 maxWidth —— base64 之后还要涨 4/3。
     static let maxAttachmentBytes = 3 * 1024 * 1024
+
+    static let inlineJPEGQuality: CGFloat = 0.8
 
     #if canImport(UIKit)
     /// Limited scope uses only the target's layer subtree and rejects mixed ownership before

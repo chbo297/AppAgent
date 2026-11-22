@@ -41,15 +41,17 @@ extension AppAgentViewController {
 
     /// 打开 AppAgent 层级内的设置面板（用 overlay 窗口最上层 VC 呈现）。
     /// 落地页给两个入口：「模型配置」push 进模型/API 页；「总是显示思考过程」开关就地生效。
-    /// 模型配置保存后应用新配置，并新建一个会话让改动立即生效（会话 provider 创建后不可变）。
+    /// 保存和清除都应用到现有会话，保留当前聊天记录与会话选择。
     private func presentSettings() {
         let menuVC = AppAgentSettingsMenuViewController()
         menuVC.onModelSettingsSaved = { [weak self] settings in
             guard let self, let agent = self.agent else { return }
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 await agent.applyEndpointSettings(settings)
-                let session = await agent.createSession(title: "对话")
-                self.switchSession(to: session.id)
+                guard let self, self.agent === agent else {
+                    return
+                }
+                self.reloadFromSession(reason: .browsing)
             }
         }
         menuVC.onAlwaysShowThinkingChanged = { [weak self] _ in
@@ -80,8 +82,8 @@ extension AppAgentViewController {
     /// 弹出重命名输入框，提交后重命名会话并立即存盘。
 
     private func promptRenameSession(_ item: AppAgentSessionSidebarItem) {
-        guard let sessionID = item.sessionID,
-              let session = agent?.session(id: sessionID) else { return }
+        guard let sessionID = item.sessionID, let agent,
+              let session = agent.session(id: sessionID) else { return }
         let alert = UIAlertController(title: "重命名会话", message: nil, preferredStyle: .alert)
         alert.addTextField { field in
             field.text = session.title
@@ -91,10 +93,11 @@ extension AppAgentViewController {
         }
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         alert.addAction(UIAlertAction(title: "确定", style: .default) { [weak self, weak alert] _ in
-            guard let self, let newTitle = alert?.textFields?.first?.text else { return }
+            guard let self, self.agent === agent,
+                  let newTitle = alert?.textFields?.first?.text else { return }
             session.rename(newTitle)
             self.reloadSessionSidebarItems()
-            Task { try? await self.agent?.sessionManager.saveSession(session) }
+            Task { try? await agent.sessionManager.saveSession(session) }
         })
         // 侧栏是加在 self.view 上的覆盖层，用最上层 VC 呈现 alert。
         var presenter: UIViewController = self

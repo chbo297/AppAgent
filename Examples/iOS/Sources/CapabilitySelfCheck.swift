@@ -89,6 +89,21 @@ enum CapabilitySelfCheck {
         try? contents.write(to: target, atomically: true, encoding: .utf8)
     }
 
+    /// 运行时自检按 op 交给 app_ui 或 app_runtime_inspect 执行，其余同下。
+    private static func check(
+        _ rec: Recorder,
+        _ label: String,
+        _ runtime: SelfCheckRuntimeTools,
+        _ args: [String: JSONValue],
+        expect: Expectation = .ok,
+        session: AISession,
+        preview: Int = 400,
+        timeout: TimeInterval? = nil
+    ) async {
+        await check(rec, label, runtime.tool(for: args), args,
+                    expect: expect, session: session, preview: preview, timeout: timeout)
+    }
+
     /// Execute one tool call, judge it against `expect`, and record the outcome.
     private static func check(
         _ rec: Recorder,
@@ -218,7 +233,7 @@ enum CapabilitySelfCheck {
     // MARK: - host-runtime: 视图层级 / 运行时内省 / 热修复 / 桥接抓包
 
     private static func checkRuntimeInspection(_ rec: Recorder, session: AISession) async {
-        let runtime = RuntimeInspectTool(provider: DefaultRuntimeInspectProvider())
+        let runtime = SelfCheckRuntimeTools(provider: DefaultRuntimeInspectProvider())
         rec.section("app_runtime_inspect")
         // Default and full detail must both stay host-only even while overlay is mounted.
         await check(rec, "ui_hierarchy(summary)", runtime, ["op": .string("ui_hierarchy")],
@@ -393,7 +408,7 @@ enum CapabilitySelfCheck {
                         ["op": .string("view_tree"), "path": .string(path), "maxDepth": .number(3)],
                         session: session)
             await checkViewActivate(rec, session: session, runtime: runtime,
-                                    windowPrefix: hostWindowPrefix, inertPath: path)
+                                    windowPrefix: hostWindowPrefix, hiddenPath: path)
             await check(rec, "view_set(frame)", runtime, [
                 "op": .string("view_set"), "path": .string(path),
                 "key": .string("frame"), "value": .string("0,0,120,80")
@@ -541,8 +556,8 @@ enum CapabilitySelfCheck {
         // 宿主后台服务相关工具由宿主自行注册到 ToolCentral，
         // AppAgent 不再内置，故本自检不再覆盖；宿主侧自检请在宿主工程里做。
 
-        rec.section("app_device_info")
-        let device = AppDeviceInfoTool()
+        rec.section("device_info")
+        let device = DeviceInfoTool()
         // 七个 section 走的是同一个 dispatch，逐条回显只是抄一遍实现。真正的策略是
         // 「问一件事别把整份设备信息吞下去」，所以只验收窄有没有效 + 未知 section 被拒。
         let deviceAll = await withBudget { () async throws -> String in
@@ -581,10 +596,10 @@ enum CapabilitySelfCheck {
 
     /// 这一组的重点是**失败必须被报成失败**：provider 用 sentinel 字符串表达错误，
     /// 工具层判错一旦漏掉，模型会把 "Failed to read …" 当成读到的值继续推理。
-    private static func checkKVCOps(_ rec: Recorder, session: AISession, runtime: RuntimeInspectTool) async {
+    private static func checkKVCOps(_ rec: Recorder, session: AISession, runtime: SelfCheckRuntimeTools) async {
         await check(rec, "property_value(未定义 keyPath) rejected", runtime,
                     ["op": .string("property_value"), "keyPath": .string("selfcheckNoSuchKey")],
-                    expect: .errorContains("Failed to read"), session: session)
+                    expect: .errorContains("not a declared property/ivar"), session: session)
         await check(rec, "property_value(未知类) rejected", runtime,
                     ["op": .string("property_value"), "keyPath": .string("view.tag"),
                      "class": .string("NoSuchClassHere")],
@@ -616,7 +631,7 @@ enum CapabilitySelfCheck {
         await check(rec, "property_set(未定义 keyPath) rejected", runtime,
                     ["op": .string("property_set"), "keyPath": .string("selfcheckNoSuchKey"),
                      "value": .string("1")],
-                    expect: .errorContains("Failed to set"), session: session)
+                    expect: .errorContains("not a declared property/ivar"), session: session)
 
         // The top page is the selected tab's content, not HostTabBarController.
         // Host scope must not fall back to its class object; approved all may.
@@ -650,7 +665,7 @@ enum CapabilitySelfCheck {
     /// 硬调过去会把 NSNumber 的指针当整数写进去、或把 1 当对象解引用崩掉。所以这里既验
     /// 「被拒」，也验「拒完 tag 没被写脏」。
     private static func checkReflectionGuards(
-        _ rec: Recorder, session: AISession, runtime: RuntimeInspectTool, path: String
+        _ rec: Recorder, session: AISession, runtime: SelfCheckRuntimeTools, path: String
     ) async {
         // Object-compatible ABI is necessary, not sufficient: description is an
         // arbitrary selector, so host must reject it and only approved all may run it.
@@ -716,7 +731,7 @@ enum CapabilitySelfCheck {
         await check(rec, "view_set(未知 key) rejected", runtime,
                     ["op": .string("view_set"), "path": .string(path),
                      "key": .string("selfcheckNoSuchKey"), "value": .string("1")],
-                    expect: .errorContains("Failed to read selfcheckNoSuchKey on "), session: session)
+                    expect: .errorContains("not a declared property/ivar"), session: session)
         await check(rec, "view_set(坏 rect) rejected", runtime,
                     ["op": .string("view_set"), "path": .string(path),
                      "key": .string("frame"), "value": .string("garbage")],
@@ -761,28 +776,34 @@ enum CapabilitySelfCheck {
     /// 所以挂一个一次性按钮，它自己数被触发了几次；不去点 Demo 首页的真按钮：
     /// Haptic 没有可观测副作用，「能力自检」会递归调起自己。
     @MainActor
-    private static func installProbeButton(windowPrefix: String) -> String? {
+    private static func installProbeButton(windowPrefix: String) -> (button: String, inert: String)? {
         guard let window = DemoAgentHolder.hostTabBarController?.viewIfLoaded?.window else { return nil }
         let button = SelfCheckProbeButton(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
-        button.isHidden = true
         button.addTarget(button, action: #selector(SelfCheckProbeButton.probeFired), for: .touchUpInside)
         window.addSubview(button)
+        let buttonPath = "\(windowPrefix)\(window.subviews.count - 1)"
         probeButton = button
-        return "\(windowPrefix)\(window.subviews.count - 1)"
+        // Activation requires a visible, interactive target, separate from the hidden mutation scratch.
+        let inert = UIView(frame: CGRect(x: 12, y: 0, width: 10, height: 10))
+        window.addSubview(inert)
+        probeInertView = inert
+        return (buttonPath, "\(windowPrefix)\(window.subviews.count - 1)")
     }
 
     @MainActor private static var probeButton: SelfCheckProbeButton?
+    @MainActor private static var probeInertView: UIView?
 
     /// `view_activate` 的端到端回归：按钮要真被触发、event 参数要真生效、不可激活的目标
     /// 必须报错而不是返回一个让模型误以为点过了的 `OK.`。
     private static func checkViewActivate(
-        _ rec: Recorder, session: AISession, runtime: RuntimeInspectTool,
-        windowPrefix: String, inertPath: String
+        _ rec: Recorder, session: AISession, runtime: SelfCheckRuntimeTools,
+        windowPrefix: String, hiddenPath: String
     ) async {
-        guard let buttonPath = await MainActor.run(body: { installProbeButton(windowPrefix: windowPrefix) }) else {
+        guard let paths = await MainActor.run(body: { installProbeButton(windowPrefix: windowPrefix) }) else {
             rec.record("探针按钮已挂载", ok: false, detail: "no window available")
             return
         }
+        let buttonPath = paths.button
         let activated = await withBudget { () async throws -> String in
             try await runtime.execute(arguments: [
                 "op": .string("view_activate"), "path": .string(buttonPath)
@@ -806,12 +827,17 @@ enum CapabilitySelfCheck {
                    detail: "fired=\(firedAfterDown)（应仍为 \(firedAfterTap)） · \(trimmed(touchDown, 120))")
         // 不可激活的目标必须报错。返回假 OK 比报错更糟：模型会以为点过了，继续往下推理。
         await check(rec, "view_activate 拒绝不可激活的目标", runtime,
-                    ["op": .string("view_activate"), "path": .string(inertPath)],
+                    ["op": .string("view_activate"), "path": .string(paths.inert)],
                     expect: .errorContains("no activatable target"), session: session)
+        await check(rec, "view_activate 拒绝隐藏的临时目标", runtime,
+                    ["op": .string("view_activate"), "path": .string(hiddenPath)],
+                    expect: .errorContains("hidden or transparent"), session: session)
         let removed = await MainActor.run { () -> Bool in
             probeButton?.removeFromSuperview()
-            let detached = probeButton?.superview == nil
+            probeInertView?.removeFromSuperview()
+            let detached = probeButton?.superview == nil && probeInertView?.superview == nil
             probeButton = nil
+            probeInertView = nil
             return detached
         }
         rec.record("探针按钮已移除（UI 无残留）", ok: removed, detail: removed ? "removed" : "still attached")
@@ -819,21 +845,30 @@ enum CapabilitySelfCheck {
     // MARK: - host-storage: 沙箱文件 / UserDefaults
 
     private static func checkHostStorage(_ rec: Recorder, session: AISession) async {
-        rec.section("app_sandbox_file")
-        let sandbox = AppSandboxFileTool()
+        rec.section("file: host://sandbox")
+        let sandbox = FileTool(registry: FileResourceRegistry(
+            hostResources: [
+                .host(
+                    name: "sandbox",
+                    summary: "Demo host sandbox",
+                    rootURL: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true),
+                    operations: Set(FileResourceOperation.allCases)
+                )
+            ]
+        ))
         await check(rec, "write", sandbox, [
             "op": .string("write"),
-            "path": .string("Documents/selfcheck.txt"),
+            "uri": .string("host://sandbox/Documents/selfcheck.txt"),
             "content": .string("hello-selfcheck")
         ], session: session)
         await check(rec, "read", sandbox,
-                    ["op": .string("read"), "path": .string("Documents/selfcheck.txt")], session: session)
+                    ["op": .string("read"), "uri": .string("host://sandbox/Documents/selfcheck.txt")], session: session)
         await check(rec, "list(Documents)", sandbox,
-                    ["op": .string("list"), "path": .string("Documents")], session: session)
+                    ["op": .string("list"), "uri": .string("host://sandbox/Documents")], session: session)
         await check(rec, "delete", sandbox,
-                    ["op": .string("delete"), "path": .string("Documents/selfcheck.txt")], session: session)
+                    ["op": .string("delete"), "uri": .string("host://sandbox/Documents/selfcheck.txt")], session: session)
         await check(rec, "traversal rejected", sandbox,
-                    ["op": .string("read"), "path": .string("../../../etc/passwd")],
+                    ["op": .string("read"), "uri": .string("host://sandbox/../../../etc/passwd")],
                     expect: .errorContains("path"), session: session)
 
         rec.section("app_user_defaults")
@@ -852,25 +887,37 @@ enum CapabilitySelfCheck {
     // MARK: - file group: 沙箱内文本文件读写检索
 
     private static func checkSandboxFileTools(_ rec: Recorder, session: AISession) async {
-        rec.section("file_write / file_read / file_search")
-        await check(rec, "file_write", FileWriteTool(), [
-            "path": .string("selfcheck/notes.txt"),
+        rec.section("file")
+        let file = FileTool()
+        await check(rec, "file write", file, [
+            "op": .string("write"),
+            "uri": .string("agent://workspace/selfcheck/notes.txt"),
             "content": .string("alpha\nbeta-marker\ngamma")
         ], session: session)
-        await check(rec, "file_read", FileReadTool(),
-                    ["path": .string("selfcheck/notes.txt")], session: session)
-        await check(rec, "file_read(offset+limit)", FileReadTool(), [
-            "path": .string("selfcheck/notes.txt"),
+        await check(rec, "file read", file,
+                    ["op": .string("read"), "uri": .string("agent://workspace/selfcheck/notes.txt")], session: session)
+        await check(rec, "file read(offset+limit)", file, [
+            "op": .string("read"),
+            "uri": .string("agent://workspace/selfcheck/notes.txt"),
             "offset": .number(2), "limit": .number(1)
         ], session: session)
-        await check(rec, "file_search(content)", FileSearchTool(), [
-            "pattern": .string("beta-marker"), "target": .string("content")
+        await check(rec, "file search(content)", file, [
+            "op": .string("search"),
+            "uri": .string("agent://workspace/selfcheck"),
+            "pattern": .string("beta-marker"),
+            "target": .string("content")
         ], session: session)
-        await check(rec, "file_search(files)", FileSearchTool(), [
-            "pattern": .string("*.txt"), "target": .string("files")
+        await check(rec, "file search(files)", file, [
+            "op": .string("search"),
+            "uri": .string("agent://workspace/selfcheck"),
+            "pattern": .string("*.txt"),
+            "target": .string("files")
         ], session: session)
-        await check(rec, "file_read(missing) rejected", FileReadTool(),
-                    ["path": .string("selfcheck/does-not-exist.txt")],
+        await check(rec, "file read(missing) rejected", file,
+                    [
+                        "op": .string("read"),
+                        "uri": .string("agent://workspace/selfcheck/does-not-exist.txt")
+                    ],
                     expect: .errorContains("not found"), session: session)
     }
     // MARK: - core: memory / todo / clarify / clipboard / haptic / tts / delegate
@@ -961,18 +1008,16 @@ enum CapabilitySelfCheck {
     // MARK: - skills: 发现 / 查看 / 创建 / 删除
 
     private static func checkSkills(_ rec: Recorder, session: AISession) async {
-        rec.section("skills_list / skill_manage / skill_view")
+        rec.section("skill")
         guard let manager = session.agentMask?.agent?.skillsManager else {
             rec.record("skillsManager available", ok: false, detail: "session has no agent")
             return
         }
-        let list = SkillsListTool(manager: manager)
-        let view = SkillViewTool(manager: manager)
-        let manage = SkillManageTool(manager: manager)
+        let skill = SkillTool(manager: manager)
 
-        await check(rec, "skills_list(before)", list, [:], session: session)
-        await check(rec, "skill_manage create", manage, [
-            "action": .string("create"),
+        await check(rec, "catalog(before)", skill, [:], session: session)
+        await check(rec, "create", skill, [
+            "op": .string("create"),
             "name": .string("selfcheck-skill"),
             "content": .string("""
                 ---
@@ -984,27 +1029,30 @@ enum CapabilitySelfCheck {
                 这是一个由能力自检创建的临时技能。
                 """)
         ], session: session)
-        await check(rec, "skill_view", view, ["name": .string("selfcheck-skill")], session: session)
-        await check(rec, "skills_list(after)", list, [:], session: session)
-        await check(rec, "skill_manage delete", manage, [
-            "action": .string("delete"), "name": .string("selfcheck-skill")
+        await check(rec, "load", skill, [
+            "op": .string("load"),
+            "name": .string("selfcheck-skill")
         ], session: session)
-        await check(rec, "skill_view(missing) rejected", view,
-                    ["name": .string("selfcheck-skill")],
+        await check(rec, "catalog(after)", skill, [:], session: session)
+        await check(rec, "delete", skill, [
+            "op": .string("delete"),
+            "name": .string("selfcheck-skill")
+        ], session: session)
+        await check(rec, "load(missing) rejected", skill,
+                    ["op": .string("load"), "name": .string("selfcheck-skill")],
                     expect: .errorContains("not found"), session: session)
     }
 
     // MARK: - session: 自我感知 / 搜索 / 管理
 
     private static func checkSessionTools(_ rec: Recorder, session: AISession) async {
-        rec.section("session_search")
-        let search = SessionSearchTool()
-        await check(rec, "browse", search, ["limit": .number(5)], session: session)
-        await check(rec, "query", search,
-                    ["query": .string("selfcheck"), "limit": .number(5)], session: session)
-
-        rec.section("session_manage")
-        let sessions = SessionManageTool()
+        rec.section("session")
+        let sessions = SessionTool()
+        await check(rec, "search", sessions, [
+            "op": .string("search"),
+            "query": .string("selfcheck"),
+            "limit": .number(5)
+        ], session: session)
         await check(rec, "list", sessions, ["op": .string("list")], session: session, preview: 500)
         await check(rec, "set_model(bad ref) rejected", sessions,
                     ["op": .string("set_model"), "model": .string("nope/none")],
@@ -1043,8 +1091,10 @@ enum CapabilitySelfCheck {
         let previousTab = await withBudget { () async throws -> Int? in
             await MainActor.run { DemoAgentHolder.hostTabBarController?.selectedIndex }
         } ?? nil
-        await check(rec, "app_state", AppStateTool(provider: DemoAppStateProvider()),
-                    [:], session: session)
+        // app_state 读的是会话装上的宿主状态：临时装一个，查完卸掉。
+        _ = try? await session.installHostStateProvider(await DemoHostState.make())
+        await check(rec, "app_state", AppStateTool(), [:], session: session)
+        await session.removeHostStateProvider()
 
         let navigate = AppNavigateTool(provider: DemoNavigationProvider())
         await check(rec, "app_navigate list routes", navigate, [:], session: session)
@@ -1156,7 +1206,7 @@ enum CapabilitySelfCheck {
             rec.record(label, ok: actual == wanted, detail: "\(actual.rawValue) (期望 \(wanted.rawValue))")
         }
 
-        let runtime = RuntimeInspectTool(provider: DefaultRuntimeInspectProvider())
+        let runtime = SelfCheckRuntimeTools(provider: DefaultRuntimeInspectProvider())
         expect("app_runtime_inspect ui_hierarchy = safe",
                runtime.safetyLevel(for: ["op": .string("ui_hierarchy")]), .safe)
         expect("app_runtime_inspect view_set = moderate",
@@ -1164,9 +1214,9 @@ enum CapabilitySelfCheck {
         expect("app_runtime_inspect invoke = sensitive",
                runtime.safetyLevel(for: ["op": .string("invoke")]), .sensitive)
 
-        let sandbox = AppSandboxFileTool()
-        expect("app_sandbox_file list = safe", sandbox.safetyLevel(for: ["op": .string("list")]), .safe)
-        expect("app_sandbox_file delete = sensitive", sandbox.safetyLevel(for: ["op": .string("delete")]), .sensitive)
+        let file = FileTool()
+        expect("file list = safe", file.safetyLevel(for: ["op": .string("list")]), .safe)
+        expect("file delete = sensitive", file.safetyLevel(for: ["op": .string("delete")]), .sensitive)
 
         let hotfix = HotfixTool(provider: DefaultHotfixProvider())
         expect("app_hotfix list = safe", hotfix.safetyLevel(for: ["op": .string("list")]), .safe)
@@ -1174,7 +1224,7 @@ enum CapabilitySelfCheck {
 
         // 缺 op 不能降级成 safe，否则模型省掉参数就绕过闸门
         let missingOpSafe = [
-            runtime.safetyLevel(for: [:]), sandbox.safetyLevel(for: [:]),
+            runtime.safetyLevel(for: [:]), file.safetyLevel(for: [:]),
             hotfix.safetyLevel(for: [:]), AppUserDefaultsTool().safetyLevel(for: [:])
         ].allSatisfy { $0 > .safe }
         rec.record("缺 op 时不降级为 safe", ok: missingOpSafe,
@@ -1299,6 +1349,10 @@ enum CapabilitySelfCheck {
         rec.record("澄清卡片复用同一控件",
                    ok: AppAgentDecisionCardView.outcome(for: clarify, optionIndex: 1) == .answer("B"),
                    detail: "choices → answer")
+        rec.record("澄清卡片最后一项是自己输入",
+                   ok: clarify.options.last?.id == DecisionOption.customAnswerID
+                       && AppAgentDecisionCardView.outcome(for: clarify, optionIndex: 2, customText: " C ") == .answer("C"),
+                   detail: clarify.options.map(\.label).joined(separator: " / "))
 
         // 收尾：别把授权残留给后面的检查项（responder 保持自动应答，见 run()）
         session.uiState.remove("approvedPrivateHosts")
@@ -1319,7 +1373,7 @@ enum CapabilitySelfCheck {
     ///
     /// `AISession.agentMask` holds only a *weak* back-reference to its agent, so
     /// the ephemeral agent must be retained for the lifetime of the check —
-    /// otherwise `session_manage` sees a detached session. We park it in a static
+    /// otherwise the `session` tool sees a detached session. We park it in a static
     /// strong holder, along with the stub delegate that answers `clarify`.
     ///
     /// 自检只可能从主线程启动（Home tab 的按钮 / `-run-selfcheck` 在
@@ -1379,20 +1433,29 @@ final class SelfCheckDecisionResponder: DecisionResponder, @unchecked Sendable {
             // Direct execute still requests appagent/all approval through the
             // normal decision path. Explicitly approve each self-check call.
             return .allowOnce
+        case .permission:
+            // 自检直连 execute，不经过权限卡；保险起见只放行单次，不留下授权记录。
+            return .allowOnce
         }
     }
 }
 
-struct DemoAppStateProvider: AppStateProvider {
-    func currentState() async -> [String: String] {
-        await MainActor.run {
+enum DemoHostState {
+    /// 宿主在状态变化时写进 store；自检里一次写齐。
+    static func make() async -> HostStateStore {
+        let store = HostStateStore()
+        let (tab, style) = await MainActor.run { () -> (String, String) in
             let tab = (DemoAgentHolder.hostTabBarController?.selectedIndex).map(String.init) ?? "unknown"
-            return [
-                "current_tab_index": tab,
-                "logged_in": "false",
-                "interface_style": UIScreen.main.traitCollection.userInterfaceStyle == .dark ? "dark" : "light"
-            ]
+            let style = UIScreen.main.traitCollection.userInterfaceStyle == .dark ? "dark" : "light"
+            return (tab, style)
         }
+        store.setFields([
+            "page.id": "demo",
+            "page.selectedTab": tab,
+            "user.loggedIn": "false",
+            "interfaceStyle": style
+        ])
+        return store
     }
 }
 
@@ -1483,5 +1546,33 @@ enum DemoAgentHolder {
         guard let agent else { return nil }
         if let id = currentSessionId, let s = agent.session(id: id) { return s }
         return agent.allSessions.first
+    }
+}
+
+/// 自检按 op 自动选 app_ui（看界面、模拟用户操作）或 app_runtime_inspect（对象读写、反射），
+/// 两个工具共用同一个 provider，路径句柄互通。
+struct SelfCheckRuntimeTools {
+    let ui: RuntimeInspectTool
+    let objects: RuntimeInspectTool
+
+    init(provider: RuntimeInspectProvider) {
+        ui = RuntimeInspectTool.ui(provider: provider)
+        objects = RuntimeInspectTool(provider: provider)
+    }
+
+    func tool(for arguments: [String: JSONValue]) -> RuntimeInspectTool {
+        RuntimeInspectTool.uiOperations.contains(arguments["op"]?.stringValue ?? "") ? ui : objects
+    }
+
+    func execute(arguments: [String: JSONValue], session: AISession) async throws -> Tool.Output {
+        try await tool(for: arguments).execute(arguments: arguments, session: session)
+    }
+
+    func preflightRejection(for arguments: [String: JSONValue], session: AISession) async -> String? {
+        await tool(for: arguments).preflightRejection(for: arguments, session: session)
+    }
+
+    func safetyLevel(for arguments: [String: JSONValue]) -> Tool.SafetyLevel {
+        tool(for: arguments).safetyLevel(for: arguments)
     }
 }

@@ -18,6 +18,7 @@ public final class AISessionManager: @unchecked Sendable {
     /// Persistent storage backend.
     public let storage: any SessionStorage
     private let lifecycleQueue = SessionLifecycleQueue()
+    private let runAdmissionLock = ReadersWriterLock()
 
     /// Back-reference to the owning AIAgent.
     @WeakLocked
@@ -42,6 +43,18 @@ public final class AISessionManager: @unchecked Sendable {
         guard session.delegationDepth == 0 else { return true }
         return governor.canAdmit(runningCount: runningSessionCount,
                                  isAlreadyRunning: session.isRunning)
+    }
+
+    /// The limit check and synchronous executor publication must share one lock
+    /// across sessions. An advisory `canAdmitRun` check alone cannot reserve a slot.
+    func startRunIfAdmitted(
+        for session: AISession,
+        _ start: () -> AsyncStream<AIAgentEvent>
+    ) -> AsyncStream<AIAgentEvent>? {
+        runAdmissionLock.writeSync {
+            guard canAdmitRun(for: session) else { return nil }
+            return start()
+        }
     }
 
     public init(storage: any SessionStorage) {
@@ -207,6 +220,35 @@ public final class AISessionManager: @unchecked Sendable {
         }
     }
 
+    /// 清掉没有任何会话引用的暂存附件（见 `AttachmentFileStaging.sweep`）。
+    ///
+    /// 引用表覆盖内存里的会话 + 存储里全部活跃与废纸篓会话（不只本 agent 的，共用工作区时
+    /// 别删别人的附件）。存储读失败就整次放弃，宁可多留文件也不拿半份引用表去删。
+    @discardableResult
+    public func sweepStagedAttachments(workspaceRoot: URL) async -> Int {
+        let referenced: Set<String>
+        do {
+            referenced = try await lifecycleQueue.run { [self] in
+                var messages = sessions.values.flatMap(\.messages)
+                messages += try await storage.loadAll().flatMap(\.messages)
+                do {
+                    messages += try await storage.loadArchived().flatMap(\.messages)
+                } catch SessionLifecycleError.unsupported {
+                    // 不支持废纸篓的存储没有归档会话，不用算。
+                }
+                return AttachmentFileStaging.referencedDirectoryIDs(in: messages)
+            }
+        } catch {
+            Logger.warning("AISessionManager", "sweepStagedAttachments skipped: \(error)")
+            return 0
+        }
+        let removed = AttachmentFileStaging.sweep(workspaceRoot: workspaceRoot, referencedIDs: referenced)
+        if removed > 0 {
+            Logger.info("AISessionManager", "sweepStagedAttachments: removed \(removed) unreferenced attachment folders")
+        }
+        return removed
+    }
+
     private func materialize(_ snapshot: SessionSnapshot) async -> AISession {
         var mask = agent?.buildMask()
         if let persistedPolicy = snapshot.executionPolicy, let currentMask = mask {
@@ -234,7 +276,8 @@ public final class AISessionManager: @unchecked Sendable {
             id: snapshot.id, title: snapshot.title, agentMask: mask, installedTools: installedTools,
             messages: snapshot.messages, provider: resolved?.provider, modelId: resolved?.modelId,
             createdAt: snapshot.createdAt, updatedAt: snapshot.updatedAt,
-            turnRecords: snapshot.turnRecords ?? [], metadata: snapshot.metadata
+            turnRecords: snapshot.turnRecords ?? [], metadata: snapshot.metadata,
+            permissionGrants: Set(snapshot.permissionGrants ?? [])
         )
         // 进程死过一次：标「上次中断」，不自动重放有副作用的工具。
         session.markUnfinishedTurnsAsInterrupted()
@@ -281,7 +324,8 @@ public final class AISessionManager: @unchecked Sendable {
                                        messages: old.messages, metadata: old.metadata,
                                        turnRecords: old.turnRecords,
                                        executionPolicy: old.executionPolicy,
-                                       ownerAgentID: old.ownerAgentID)
+                                       ownerAgentID: old.ownerAgentID,
+                                       permissionGrants: old.permissionGrants)
             try await storage.save(session: next)
             session.rename(title)
         }

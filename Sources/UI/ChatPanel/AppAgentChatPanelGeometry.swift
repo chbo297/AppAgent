@@ -21,8 +21,8 @@ enum AppAgentChatPanelDetent: CaseIterable {
 /// 一次 ChatPanel 布局所需的不可变几何结果，不包含任何手势或动画决策。
 struct AppAgentChatPanelGeometry: Equatable {
 
-    /// 面板顶部两个圆角的半径。
-    static let topCornerRadius: CGFloat = 20
+    /// 面板展开时的圆角半径（四角相同）；收起过渡中插值到输入栏的圆角。
+    static let cornerRadius: CGFloat = 20
 
     /// 顶部拖拽手柄区的固定高度；peek 时只在 inputBar 上方露出这一段。
     static let dragHandleAreaHeight: CGFloat = 28
@@ -44,9 +44,12 @@ struct AppAgentChatPanelGeometry: Equatable {
 
     /// 内部消息列表的底部 inset：展开态 inputBar 白色背景顶部到屏幕底部的高度。
     ///
-    /// 只由安全区和 bar 高度决定，因此在整个生命周期内固定：键盘弹出时 inputBar 与 ChatPanel 容器
-    /// 会一起上移，列表不需要再改 inset；面板拖动过程中列表滚动指标也因此不会被反复重算。
+    /// 只由安全区和 bar 高度决定：键盘弹出时 inputBar 与 ChatPanel 容器会一起上移，列表不需要再改 inset；
+    /// 面板拖动过程中列表滚动指标也因此不会被反复重算。只有草稿行数变化让 bar 长高时才跟着变。
     let listBottomInset: CGFloat
+
+    /// 展开态 inputBar 的高度（随草稿行数在单行与最大行数之间变化）；peek 的紧凑框与它等高。
+    let inputBarHeight: CGFloat
 
     /// 根据控制器与安全区生成合法几何；无有效空间时返回 nil。
     ///
@@ -54,9 +57,14 @@ struct AppAgentChatPanelGeometry: Equatable {
     /// inputBar 的可变展开宽只驱动外层容器（`AppAgentChatPanelContainerView`）的横向平移与淡出，
     /// 不改面板尺寸——否则拖窄 inputBar 或其宽度抖动会连带触发列表宽度变化与整表行高重测。
     /// 键盘同样不是参数：键盘只让宿主把整个 ChatPanel 容器上移，面板几何不跟着变。
+    ///
+    /// `hostReservedBottomHeight` 只抬高 peek 档：收起态输入栏停在宿主预留高度之上，peek 的紧凑框要和它对齐；
+    /// half / full 档输入栏回到安全区位置，面板仍铺到屏幕底部。
     init?(
         bounds: CGRect,
-        safeAreaInsets: UIEdgeInsets
+        safeAreaInsets: UIEdgeInsets,
+        inputBarHeight: CGFloat = AppAgentInputBarMetrics.barHeight,
+        hostReservedBottomHeight: CGFloat = 0
     ) {
         guard bounds.width > 0, bounds.height > 0 else { return nil }
 
@@ -71,11 +79,11 @@ struct AppAgentChatPanelGeometry: Equatable {
 
         let listBottomInset = min(
             maximumDisplayHeight,
-            max(0, safeAreaInsets.bottom + AppAgentInputBarMetrics.barHeight)
+            max(0, safeAreaInsets.bottom + inputBarHeight)
         )
         let peekHeight = min(
             maximumDisplayHeight,
-            max(0, listBottomInset + Self.dragHandleAreaHeight)
+            max(0, listBottomInset + hostReservedBottomHeight + Self.dragHandleAreaHeight)
         )
         // 在原 half 高度上补足顶部手柄区与标题栏占用的空间，不改变 peek/full。
         let fixedTopAreaHeight = Self.dragHandleAreaHeight + AppAgentChatPanelMetrics.navigationBarHeight
@@ -89,6 +97,7 @@ struct AppAgentChatPanelGeometry: Equatable {
         self.halfHeight = halfHeight
         self.maximumDisplayHeight = maximumDisplayHeight
         self.listBottomInset = listBottomInset
+        self.inputBarHeight = inputBarHeight
     }
 
     /// 交给 BODragScroll 的已排序、去重档位，避免紧凑窗口中多个业务档位重合。
@@ -162,15 +171,16 @@ struct AppAgentChatPanelContentLayout: Equatable {
     let contentFrame: CGRect
     let navigationBarFrame: CGRect
     let messageListFrame: CGRect
-    let topCornerRadius: CGFloat
-    let bottomCornerRadius: CGFloat
+    /// 背景与 viewport 共用的圆角半径，四角相同。
+    let cornerRadius: CGFloat
     let compactProgress: CGFloat
 
     init(
         bounds: CGRect,
         displayHeight: CGFloat,
         minimumDisplayHeight: CGFloat,
-        compactTransitionStartDisplayHeight: CGFloat
+        compactTransitionStartDisplayHeight: CGFloat,
+        compactHeight: CGFloat = AppAgentInputBarMetrics.barHeight
     ) {
         guard bounds.width > 0, bounds.height > 0 else {
             dragHandleAreaFrame = .zero
@@ -181,8 +191,7 @@ struct AppAgentChatPanelContentLayout: Equatable {
             contentFrame = .zero
             navigationBarFrame = .zero
             messageListFrame = .zero
-            topCornerRadius = 0
-            bottomCornerRadius = 0
+            cornerRadius = 0
             compactProgress = 0
             return
         }
@@ -250,10 +259,8 @@ struct AppAgentChatPanelContentLayout: Equatable {
             x: compactInset,
             y: 0,
             width: max(0, contentAreaFrame.width - compactInset * 2),
-            height: min(AppAgentInputBarMetrics.barHeight, contentAreaFrame.height)
+            height: min(compactHeight, contentAreaFrame.height)
         )
-
-        let isInsideCompactTransition = normalizedDisplayHeight <= transitionStart
 
         // 【竖向收起几何计算点】A 到 B 之间只通过 compactProgress 插值，背景与 viewport 使用同一结果。
         let presentationFrame = Self.interpolate(
@@ -288,25 +295,14 @@ struct AppAgentChatPanelContentLayout: Equatable {
             height: max(0, contentFrame.height - navigationBarHeight)
         )
 
+        // 四角始终同半径，高于 A 点也不变直角：宿主预留底部高度时面板底边可能离开屏幕底部，
+        // 直角会在拉起途中突然露出来。
         let maximumRadius = max(0, min(presentationFrame.width, presentationFrame.height) / 2)
-        let expandedCornerRadius = AppAgentChatPanelGeometry.topCornerRadius
-        let compactCornerRadius = AppAgentInputBarMetrics.expandedCornerRadius
-        topCornerRadius = min(
+        cornerRadius = min(
             maximumRadius,
             Self.interpolate(
-                from: expandedCornerRadius,
-                to: compactCornerRadius,
-                progress: compactProgress
-            )
-        )
-
-        // A/B 过渡中四角使用同一半径；高于 A 点时仍保持展开面板“上圆角、下直角”的形状。
-        let bottomStartRadius = isInsideCompactTransition ? expandedCornerRadius : 0
-        bottomCornerRadius = min(
-            maximumRadius,
-            Self.interpolate(
-                from: bottomStartRadius,
-                to: compactCornerRadius,
+                from: AppAgentChatPanelGeometry.cornerRadius,
+                to: AppAgentInputBarMetrics.expandedCornerRadius,
                 progress: compactProgress
             )
         )

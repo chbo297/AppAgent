@@ -103,14 +103,12 @@ func clearHighlight(webviewId: String?, context: HostInspectionContext) async ->
 自定义 provider 必须迁移签名并落实上下文边界；不提供丢弃 context 的旧协议兜底。
 默认 provider 的 context 参数默认 `.init()`，直接无 session 调用仍由宿主承担执行授权责任。
 
-## 5. 抓包通道
+## 5. 桥消息采集
 
-`HookCaptureStore` 不内置通道集合。宿主可以为桥入站、桥出站、页面 console、导航事件或其他
-诊断来源定义自己的通道名；通道名只允许 ASCII 字母、数字、`.`、`_`、`-`，并作为 JSONL
-文件名的一部分。宿主负责声明每个通道的记录字段、方向、状态码和脱敏规则。
-
-桥的失败路径是否复用入出通道、是否单独建立错误通道，都由宿主协议决定。SDK 只提供按 channel
-开关、文件扫描、页面/容器/调用/进程游标过滤和有界输出，不解释业务字段。
+SDK 不再内置抓包工具与存储（原 `app_hook_capture` / `HookCaptureStore` 已删除）。桥入站、出站、
+页面 console、导航事件的采集口径、字段、状态码和脱敏规则都属于宿主协议，由宿主自己实现采集与落盘，
+再作为宿主工具（建议加入 `debug` 组）交给 agent。`app_web_inspect targets` 返回的 `webviewId`
+可作为宿主记录的页面关联键。
 
 一次桥调用的入/出两条记录靠 `callId` 配对，**超时未回包的判定放 agent 侧算**，端上不做定时器。
 

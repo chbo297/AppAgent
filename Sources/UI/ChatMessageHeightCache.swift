@@ -52,6 +52,8 @@ final class ChatMessageHeightCache {
         /// 决定整个过程区显隐（高度差可达上百 pt），必须进判等。
         let suppressResolvedActivity: Bool
         let activity: AppAgentActivityTimeline?
+        /// 附件行有无、张数决定用户气泡上方多出的那一排缩略图。
+        let attachmentIDs: [String]
 
         init(_ message: ChatMessage) {
             role = message.role
@@ -60,6 +62,7 @@ final class ChatMessageHeightCache {
             isActivityExpanded = message.isActivityExpanded
             suppressResolvedActivity = message.suppressResolvedActivity
             activity = message.activity
+            attachmentIDs = message.attachments.map(\.id)
         }
     }
 

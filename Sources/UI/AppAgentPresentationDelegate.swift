@@ -151,6 +151,14 @@ public protocol AppAgentPresentationDelegate: AnyObject {
     /// 状态判等去重后才发，同一份状态不会重复回调；手势跟手期间
     /// `animation.duration == 0`，宿主可据此选择只处理落位（`isAnimated == true`）。
     func appAgentPresentationDidChange(_ state: AppAgentPresentationState)
+
+    /// 宿主当前页面底部需要 AppAgent 让出的高度（pt），例如首页底部 tab 栏；当前页面底部没有常驻控件返回 0。
+    ///
+    /// AppAgent 在设置 `presentationDelegate` 时取一次，之后只在宿主调用
+    /// `AppAgentViewController.invalidateHostReservedBottomHeight()` 时重新取，结果缓存在
+    /// `hostReservedBottomHeight`。宿主切页面后先让本方法返回新页面的值，再调用 invalidate。
+    /// 配套页面展开（`navigationAccessory.isActive`）期间 AppAgent 不让出这段高度，宿主不必为此返回 0。
+    func appAgentHostReservedBottomHeight() -> CGFloat
 }
 
 // Default no-op implementations so adopters implement only what they need.
@@ -159,6 +167,10 @@ public extension AppAgentPresentationDelegate {
     func appAgentChatPanelWillShow() {}
     func appAgentChatPanelDidHide() {}
     func appAgentPresentationDidChange(_ state: AppAgentPresentationState) {}
+
+    func appAgentHostReservedBottomHeight() -> CGFloat {
+        0
+    }
 }
 
 #endif

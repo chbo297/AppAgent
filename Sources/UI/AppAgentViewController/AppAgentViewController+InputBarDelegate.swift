@@ -26,13 +26,23 @@ extension AppAgentViewController: AppAgentInputBarDelegate {
         logInputBarDelegate("didChangeInputSource source=\(source)")
     }
 
-    // 场景：inputBar 的 textField 激活或失焦时触发，用当前已观察到的键盘高度重新计算 inputBar 是否需要避让。
+    // 场景：inputBar 的输入框激活或失焦时触发，用当前已观察到的键盘高度重新计算 inputBar 是否需要避让。
+    // 激活时面板若收在 peek，自动弹到半屏，让用户输入时能看到对话。
     public func inputBar(_ bar: AppAgentInputBar, didChangeTextInputFocus isFocused: Bool) {
         logInputBarDelegate("didChangeTextInputFocus isFocused=\(isFocused)")
         layoutInputBar(reason: .keyboard)
         if isFocused {
+            if chatPanelCoordinator.isAtPeekDetent {
+                setChatPanelDetent(.half, animated: true)
+            }
             scrollToBottom(animated: true)
         }
+    }
+
+    // 场景：草稿换行、清空或切换输入源后，展开态应有高度变了；按新高度重排输入栏与对话面板。
+    public func inputBarDidChangeExpandedHeight(_ bar: AppAgentInputBar) {
+        logInputBarDelegate("inputBarDidChangeExpandedHeight")
+        layoutInputBar(reason: .layout)
     }
 
     // 场景：收起态点击 menu 按钮，或手势结算后判定需要展开输入栏时触发。
@@ -112,10 +122,65 @@ extension AppAgentViewController: AppAgentInputBarDelegate {
         // Override in subclass or set up delegate chain
     }
 
-    // 场景：点击加号按钮时触发，用于宿主接入附件、工具或更多能力入口。
+    // 场景：点击加号按钮时触发；面板的展开 / 收起由 inputBar 自己完成。
     public func inputBarDidTapPlus(_ bar: AppAgentInputBar) {
-        logInputBarDelegate("inputBarDidTapPlus")
-        // Override in subclass or set up delegate chain
+        logInputBarDelegate("inputBarDidTapPlus panel=\(bar.isShowingAttachmentPanel)")
+    }
+
+    // 场景：加号面板里点了「图片」或「文件」，弹出对应的系统选择器。
+    public func inputBar(_ bar: AppAgentInputBar, didSelectAttachmentSource source: AppAgentInputBarAttachmentSource) {
+        logInputBarDelegate("didSelectAttachmentSource source=\(source)")
+        attachmentPickSessionId = currentSessionId
+        attachmentPicker.present(source, remainingImageSlots: bar.remainingImageAttachmentSlots)
+    }
+
+    // 场景：发送前点掉了附件，或再选一个文件替换了旧的；拷进工作区的那份没人会再用，删掉。
+    public func inputBar(_ bar: AppAgentInputBar, didDiscardAttachments attachments: [AIAgentMessage.Attachment]) {
+        let files = attachments.filter { attachment in
+            attachment.kind == .file
+        }
+        let registry = agent?.profile.fileResources ?? FileResourceRegistry()
+        guard !files.isEmpty, let root = registry.descriptor(for: "agent://workspace")?.rootURL else {
+            return
+        }
+        Task.detached(priority: .utility) {
+            for file in files {
+                AttachmentFileStaging.discard(file, workspaceRoot: root)
+            }
+        }
+    }
+
+    func makeAttachmentPicker() -> AppAgentAttachmentPicker {
+        let picker = AppAgentAttachmentPicker()
+        picker.presenter = self
+        picker.workspaceRoot = { [weak self] in
+            let registry = self?.agent?.profile.fileResources ?? FileResourceRegistry()
+            return registry.descriptor(for: "agent://workspace")?.rootURL
+        }
+        picker.onPicked = { [weak self] attachments in
+            guard let self else {
+                return
+            }
+            // 图片 / 文件是异步读完的；这期间切走了会话，就不能塞进另一个会话的输入框，拷进来的文件也删掉。
+            guard self.currentSessionId == self.attachmentPickSessionId else {
+                self.inputBar(self.inputBar, didDiscardAttachments: attachments)
+                return
+            }
+            self.inputBar.addAttachments(attachments)
+        }
+        picker.onError = { [weak self] message in
+            self?.presentAttachmentError(message)
+        }
+        return picker
+    }
+
+    private func presentAttachmentError(_ message: String) {
+        guard presentedViewController == nil, !isBeingDismissed else {
+            return
+        }
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "好", style: .cancel))
+        present(alert, animated: true)
     }
 
     // 场景：loop 运行中输入框为空，加号位置显示为停止按钮，点击它时触发。

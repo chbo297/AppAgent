@@ -205,7 +205,7 @@ public enum Logger {
     private static let redactPatterns: [(regex: NSRegularExpression, groupIndex: Int)] = {
         // (pattern, capture group index for the sensitive part)
         // Group 0 = full match when no specific group needed
-        let credential = #"(?:api[_-]?key|x-api-key|(?:proxy-)?authorization|x-zt-authorization|(?:access[_-]?|refresh[_-]?|id[_-]?)?token|password|passwd|secret|client[_-]?secret|comate_custom_header)"#
+        let credential = #"(?:api[_-]?key|x-api-key|(?:[a-z0-9]+-)*authorization|(?:access[_-]?|refresh[_-]?|id[_-]?)?token|password|passwd|secret|client[_-]?secret|[a-z0-9_-]*custom[_-]?header)"#
         let definitions: [(String, Int)] = [
             // JSON 字符串值：包括短凭据、空格与转义引号，不吞掉相邻业务字段。
             (#"(?i)""# + credential + #""\s*:\s*"((?:\\.|[^"\\])*)""#, 1),

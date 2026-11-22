@@ -103,6 +103,9 @@ public enum ProviderStreamEvent: Sendable {
     case reasoningDelta(String)
     /// The assistant wants to call a tool.
     case toolCall(AIAgentMessage.ToolCall)
+    /// A tool call was cut off by the output limit and dropped (never executed).
+    /// Always followed by `.done(stopReason: .maxTokens)`.
+    case discardedToolCall(name: String)
     /// The stream has ended. `stopReason` indicates why.
     case done(stopReason: StopReason)
     /// Token usage information.

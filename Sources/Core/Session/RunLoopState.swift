@@ -52,7 +52,22 @@ struct RunLoopState {
     // MARK: - 宿主上下文
 
     /// 下次请求是否强制重拍宿主状态快照（首轮、压缩后、回退后都要）。
-    var forceHostSnapshotNextRequest = true
+    var forceFullHostStateNextRequest = true
+
+    // MARK: - 上限恢复
+
+    /// 这一轮因单次输出上限（max_tokens）自动续写了几次。
+    var outputContinuations = 0
+
+    /// 续写之前已经输出的正文；终局文本 = 它 + 最后一次的正文。
+    var continuedText = ""
+
+    /// 连续几次撞上限却既没正文也没工具调用（推理模型把额度全花在思考上）。
+    /// 再续多半还是同样结果，到 2 次就停，不把剩下的续写额度白白烧掉。
+    var emptyOutputLimitHits = 0
+
+    /// 这一轮是否已经因「上下文超长」报错压缩重试过（只给一次机会，避免同一个超长请求反复发）。
+    var didReactiveCompaction = false
 
     init(
         initialMessages: [AIAgentMessage],
