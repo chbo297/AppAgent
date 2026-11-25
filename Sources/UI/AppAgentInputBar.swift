@@ -26,18 +26,20 @@ public enum AppAgentInputBarFrameAnimation {
     /// 带阻尼的边界回弹；用于展开 resize 或收起 move 越界后的合法 frame 恢复。
     case boundaryRebound
 
-    var isAnimated: Bool { presentation.isAnimated }
+    var isAnimated: Bool {
+        uiAnimation.isAnimated
+    }
 
-    /// 这一档动画的参数。`makeAnimator` 与上报给宿主的 `AppAgentPresentationAnimation`
+    /// 这一档动画的参数。`makeAnimator` 与上报给宿主的 `AppAgentUIAnimation`
     /// 共用这一份：宿主要跟着一起动，拿到的必须就是我们真正用的那条曲线，两处常量不许各自漂移。
-    var presentation: AppAgentPresentationAnimation {
+    var uiAnimation: AppAgentUIAnimation {
         switch self {
         case .immediate:
             return .immediate
         case .standard:
-            return AppAgentPresentationAnimation(duration: 0.24, options: [.curveEaseOut])
+            return AppAgentUIAnimation(duration: 0.24, options: [.curveEaseOut])
         case .boundaryRebound:
-            return AppAgentPresentationAnimation(duration: 0.30, options: [], springDamping: 0.78)
+            return AppAgentUIAnimation(duration: 0.30, options: [], springDamping: 0.78)
         }
     }
 
@@ -45,7 +47,7 @@ public enum AppAgentInputBarFrameAnimation {
     /// 的主线程前提变成编译期事实（调用点本来全在 inputBar 的布局路径上）。
     @MainActor
     func makeAnimator(animations: @escaping () -> Void) -> UIViewPropertyAnimator? {
-        let params = presentation
+        let params = uiAnimation
         guard params.isAnimated else { return nil }
         guard let damping = params.springDamping else {
             return UIViewPropertyAnimator(duration: params.duration, curve: .easeOut, animations: animations)

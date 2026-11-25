@@ -41,7 +41,7 @@ extension AppAgentViewController {
         //
         // 这条曲线也要带给宿主：块内的 `applyInputBarFrame` 拿到的是 `.immediate`，
         // 只有这里记得住真实时长曲线，宿主要靠它才能跟着同速移动自己的内容。
-        ambientKeyboardAnimation = AppAgentPresentationAnimation(
+        ambientKeyboardAnimation = AppAgentUIAnimation(
             duration: animation.duration,
             options: animation.options
         )

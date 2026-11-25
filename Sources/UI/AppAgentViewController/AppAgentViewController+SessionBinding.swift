@@ -365,6 +365,10 @@ extension AppAgentViewController {
                 dismissDecisionCard()
             }
 
+        case AISession.chatPanelChangedKey:
+            // 本会话的面板档位变了（模型 op=chat_panel，或用户拖动后写回）；与当前一致时不重复动画。
+            applySessionChatPanel(session.chatPanel, animated: true)
+
         default:
             break
         }
@@ -424,7 +428,7 @@ extension AppAgentViewController {
     /// 撤卡片的唯一出口：撤完顺手把遮挡变化报给宿主（卡片贴在面板可见区里，占一块区域）。
     func dismissDecisionCard() {
         chatPanelView.dismissDecision()
-        notifyPresentationChangeIfNeeded(reason: .visibility)
+        notifyUIStateChangeIfNeeded(reason: .visibility)
     }
 
     /// 把某个会话队首的卡片贴出来。呈现不了时返回 false（不动队列，下次切回来还能再试）。
@@ -447,7 +451,7 @@ extension AppAgentViewController {
             }
         }
         if shown {
-            notifyPresentationChangeIfNeeded(reason: .visibility)
+            notifyUIStateChangeIfNeeded(reason: .visibility)
         }
         return shown
     }

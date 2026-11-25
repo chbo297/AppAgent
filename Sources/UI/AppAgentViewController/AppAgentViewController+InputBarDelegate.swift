@@ -80,7 +80,7 @@ extension AppAgentViewController: AppAgentInputBarDelegate {
             constrainedFrame = rubberBandedCollapsedInputBarFrame(frame)
             resetExpandedResizeWidthHoldTracking()
         }
-        let reason: AppAgentPresentationChangeReason = kind == .expandedResize
+        let reason: AppAgentUIChangeReason = kind == .expandedResize
             ? .expandedResizePan
             : .collapsedMovePan
         applyInputBarFrame(constrainedFrame, animation: .immediate, reason: reason)

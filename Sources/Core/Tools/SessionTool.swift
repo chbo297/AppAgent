@@ -19,6 +19,8 @@ public struct SessionTool: ToolProtocol {
         URLs omit credentials, query and fragment; unsafe or unknown URLs are null. \
         Request URLs describe the current configuration, not a past request or redirect. \
         API keys and authentication headers are not returned.
+        Use op='chat_panel' with state collapsed / half / full to set how far this conversation's chat panel \
+        opens (the workspace has its own workspace tool).
         """
     public let parameters = Tool.Schema(
         properties: [
@@ -26,7 +28,7 @@ public struct SessionTool: ToolProtocol {
                 description: "Operation.",
                 enumValues: [
                     "search", "list", "read", "create", "switch", "set_model", "models",
-                    "rename", "archive", "delete", "archived", "restore", "merge"
+                    "rename", "archive", "delete", "archived", "restore", "merge", "chat_panel"
                 ],
                 defaultValue: .string("list")
             ),
@@ -53,6 +55,10 @@ public struct SessionTool: ToolProtocol {
                 description: "Legacy tail page size for read.",
                 minimum: 1,
                 maximum: 500
+            ),
+            "state": .string(
+                description: "op='chat_panel': collapsed (input bar only), half or full.",
+                enumValues: SessionChatPanel.allCases.map(\.rawValue)
             )
         ],
         required: []
@@ -67,7 +73,7 @@ public struct SessionTool: ToolProtocol {
         switch arguments["op"]?.stringValue ?? "list" {
         case "search", "list", "read", "models", "archived":
             return .safe
-        case "create", "rename", "switch", "set_model", "merge", "restore":
+        case "create", "rename", "switch", "set_model", "merge", "restore", "chat_panel":
             return .moderate
         case "delete", "archive":
             return .sensitive
@@ -86,6 +92,14 @@ public struct SessionTool: ToolProtocol {
             searchArguments.removeValue(forKey: "op")
             return try await SessionSearchExecutor().execute(
                 arguments: searchArguments,
+                session: session
+            )
+        }
+        if op == "chat_panel" {
+            var panelArguments = arguments
+            panelArguments.removeValue(forKey: "op")
+            return try await SessionChatPanelExecutor().execute(
+                arguments: panelArguments,
                 session: session
             )
         }

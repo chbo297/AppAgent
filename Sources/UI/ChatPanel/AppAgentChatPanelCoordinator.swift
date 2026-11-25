@@ -32,6 +32,19 @@ final class AppAgentChatPanelCoordinator: NSObject {
     /// 真正收至 peek 后再次展开才开始新的浏览；half/full 切换与逐帧布局不触发。
     var onWillRevealMessages: (() -> Void)?
 
+    /// 面板停在某一档（不在拖动、高度正好落在档位上）时回调，同一档只报一次。
+    /// 程序化移动途中经过的档位不算停靠，只报移动的目标档。
+    var onDetentSettled: ((AppAgentChatPanelDetent) -> Void)?
+    private var settledDetent: AppAgentChatPanelDetent?
+
+    /// 正在进行的程序化移动：id 区分新旧请求，到达目标档、被拖动接管或动画结束时清掉。
+    private var moveTarget: (id: UUID, detent: AppAgentChatPanelDetent)?
+
+    /// 当前档位：正在程序化移动时是目标档，否则是停靠（或最近的）档位。
+    var currentDetent: AppAgentChatPanelDetent {
+        moveTarget?.detent ?? displayDetent
+    }
+
     override init() {
         super.init()
 
@@ -144,13 +157,27 @@ final class AppAgentChatPanelCoordinator: NSObject {
             return
         }
 
+        let moveID = UUID()
+        moveTarget = (moveID, detent)
         dragScrollView.scroll(
             toDisplayHeight: geometry.height(for: detent),
             animated: animated
         ) { [weak self] _ in
+            guard let self else {
+                return
+            }
+
+            // 被打断而停在半路时不再等目标档：按实际停的位置补报一次。
+            if self.moveTarget?.id == moveID {
+                self.moveTarget = nil
+                self.reportSettledDetentIfResting()
+            }
+
             // 首帧前取消 / 中断也要结束本次豁免，不能影响之后的用户重开。
             // 新请求可能同步中断旧请求，旧 completion 只能清理自己的标记。
-            guard let self, let revealID, self.automaticRevealID == revealID else { return }
+            guard let revealID, self.automaticRevealID == revealID else {
+                return
+            }
             self.automaticRevealID = nil
         }
     }
@@ -203,6 +230,11 @@ final class AppAgentChatPanelCoordinator: NSObject {
             to: clampedDisplayHeight,
             preferredDetent: displayDetent
         )
+        if dragScrollView.isDragging {
+            // 用户接手，程序化移动的目标作废。
+            moveTarget = nil
+        }
+        reportSettledDetentIfResting()
         let fixedTopAreaHeight = AppAgentChatPanelGeometry.dragHandleAreaHeight
             + AppAgentChatPanelMetrics.navigationBarHeight
         // 列表视口跟随实时展示高度；但下限保持 half 档的可视高度，继续收向 peek 时只做视觉裁切，
@@ -241,6 +273,28 @@ final class AppAgentChatPanelCoordinator: NSObject {
     }
 
     /// 【竖向收起接线点】把 BODragScroll 的实时展示高度交给 panel 内部，只更新背景和 viewport 的裁切几何。
+    /// 不在拖动且高度正好落在某档时上报一次；程序化移动中只认目标档，到达即结束这次移动。
+    private func reportSettledDetentIfResting() {
+        guard let geometry, !dragScrollView.isDragging, dragScrollView.displayHeight > 0 else {
+            return
+        }
+        let height = geometry.clampedDisplayHeight(dragScrollView.displayHeight)
+        guard abs(geometry.height(for: displayDetent) - height) <= 0.5 else {
+            return
+        }
+        if let target = moveTarget?.detent {
+            guard target == displayDetent else {
+                return
+            }
+            moveTarget = nil
+        }
+        guard settledDetent != displayDetent else {
+            return
+        }
+        settledDetent = displayDetent
+        onDetentSettled?(displayDetent)
+    }
+
     private func updatePanelPresentation(at displayHeight: CGFloat) {
         guard let geometry, displayHeight > 0 else { return }
         panelView.updateDisplayHeight(

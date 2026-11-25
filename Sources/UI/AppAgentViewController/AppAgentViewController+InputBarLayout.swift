@@ -125,7 +125,7 @@ extension AppAgentViewController {
     }
 
     /// 面板收起进度变化让 `hostReservedBottomLift` 变了时重排输入栏（由那次布局通知宿主），返回是否重排。
-    func relayoutInputBarIfReservedLiftChanged(reason: AppAgentPresentationChangeReason) -> Bool {
+    func relayoutInputBarIfReservedLiftChanged(reason: AppAgentUIChangeReason) -> Bool {
         guard abs(hostReservedBottomLift - appliedHostReservedBottomLift) > 0.01 else {
             return false
         }
@@ -147,7 +147,7 @@ extension AppAgentViewController {
 
     /// 每次布局变化（首次上屏、旋转、键盘、拖拽中容器重排）都从这里统一算出 inputBar 该待在哪。
     /// 优先级从上到下：首帧 → 正在拖拽（跟手，不能被策略值拽回去）→ 静止时按收起/展开取偏好位置。
-    func layoutInputBar(reason: AppAgentPresentationChangeReason) {
+    func layoutInputBar(reason: AppAgentUIChangeReason) {
         // 容器还没有有效尺寸（view 尚未布局完），算出来的 frame 没有意义，直接跳过等下一次。
         guard inputBarContainerAvailableFrame.width > 0, inputBarContainerAvailableFrame.height > 0 else {
             return
@@ -185,14 +185,16 @@ extension AppAgentViewController {
     func applyInputBarFrame(
         _ targetFrame: CGRect,
         animation: AppAgentInputBarFrameAnimation,
-        reason: AppAgentPresentationChangeReason
+        reason: AppAgentUIChangeReason
     ) {
         let oldFrame = inputBar.frame
         let didChange = didInputBarFrameChange(from: oldFrame, to: targetFrame)
         appliedHostReservedBottomLift = hostReservedBottomLift
         // 面板可见区的变化会从面板侧冒泡回这里，让它沿用本次的原因，而不是一律记成竖向拖拽。
-        currentPresentationChangeReason = reason
-        defer { currentPresentationChangeReason = nil }
+        currentUIChangeReason = reason
+        defer {
+            currentUIChangeReason = nil
+        }
         if didChange {
             inputBar.setInputBarFrame(targetFrame, animation: animation)
         }
@@ -209,7 +211,7 @@ extension AppAgentViewController {
         }
         // 故意**不**按 `didChange` 短路：键盘顶起时 inputBar 可能没动、面板容器却整体上移了，
         // 那也是宿主要知道的遮挡变化。重复通知由状态判等去重。
-        notifyPresentationChangeIfNeeded(reason: reason, animation: animation.presentation)
+        notifyUIStateChangeIfNeeded(reason: reason, animation: animation.uiAnimation)
     }
 
     func didInputBarFrameChange(from oldFrame: CGRect, to newFrame: CGRect) -> Bool {

@@ -48,12 +48,20 @@ public struct SessionSnapshot: Sendable, Codable {
     /// 「在本会话中允许」的权限 id。后加的键，旧快照缺它就是没有授权。
     public let permissionGrants: [String]?
 
+    /// 对话面板档位。后加的键，旧快照缺它就是半屏。
+    public let chatPanel: SessionChatPanel?
+
+    /// 工作区数据。后加的键，旧快照缺它就是空工作区。
+    public let workspace: SessionWorkspace?
+
     public init(id: String, title: String, createdAt: Date, updatedAt: Date,
                 messages: [AIAgentMessage], metadata: [String: String]? = nil,
                 turnRecords: [AIAgentTurnRecord]? = nil,
                 executionPolicy: AIAgentExecutionPolicy? = nil,
                 archivedAt: Date? = nil, ownerAgentID: String? = nil,
-                permissionGrants: [String]? = nil) {
+                permissionGrants: [String]? = nil,
+                chatPanel: SessionChatPanel? = nil,
+                workspace: SessionWorkspace? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -65,6 +73,8 @@ public struct SessionSnapshot: Sendable, Codable {
         self.archivedAt = archivedAt
         self.ownerAgentID = ownerAgentID
         self.permissionGrants = permissionGrants
+        self.chatPanel = chatPanel
+        self.workspace = workspace
     }
 
     /// 手写解码只为一件事：**turnRecords 解不开不能拖垮整个快照**。
@@ -84,6 +94,8 @@ public struct SessionSnapshot: Sendable, Codable {
         self.archivedAt = try container.decodeIfPresent(Date.self, forKey: .archivedAt)
         self.ownerAgentID = try container.decodeIfPresent(String.self, forKey: .ownerAgentID)
         self.permissionGrants = try? container.decodeIfPresent([String].self, forKey: .permissionGrants)
+        self.chatPanel = try? container.decodeIfPresent(SessionChatPanel.self, forKey: .chatPanel)
+        self.workspace = try? container.decodeIfPresent(SessionWorkspace.self, forKey: .workspace)
     }
 
     func withArchivedAt(_ date: Date?) -> SessionSnapshot {
@@ -91,7 +103,8 @@ public struct SessionSnapshot: Sendable, Codable {
                         messages: messages, metadata: metadata, turnRecords: turnRecords,
                         executionPolicy: executionPolicy,
                         archivedAt: date, ownerAgentID: ownerAgentID,
-                        permissionGrants: permissionGrants)
+                        permissionGrants: permissionGrants,
+                        chatPanel: chatPanel, workspace: workspace)
     }
 }
 

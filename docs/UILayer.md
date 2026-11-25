@@ -24,8 +24,8 @@ AppAgent 自己的调试页，跑在 AppAgent 自己的窗口里，不是宿主�
 
 ### 展示状态上报：宿主怎么知道自己被挡住了
 
-宿主实现 `AppAgentPresentationDelegate.appAgentPresentationDidChange(_:)` 拿
-`AppAgentPresentationState`（也可以随时读 `viewController.presentationState` 主动查）：
+宿主实现 `AppAgentUIDelegate.appAgentUIStateDidChange(_:)` 拿
+`AppAgentUIState`（也可以随时读 `viewController.uiState` 主动查）：
 输入栏展开/收起与位置、**对话面板可见区的位置和高度**、键盘避让高度，以及 `areas`
 —— 当前盖住宿主的所有矩形（输入栏 / 面板 / 侧栏 / 语音浮层 / 决策卡片），宿主 window 坐标。
 
@@ -261,8 +261,8 @@ BOUIKit 0.2.0 起还提供几何层：`bo_setFrame` / `bo_setBounds` / `bo_setCe
 让出的高度。它**不是安全区**：系统底部安全区由 SDK 自己避让，本值叠加在安全区之上，命名上刻意不带
 inset / safeArea。
 
-- **取值协议（宿主提供、SDK 拉取）**：值来自 `AppAgentPresentationDelegate.appAgentHostReservedBottomHeight()`，
-  设置 `presentationDelegate` 时取一次；宿主页面切换、底部遮挡变化后调用
+- **取值协议（宿主提供、SDK 拉取）**：值来自 `AppAgentUIDelegate.appAgentHostReservedBottomHeight()`，
+  设置 `uiDelegate` 时取一次；宿主页面切换、底部遮挡变化后调用
   `invalidateHostReservedBottomHeight()`，SDK 重新取值，有变化才重排。SDK 不感知具体页面。
 - **配套页面展开时不让出**：`navigationAccessory.isActive == true` 表示宿主配套页面（如工作区）盖在宿主页面上，
   `effectiveHostReservedBottomHeight` 取 0，输入栏回到安全区位置；收起后自动恢复缓存值，宿主不必为此改返回值。

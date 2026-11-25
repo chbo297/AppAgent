@@ -1082,6 +1082,17 @@ enum CapabilitySelfCheck {
         } else {
             rec.record("delete(非当前会话) 允许", ok: false, detail: "create 没返回 session_id")
         }
+
+        // session.chat_panel：只改会话数据（随会话落盘），不碰 UIKit。
+        await check(rec, "chat_panel(full)", sessions,
+                    ["op": .string("chat_panel"), "state": .string("full")],
+                    session: session)
+        await check(rec, "chat_panel(bad state) rejected", sessions,
+                    ["op": .string("chat_panel"), "state": .string("nope")],
+                    expect: .errorContains("state"), session: session)
+        await check(rec, "chat_panel(half)", sessions,
+                    ["op": .string("chat_panel"), "state": .string("half")],
+                    session: session)
     }
     // MARK: - 需宿主注入 Provider 的工具
 

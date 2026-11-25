@@ -183,6 +183,7 @@
 | `UI/AppAgentInputBar.swift` + `AppAgentInputBarFramePolicy.swift` + `AppAgentMenuButton` + `AppAgentTextView` | 底部胶囊输入栏：多行草稿、布局压缩阶段、pan 手势、扩大后的输入命中区、右侧动作槽（加号/发送/停止） |
 | `UI/AppAgentAttachmentPicker.swift` + `AppAgentAttachmentViews.swift` | 输入栏加号面板：图片 / 文件选择、附件缩略图行 |
 | `UI/AppAgentPageToggleButton.swift` | 公开的配套页面开关控件（顶栏与宿主页面共用） |
+| `UI/Workspace/` | 会话工作区：`AppAgentWorkspace`（唯一入口）、宿主协议 `AppAgentWorkspaceHost` / 插槽视图、容器与页面 VC、状态落盘、`workspace` 工具、H5 内容/触摸/scheme/桥脚本（见 `docs/Workspace.md`） |
 | `UI/ChatPanel/` | BODragScroll 面板：coordinator、几何/detent、消息列表、导航栏、过程区（timeline + view）、决策卡片（`AppAgentDecisionCardView` + `AppAgentDecisionOptionRow` + `AppAgentDecisionPresenter`） |
 | `UI/ChatMessage.swift` + `ChatMessageCell.swift` | 展示层消息模型与气泡 cell（正文为可选中 UITextView，附过程区） |
 | `UI/ChatMessageAssembler.swift` | 把 wire 记录组装成用户视角的对话列表（按 turnID 归属，工具往返收进过程区） |

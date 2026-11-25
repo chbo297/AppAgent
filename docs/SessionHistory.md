@@ -2,7 +2,15 @@
 
 AppAgent keeps conversation history separate from general-purpose file access.
 `session` provides `search`, `list`, `read`, `create`, `switch`, `rename`, `archive`,
-`delete`, `archived`, `restore` and `merge`, plus `models` and `set_model`.
+`delete`, `archived`, `restore` and `merge`, plus `models`, `set_model` and `chat_panel`.
+
+## Chat panel（op='chat_panel'）
+
+Each session stores how far its chat panel opens: `collapsed` (only the input bar), `half` or `full`
+(`AISession.chatPanel`, persisted with the session). `op='chat_panel'` sets it (safety level: moderate);
+the UI applies it when that session is on screen and writes back where the user leaves the panel.
+The input bar itself (capsule or expanded) is global, not per session. The workspace has its own
+`workspace` tool (see `docs/Workspace.md`).
 
 ## Archive and restore
 

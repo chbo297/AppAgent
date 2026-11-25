@@ -182,6 +182,7 @@ AGENTS.md 只留**跨模块、违反就出事**的约定和导航。下面每份
 - `docs/Diagnostics.md` — 落盘日志、诊断包、模拟器能力自检（工具回归的主力手段）。
 - `docs/Dependencies.md` — BODragScroll / BOUIKit 两个兄弟仓的联合开发与发版顺序。
 - `docs/FileMap.md` — 「我要做 X 就去看 Y」+ 完整文件清单。
+- `docs/Workspace.md` — 会话工作区：数据归会话、SDK 与宿主各管什么、宿主协议、工具与页面 JS、门禁。改 `Sources/UI/Workspace/` 就读它。
 - `docs/SessionHistory.md` / `docs/Providers.md` / `docs/Tools.md` / `docs/Architecture.md` /
   `docs/GettingStarted.md` / `docs/UICustomization.md` / `docs/HostInspectionExamples.md` — 既有专题文档。
 

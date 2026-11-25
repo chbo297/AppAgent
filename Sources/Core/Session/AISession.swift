@@ -132,6 +132,18 @@ public final class AISession: @unchecked Sendable {
     @TrackedLocked
     public internal(set) var permissionGrants: Set<String> = []
 
+    /// 对话面板在输入框展开时停的档位，**随快照落盘**。输入框本身的展开 / 小球是全局的，不在会话里。
+    @TrackedLocked
+    public internal(set) var chatPanel: SessionChatPanel = .half
+
+    /// 本会话的工作区数据，**随快照落盘**。后台会话也能改；界面只在它是当前会话时按它刷新。
+    @TrackedLocked
+    public internal(set) var workspace = SessionWorkspace()
+
+    /// 界面数据（面板档位、工作区）已有一次合并保存在排队。只在内存里，见 `AISession+Workspace`。
+    @Locked
+    var interfaceSavePending = false
+
     /// 已经随结果下发过 `usageGuide` 的工具名。只在内存里：重启 App 或上下文压缩后清空，
     /// 下次调用再附一次，保证模型眼前总有一份手册。
     @Locked
@@ -209,7 +221,7 @@ public final class AISession: @unchecked Sendable {
     /// Whether any persistable property has been modified since last `clearDirty()`.
     public var isDirty: Bool {
         _title.isDirty || _updatedAt.isDirty || _messages.isDirty || _turnRecords.isDirty
-            || _permissionGrants.isDirty
+            || _permissionGrants.isDirty || _chatPanel.isDirty || _workspace.isDirty
     }
 
     /// Clear dirty flags after successful persistence.
@@ -219,6 +231,8 @@ public final class AISession: @unchecked Sendable {
         _messages.clearDirty()
         _turnRecords.clearDirty()
         _permissionGrants.clearDirty()
+        _chatPanel.clearDirty()
+        _workspace.clearDirty()
     }
 
     public init(id: String,
@@ -233,7 +247,9 @@ public final class AISession: @unchecked Sendable {
          turnRecords: [AIAgentTurnRecord] = [],
          delegationDepth: Int = 0,
          metadata: [String: String]? = nil,
-         permissionGrants: Set<String> = []) {
+         permissionGrants: Set<String> = [],
+         chatPanel: SessionChatPanel = .half,
+         workspace: SessionWorkspace = SessionWorkspace()) {
         self.id = id
         self.createdAt = createdAt
         self.metadata = metadata
@@ -257,6 +273,8 @@ public final class AISession: @unchecked Sendable {
             wrappedValue: Dictionary(turnRecords.map { ($0.turnID, $0) }, uniquingKeysWith: { _, last in last })
         )
         self._permissionGrants = TrackedLocked(wrappedValue: permissionGrants, isEqual: ==)
+        self._chatPanel = TrackedLocked(wrappedValue: chatPanel, isEqual: ==)
+        self._workspace = TrackedLocked(wrappedValue: workspace, isEqual: ==)
         self._toolPolicy = Locked(wrappedValue: nil)
         self._decisionResponders = Locked(wrappedValue: .default)
         self.hostStateReporter = HostStateReporter()
@@ -755,7 +773,9 @@ public final class AISession: @unchecked Sendable {
             turnRecords: turnRecords.values.sorted { $0.turnID < $1.turnID },
             executionPolicy: executionPolicy,
             ownerAgentID: agentMask?.agent?.id,
-            permissionGrants: permissionGrants.isEmpty ? nil : permissionGrants.sorted()
+            permissionGrants: permissionGrants.isEmpty ? nil : permissionGrants.sorted(),
+            chatPanel: chatPanel,
+            workspace: workspace
         )
     }
 }

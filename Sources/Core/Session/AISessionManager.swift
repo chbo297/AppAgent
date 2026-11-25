@@ -277,7 +277,9 @@ public final class AISessionManager: @unchecked Sendable {
             messages: snapshot.messages, provider: resolved?.provider, modelId: resolved?.modelId,
             createdAt: snapshot.createdAt, updatedAt: snapshot.updatedAt,
             turnRecords: snapshot.turnRecords ?? [], metadata: snapshot.metadata,
-            permissionGrants: Set(snapshot.permissionGrants ?? [])
+            permissionGrants: Set(snapshot.permissionGrants ?? []),
+            chatPanel: snapshot.chatPanel ?? .half,
+            workspace: snapshot.workspace ?? SessionWorkspace()
         )
         // 进程死过一次：标「上次中断」，不自动重放有副作用的工具。
         session.markUnfinishedTurnsAsInterrupted()
@@ -325,7 +327,8 @@ public final class AISessionManager: @unchecked Sendable {
                                        turnRecords: old.turnRecords,
                                        executionPolicy: old.executionPolicy,
                                        ownerAgentID: old.ownerAgentID,
-                                       permissionGrants: old.permissionGrants)
+                                       permissionGrants: old.permissionGrants,
+                                       chatPanel: old.chatPanel, workspace: old.workspace)
             try await storage.save(session: next)
             session.rename(title)
         }

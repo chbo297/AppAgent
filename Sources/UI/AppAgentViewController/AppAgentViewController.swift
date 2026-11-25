@@ -56,24 +56,29 @@ public class AppAgentViewController: UIViewController {
 
     /// UI 层展示事件（会话切换、面板显隐、展示几何与遮挡区域）的宿主回调。与核心 `AIAgentDelegate`
     /// 分离：「当前展示的是哪个会话 / 面板是否可见 / 挡住了什么」是纯 UI 概念，核心 `AIAgent` 不应依赖 UI 层。
-    public weak var presentationDelegate: AppAgentPresentationDelegate? {
+    public weak var uiDelegate: AppAgentUIDelegate? {
         didSet {
-            if oldValue !== presentationDelegate { lastReportedPresentationState = nil }
+            if oldValue !== uiDelegate {
+                lastReportedUIState = nil
+            }
             invalidateHostReservedBottomHeight()
-            notifyPresentationChangeIfNeeded(reason: .layout)
+            notifyUIStateChangeIfNeeded(reason: .layout)
         }
     }
 
-    /// 上一次报给宿主的展示状态，用来判等去重。
-    var lastReportedPresentationState: AppAgentPresentationState?
+    /// 绑定了本控制器的工作区（`AppAgentWorkspace.install` 时设置）；会话切换、展示状态、面板隐藏直接送过去。
+    weak var workspace: AppAgentWorkspace?
+
+    /// 上一次报出去的展示状态，用来判等去重。
+    var lastReportedUIState: AppAgentUIState?
 
     /// 当前正在应用的变化原因：面板可见区的变化由面板侧冒泡回来，需要沿用这一次的原因
     /// 而不是一律记成竖向拖拽。
-    var currentPresentationChangeReason: AppAgentPresentationChangeReason?
+    var currentUIChangeReason: AppAgentUIChangeReason?
 
     /// 键盘驱动布局时的动画参数。键盘那条路是把 `layoutInputBar` 包在键盘自己的动画块里跑的，
     /// inputBar 侧拿到的是 `.immediate`，真正的时长曲线只有这里记得住。
-    var ambientKeyboardAnimation: AppAgentPresentationAnimation?
+    var ambientKeyboardAnimation: AppAgentUIAnimation?
 
     /// The currently displayed session ID.
     public private(set) var currentSessionId: String?
@@ -104,13 +109,17 @@ public class AppAgentViewController: UIViewController {
         // 换会话要回到最新一条。
         reloadFromSession(forceScrollToBottom: true, reason: .browsing)
         bindUIState()
+        if let session = currentSession {
+            applySessionChatPanel(session.chatPanel, animated: true)
+        }
         if isViewLoaded {
             presentPendingDecision(for: sessionId)
         }
         if isViewLoaded {
             reloadSessionSidebarItems()
         }
-        presentationDelegate?.appAgent(didSwitchSessionFrom: old, to: sessionId)
+        uiDelegate?.appAgent(didSwitchSessionFrom: old, to: sessionId)
+        workspace?.chatViewController(self, didSwitchSessionTo: sessionId)
     }
 
     /// 宿主主动展开 / 收起输入栏（收起态即那颗悬浮球胶囊）。
@@ -203,7 +212,7 @@ public class AppAgentViewController: UIViewController {
     /// 宿主底部预留高度（pt）：宿主在屏幕底部有自己的控件（如 tab 栏、工具条）会盖住这一段，
     /// 要求输入栏在对话面板收起时让出来。
     ///
-    /// 值来自 `presentationDelegate.appAgentHostReservedBottomHeight()`：设置 delegate 时取一次，
+    /// 值来自 `uiDelegate.appAgentHostReservedBottomHeight()`：设置 delegate 时取一次，
     /// 之后宿主页面切换导致底部遮挡变化时调用 `invalidateHostReservedBottomHeight()` 重新取。
     /// SDK 不感知任何具体页面概念。配套页面展开（`navigationAccessory.isActive`）期间输入栏不让出这段高度，
     /// 收起后恢复，见 `effectiveHostReservedBottomHeight`。
@@ -221,10 +230,10 @@ public class AppAgentViewController: UIViewController {
         }
     }
 
-    /// 宿主底部遮挡变了（页面切换、底栏显隐）时调用：SDK 向 `presentationDelegate` 重新取预留高度，
+    /// 宿主底部遮挡变了（页面切换、底栏显隐）时调用：SDK 向 `uiDelegate` 重新取预留高度，
     /// 值有变化才重排输入栏，宿主不必自己判等。没有 delegate 时按 0 处理。
     public func invalidateHostReservedBottomHeight() {
-        let height = presentationDelegate?.appAgentHostReservedBottomHeight() ?? 0
+        let height = uiDelegate?.appAgentHostReservedBottomHeight() ?? 0
         hostReservedBottomHeight = height.isFinite ? max(0, height) : 0
     }
 

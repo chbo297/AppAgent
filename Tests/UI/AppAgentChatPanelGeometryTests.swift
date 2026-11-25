@@ -18,10 +18,10 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
     // MARK: - 展示状态上报（宿主据此知道被挡住了什么）
 
-    /// 收集 `appAgentPresentationDidChange` 的假宿主。
-    private final class PresentationSpy: AppAgentPresentationDelegate {
-        var states: [AppAgentPresentationState] = []
-        func appAgentPresentationDidChange(_ state: AppAgentPresentationState) {
+    /// 收集 `appAgentUIStateDidChange` 的假宿主。
+    private final class UIStateSpy: AppAgentUIDelegate {
+        var states: [AppAgentUIState] = []
+        func appAgentUIStateDidChange(_ state: AppAgentUIState) {
             states.append(state)
         }
     }
@@ -36,9 +36,9 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
     /// 输入栏与对话面板都要出现在遮挡列表里，且面板给的是**可见区**（viewport），
     /// 不是那块铺满控制器的内容画布。
-    func testPresentationStateReportsInputBarAndChatPanelAreas() throws {
+    func testUIStateReportsInputBarAndChatPanelAreas() throws {
         let viewController = makeLaidOutViewController()
-        let state = viewController.presentationState
+        let state = viewController.uiState
 
         let inputBarFrame = try XCTUnwrap(state.inputBarFrame)
         XCTAssertEqual(inputBarFrame, viewController.inputBar.frame)
@@ -59,8 +59,8 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     /// 竖向拖拽把面板拉高：报出来的面板高度跟着变，且原因是面板高度而不是输入栏。
     func testChatPanelHeightChangeIsReportedWithPanelReason() throws {
         let viewController = makeLaidOutViewController()
-        let spy = PresentationSpy()
-        viewController.presentationDelegate = spy
+        let spy = UIStateSpy()
+        viewController.uiDelegate = spy
 
         // 先落到一个中间展示高度（默认状态下 viewport 已经是满高，再加只会被 bounds 夹掉）。
         viewController.chatPanelView.updateDisplayHeight(
@@ -69,7 +69,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             compactTransitionStartDisplayHeight: 300,
             compactHeight: AppAgentInputBarMetrics.barHeight
         )
-        let before = try XCTUnwrap(viewController.presentationState.chatPanelFrame)
+        let before = try XCTUnwrap(viewController.uiState.chatPanelFrame)
         spy.states.removeAll()
 
         // BODragScroll 发布展示高度的那条入口，等价于用户把面板拖高。
@@ -80,7 +80,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             compactHeight: AppAgentInputBarMetrics.barHeight
         )
 
-        let after = try XCTUnwrap(viewController.presentationState.chatPanelFrame)
+        let after = try XCTUnwrap(viewController.uiState.chatPanelFrame)
         XCTAssertGreaterThan(after.height, before.height, "拖高后面板可见区必须变高")
         XCTAssertEqual(spy.states.last?.reason, .chatPanelHeightPan)
     }
@@ -88,27 +88,27 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
     /// 同一份画面不重复报：判等只看几何与显隐，reason 不参与。
     func testIdenticalGeometryIsNotReportedTwice() {
         let viewController = makeLaidOutViewController()
-        let spy = PresentationSpy()
-        viewController.presentationDelegate = spy
+        let spy = UIStateSpy()
+        viewController.uiDelegate = spy
         let baseline = spy.states.count
 
-        viewController.notifyPresentationChangeIfNeeded(reason: .layout)
-        viewController.notifyPresentationChangeIfNeeded(reason: .keyboard)
+        viewController.notifyUIStateChangeIfNeeded(reason: .layout)
+        viewController.notifyUIStateChangeIfNeeded(reason: .keyboard)
 
         XCTAssertEqual(spy.states.count, baseline, "几何没变就不该再报")
     }
 
-    func testReplacingPresentationDelegateReceivesCurrentGeometryOnce() {
+    func testReplacingUIDelegateReceivesCurrentGeometryOnce() {
         let viewController = makeLaidOutViewController()
-        let original = PresentationSpy()
-        viewController.presentationDelegate = original
-        let replacement = PresentationSpy()
-        viewController.presentationDelegate = replacement
+        let original = UIStateSpy()
+        viewController.uiDelegate = original
+        let replacement = UIStateSpy()
+        viewController.uiDelegate = replacement
 
         XCTAssertEqual(replacement.states.count, 1, "新观察者必须收到当前遮挡状态")
-        XCTAssertEqual(replacement.states.first?.areas, viewController.presentationState.areas)
-        viewController.presentationDelegate = replacement
-        viewController.notifyPresentationChangeIfNeeded(reason: .layout)
+        XCTAssertEqual(replacement.states.first?.areas, viewController.uiState.areas)
+        viewController.uiDelegate = replacement
+        viewController.notifyUIStateChangeIfNeeded(reason: .layout)
         XCTAssertEqual(replacement.states.count, 1, "同一个观察者仍按几何去重")
     }
 
@@ -118,7 +118,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         viewController.collapseInputBar(animated: false)
         viewController.view.layoutIfNeeded()
 
-        let state = viewController.presentationState
+        let state = viewController.uiState
         XCTAssertTrue(state.isInputBarCollapsed)
         let panelOpacity = state.areas.first { $0.kind == .chatPanel }?.opacity ?? 0
         XCTAssertLessThan(panelOpacity, 0.5, "收起态面板已经淡出，不该报成实心遮挡")
@@ -961,7 +961,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
         // 设置 delegate 即取一次：当前在有底部 tab 栏的主页，预留 60，输入栏抬高。
         let host = ReservedBottomHost(height: 60)
-        viewController.presentationDelegate = host
+        viewController.uiDelegate = host
         viewController.view.layoutIfNeeded()
         XCTAssertEqual(viewController.inputBar.frame.maxY, restingMaxY - 60, accuracy: 0.5)
 
@@ -1434,7 +1434,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
 
 /// 按当前页面返回底部预留高度的宿主桩。
 @MainActor
-private final class ReservedBottomHost: AppAgentPresentationDelegate {
+private final class ReservedBottomHost: AppAgentUIDelegate {
     var height: CGFloat
 
     init(height: CGFloat) {

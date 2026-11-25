@@ -45,7 +45,9 @@ let package = Package(
         .testTarget(
             name: "AppAgentTests",
             dependencies: ["AppAgent"],
-            path: "Tests"
+            path: "Tests",
+            // 独立可执行的工作区 H5 测试，由 Scripts/workspace-h5-tests.py 编译运行。
+            exclude: ["WorkspaceH5"]
         ),
     ]
 )

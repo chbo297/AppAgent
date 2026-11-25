@@ -27,12 +27,12 @@ extension AppAgentViewController {
         // 重排输入栏。正在 `applyInputBarFrame` 里时沿用那一次的原因，重排由它收尾补做。
         chatPanelView.onViewportChanged = { [weak self] in
             guard let self else { return }
-            if self.currentPresentationChangeReason == nil,
+            if self.currentUIChangeReason == nil,
                self.relayoutInputBarIfReservedLiftChanged(reason: .chatPanelHeightPan) {
                 return
             }
-            self.notifyPresentationChangeIfNeeded(
-                reason: self.currentPresentationChangeReason ?? .chatPanelHeightPan
+            self.notifyUIStateChangeIfNeeded(
+                reason: self.currentUIChangeReason ?? .chatPanelHeightPan
             )
         }
         chatPanelView.onCollapseRequested = { [weak self] in
@@ -49,6 +49,9 @@ extension AppAgentViewController {
         }
         chatPanelCoordinator.onWillRevealMessages = { [weak self] in
             self?.prepareChatForPresentation()
+        }
+        chatPanelCoordinator.onDetentSettled = { [weak self] detent in
+            self?.chatPanelDidSettle(at: detent)
         }
         // 过程区展开态由 ViewController 持有：列表每轮结束都会整体重建，
         // 只有把「用户点开了哪一轮」记在这边才不会被重建擦掉。
@@ -141,6 +144,37 @@ extension AppAgentViewController {
         let restingInputBarBottom = view.bounds.maxY - max(0, view.safeAreaInsets.bottom)
             - hostReservedBottomLift
         return max(0, restingInputBarBottom - inputBarExpandedFrame.maxY)
+    }
+
+    /// 按会话保存的档位摆面板。输入框收成小球时面板看不见，只记下档位，展开时就在这一档。
+    func applySessionChatPanel(_ panel: SessionChatPanel, animated: Bool) {
+        let detent: AppAgentChatPanelDetent
+        switch panel {
+        case .collapsed:
+            detent = .peek
+        case .half:
+            detent = .half
+        case .full:
+            detent = .full
+        }
+        guard chatPanelCoordinator.currentDetent != detent else {
+            return
+        }
+        setChatPanelDetent(detent, animated: animated && isViewLoaded && !inputBar.isCollapsed)
+    }
+
+    /// 用户把面板拖停在某一档（或新消息自动展开）后写回当前会话。
+    func chatPanelDidSettle(at detent: AppAgentChatPanelDetent) {
+        let panel: SessionChatPanel
+        switch detent {
+        case .peek:
+            panel = .collapsed
+        case .half:
+            panel = .half
+        case .full:
+            panel = .full
+        }
+        currentSession?.setChatPanel(panel)
     }
 
     /// 业务主动切换档位，实际动画和中途打断由 BODragScroll 管理。

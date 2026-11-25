@@ -33,14 +33,14 @@ overlay.bind(agent: agent, sessionId: session.id)
 overlay.show()
 ```
 
-## Observing AppAgent's Presentation
+## Observing AppAgent UI State
 
-Adopt `AppAgentPresentationDelegate` to learn where AppAgent currently sits and what of the host it covers:
+Adopt `AppAgentUIDelegate` to learn where AppAgent currently sits and what of the host it covers:
 
 ```swift
-overlay.viewController.presentationDelegate = self
+overlay.viewController.uiDelegate = self
 
-func appAgentPresentationDidChange(_ state: AppAgentPresentationState) {
+func appAgentUIStateDidChange(_ state: AppAgentUIState) {
     // 输入栏（收起态就是悬浮球）位置、对话面板可见区的位置与高度
     let ball = state.inputBarFrame
     let panel = state.chatPanelFrame          // nil = 面板不可见
@@ -57,7 +57,7 @@ func appAgentPresentationDidChange(_ state: AppAgentPresentationState) {
 }
 ```
 
-All rects are in host **window** coordinates. State is de-duplicated by geometry, so the same picture is never reported twice. `viewController.presentationState` gives the same snapshot on demand.
+All rects are in host **window** coordinates. State is de-duplicated by geometry, so the same picture is never reported twice. `viewController.uiState` gives the same snapshot on demand.
 
 ## Custom UI with AISession
 

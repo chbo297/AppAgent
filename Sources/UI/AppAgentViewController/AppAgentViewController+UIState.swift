@@ -1,10 +1,10 @@
 //
-//  AppAgentViewController+Presentation.swift
+//  AppAgentViewController+UIState.swift
 //  AppAgentUI
 //
 //  把「AppAgent 现在长在哪、挡住了宿主什么」报给宿主。
 //
-//  只有一个出口：`notifyPresentationChangeIfNeeded`。所有几何写入路径最后都汇到这里，
+//  只有一个出口：`notifyUIStateChangeIfNeeded`。所有几何写入路径最后都汇到这里，
 //  再按几何判等去重，所以多调几次无害、少调一次才要命。发射点有四类：
 //    1. `applyInputBarFrame` —— 输入栏、面板容器、键盘避让（reason 由调用方给）
 //    2. 面板可见区变化冒泡 —— 竖向拖拽拉高面板（`chatPanelHeightPan`）
@@ -18,30 +18,36 @@ import UIKit
 extension AppAgentViewController {
 
     /// 宿主可随时主动查当前展示状态（push 之外的 pull 入口）。
-    public var presentationState: AppAgentPresentationState {
-        currentPresentationState(reason: .layout, animation: .immediate)
+    public var uiState: AppAgentUIState {
+        currentUIState(reason: .layout, animation: .immediate)
     }
 
-    func notifyPresentationChangeIfNeeded(
-        reason: AppAgentPresentationChangeReason,
-        animation: AppAgentPresentationAnimation = .immediate
+    func notifyUIStateChangeIfNeeded(
+        reason: AppAgentUIChangeReason,
+        animation: AppAgentUIAnimation = .immediate
     ) {
-        guard let delegate = presentationDelegate, isViewLoaded else { return }
-        let state = currentPresentationState(reason: reason, animation: animation)
+        guard uiDelegate != nil || workspace != nil, isViewLoaded else {
+            return
+        }
+        let state = currentUIState(reason: reason, animation: animation)
+
         // 判等只看几何与显隐：reason / animation 是伴随信息，不该把「同一份画面」报第二次。
-        if let last = lastReportedPresentationState, last.hasSameGeometry(as: state) { return }
-        lastReportedPresentationState = state
-        delegate.appAgentPresentationDidChange(state)
+        if let last = lastReportedUIState, last.hasSameGeometry(as: state) {
+            return
+        }
+        lastReportedUIState = state
+        uiDelegate?.appAgentUIStateDidChange(state)
+        workspace?.chatViewController(self, didChangeUIState: state)
     }
 
-    private func currentPresentationState(
-        reason: AppAgentPresentationChangeReason,
-        animation: AppAgentPresentationAnimation
-    ) -> AppAgentPresentationState {
+    private func currentUIState(
+        reason: AppAgentUIChangeReason,
+        animation: AppAgentUIAnimation
+    ) -> AppAgentUIState {
         // window 被显式隐藏时什么都挡不住，areas 必须清空——宿主只看 areas 也不会判错。
-        // 还没挂到 window 上（首次布局、单元测试）则照常给几何：见 `presentationCoordinateSpace`。
+        // 还没挂到 window 上（首次布局、单元测试）则照常给几何：见 `uiCoordinateSpace`。
         let isHidden = view.window?.isHidden ?? false
-        return AppAgentPresentationState(
+        return AppAgentUIState(
             reason: reason,
             // 键盘那条路把 `layoutInputBar` 包在键盘自己的动画块里跑，inputBar 侧拿到的是
             // `.immediate`；真正的时长和曲线只有 ambient 那份记得住，宿主要靠它才能同速。
@@ -58,7 +64,7 @@ extension AppAgentViewController {
     /// 没挂到 window 上时退回控制器自己的 view——`AppAgentWindow` 全屏、`rootViewController.view`
     /// 铺满整个 window，两个坐标系在真实配置下**数值相同**，所以这不是近似而是等价；
     /// 同时让不能建 UIWindow 的 Catalyst package test 也能验证几何。
-    private var presentationCoordinateSpace: UICoordinateSpace {
+    private var uiCoordinateSpace: UICoordinateSpace {
         view.window ?? view
     }
 
@@ -82,15 +88,19 @@ extension AppAgentViewController {
         kind: AppAgentOccludingArea.Kind,
         source: UIView
     ) {
-        guard source.isDescendant(of: view) else { return }
+        guard source.isDescendant(of: view) else {
+            return
+        }
         let opacity = effectiveOpacity(of: source)
         guard opacity > 0.001,
               source.bounds.width > 0.5,
-              source.bounds.height > 0.5 else { return }
+              source.bounds.height > 0.5 else {
+            return
+        }
         areas.append(
             AppAgentOccludingArea(
                 kind: kind,
-                frame: presentationCoordinateSpace.convert(source.bounds, from: source),
+                frame: uiCoordinateSpace.convert(source.bounds, from: source),
                 opacity: opacity
             )
         )
@@ -109,9 +119,9 @@ extension AppAgentViewController {
     }
 }
 
-extension AppAgentPresentationState {
+extension AppAgentUIState {
     /// 几何与显隐是否完全一致（忽略 reason / animation）。
-    func hasSameGeometry(as other: AppAgentPresentationState) -> Bool {
+    func hasSameGeometry(as other: AppAgentUIState) -> Bool {
         isWindowVisible == other.isWindowVisible
             && isInputBarCollapsed == other.isInputBarCollapsed
             && abs(keyboardHeight - other.keyboardHeight) < 0.5

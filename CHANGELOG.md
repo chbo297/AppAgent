@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - Unreleased
 
 ### Changed
+- 新增会话工作区（`Sources/UI/Workspace/`，见 `docs/Workspace.md`）：数据归会话（`AISession.workspace`，随会话落盘、
+  归档、恢复），全局一个容器、一个页面，每个插槽名一个视图，界面只跟当前会话。宿主按名字声明插槽
+  （`AppAgentWorkspaceSlot`），插槽铺满 H5 下方、同一时间显示一个；H5 与各插槽各自显隐，state 都是 String→String。
+  `workspace` 工具 op：read / write / edit / delete / set_state / clear / show / hide（`target` 不传 = 整体，h5，或插槽名）。
+  页面 JS 为 `window.appAgent.workspace` 与 `window.hostApp.invoke`。宿主只实现 `AppAgentWorkspaceHost`
+  （开关、容器层级、插槽、页面按钮动作）。`hostApp.invoke` 是否由用户点击触发以原生收到的触摸为准
+  （触摸后 5 秒内放行一次），宿主 60 秒不返回按超时失败。
+- 对话面板档位归会话：`AISession.chatPanel`（collapsed / half / full），切会话恢复各自档位；`session` 工具 op='chat_panel'
+  （原 op='ui'）。输入栏小球/展开仍是全局状态。
+- 展示状态相关 API 统一用 UI 命名：`AppAgentUIDelegate`、`AppAgentUIState`、`AppAgentViewController.uiState`
+  （原 `presentationDelegate` / `presentationState`）。
 - 宿主业务工具与 SDK 内置工具分开注册。宿主把工具打包成 `HostToolSet`（namespace、显示名、一句话用途、工具），
   经 `ToolCentral.registerHost(_:)` 注册：工具写本地短名，模型看到 `<namespace>_<name>`；重名、非法名、
   namespace 与内置工具名前缀冲突时整组失败（`ToolRegistrationError`），不静默覆盖。`tool.origin` / `tool.localName`

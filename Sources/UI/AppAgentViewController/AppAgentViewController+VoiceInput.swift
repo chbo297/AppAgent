@@ -68,7 +68,7 @@ extension AppAgentViewController {
 extension AppAgentViewController: AppAgentVoiceInputCoordinatorDelegate {
     func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didBeginAt location: CGPoint) {
         voiceInputOverlayView.show(startLocation: location, animated: false)
-        notifyPresentationChangeIfNeeded(reason: .visibility)
+        notifyUIStateChangeIfNeeded(reason: .visibility)
     }
 
     func voiceInput(_ coordinator: AppAgentVoiceInputCoordinator, didUpdate renderState: AppAgentVoiceInputRenderState) {
@@ -92,7 +92,7 @@ extension AppAgentViewController: AppAgentVoiceInputCoordinatorDelegate {
 
     func voiceInputDidFinish(_ coordinator: AppAgentVoiceInputCoordinator) {
         voiceInputOverlayView.hide(animated: true)
-        notifyPresentationChangeIfNeeded(reason: .visibility)
+        notifyUIStateChangeIfNeeded(reason: .visibility)
     }
 }
 
