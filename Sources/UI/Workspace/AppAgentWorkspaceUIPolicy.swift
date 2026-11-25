@@ -157,29 +157,3 @@ struct AppAgentWorkspaceUIPolicy {
     }
 }
 
-/// 页面调宿主动作（`hostApp.invoke`）的原生门禁：只认原生看到的触摸。
-/// 页面脚本能直接 postMessage 绕过注入脚本里的 `navigator.userActivation` 判断，iOS 16.4 以下也没有这个 API，
-/// 所以以 WebView 收到的触摸为准：触摸后 `window` 秒内放行一次，用掉即失效。
-struct AppAgentWorkspaceTapGate {
-    static let window: TimeInterval = 5
-
-    private var lastTouch: TimeInterval?
-
-    /// 记一次落在网页上的触摸（时间用 `UIEvent.timestamp`，与 `ProcessInfo.systemUptime` 同一时钟）。
-    mutating func recordTouch(at time: TimeInterval) {
-        lastTouch = time
-    }
-
-    /// 这次调用是否紧跟在一次没用过的触摸之后；放行后这次触摸作废。
-    mutating func consume(at time: TimeInterval) -> Bool {
-        guard let lastTouch, time >= lastTouch, time - lastTouch <= Self.window else {
-            return false
-        }
-        self.lastTouch = nil
-        return true
-    }
-
-    mutating func reset() {
-        lastTouch = nil
-    }
-}

@@ -78,10 +78,14 @@ public protocol AppAgentWorkspaceHost: AnyObject {
     /// - Throws: 宿主没有这个插槽，或视图创建失败。页面随之打开失败。
     func makeWorkspaceSlotView(named name: String) throws -> any AppAgentWorkspaceSlotView
 
-    /// 页面里的按钮能否调用这个宿主动作。
+    /// 页面能否调用这个宿主动作。`invoke` 和 `send` 共用这份名单。
     func workspaceCanPerformPageAction(_ name: String) -> Bool
 
-    /// 执行页面按钮调用的宿主动作，结果原样回给页面。
+    /// 执行这个动作前是否先收起工作区，让 App 页面露出来（如打开页面、算路）。
+    /// 取信息这类不改界面的动作返回 false，页面保持显示。默认 true。
+    func workspacePageActionHidesWorkspace(_ name: String) -> Bool
+
+    /// 执行页面调用的宿主动作。`invoke` 时结果原样回给页面（12 秒内）；`send` 时结果丢弃。
     func workspacePerformPageAction(_ name: String, params: JSONValue) async -> Tool.Output
 }
 
@@ -98,6 +102,10 @@ public extension AppAgentWorkspaceHost {
 
     func workspaceCanPerformPageAction(_ name: String) -> Bool {
         false
+    }
+
+    func workspacePageActionHidesWorkspace(_ name: String) -> Bool {
+        true
     }
 
     func workspacePerformPageAction(_ name: String, params: JSONValue) async -> Tool.Output {

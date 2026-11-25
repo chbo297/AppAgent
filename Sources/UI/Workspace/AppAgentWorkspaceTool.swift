@@ -237,10 +237,14 @@ extension AppAgentWorkspaceTool {
           At most 128 KiB in total. set_state changes it from here without a reload; the page receives an
           appagent:state event with the new state.
 
-        APP ACTIONS
-        - window.hostApp.invoke(name, args) runs an App action the App allows (see the App's notes below) and
-          returns a Promise of {ok: true, result} or {ok: false, error}. Call it only from a tap handler; calls
-          without a user tap are rejected. One call runs at a time. The workspace hides first so the App page shows.
+        APP ACTIONS (only actions the App allows, see the App's notes below)
+        - window.hostApp.invoke(name, args) waits for the App and returns a Promise of {ok: true, result} or
+          {ok: false, error}. Use it to read information or when the page must know the action really ran.
+          One call runs at a time; no answer within 12 s resolves {ok: false}.
+        - window.hostApp.send(name, args) fires the action without waiting and returns true once sent (false for
+          bad arguments). Use it when the page does not need the outcome.
+        - Either may be called at any time, not only from a tap. Actions that open App pages hide the workspace
+          first so the App page shows.
 
         DEMOS
         - Use sample data only when the user explicitly asks for a prototype or demo. Label each sample on its

@@ -54,10 +54,12 @@ await ToolCentral.default.register(AppAgentWorkspaceTool(slots: myHost.workspace
 
 - `window.appAgent.workspace`：`state`、`setState(key, value|null)`、`setTouchRegions(regions)`、`useAutoTouchRegions()`；
   事件 `appagent:layout`（布局变化）、`appagent:state`（模型改了 state）。
-- `window.hostApp.invoke(action, args)`：调用宿主登记的页面动作，同一时间一个，宿主 60 秒不返回按超时失败。
-  「只认用户点击」以原生为准：WebView 收到触摸后 5 秒内放行一次（`AppAgentWorkspaceTapGate`）；
-  页面脚本能绕过注入脚本里的 `navigator.userActivation`，iOS 16.4 以下也没有这个 API，所以 JS 那层只是提前拦截。
-- 页面不在前台时调 invoke 直接返回失败，不会一直占着。
+- `window.hostApp` 调宿主登记的页面动作（名单由 `workspaceCanPerformPageAction` 决定，不要求用户点击）：
+  - `invoke(action, args)`：等宿主返回，Promise 给 `{ok, result|error}`。用于取信息，或要确认宿主真的执行了的动作。
+    同一时间一个，12 秒没返回按超时失败（宿主那边可能仍在执行）。
+  - `send(action, args)`：单向发出，不等结果，返回是否已发出；宿主执行失败页面不知道。
+  - 动作前是否先收起工作区由宿主按动作决定（`workspacePageActionHidesWorkspace`，默认收起），取信息类返回 false。
+- 页面不在前台时：`invoke` 直接返回失败，`send` 直接丢弃。
 
 ## 规则
 

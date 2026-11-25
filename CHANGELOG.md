@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （`AppAgentWorkspaceSlot`），插槽铺满 H5 下方、同一时间显示一个；H5 与各插槽各自显隐，state 都是 String→String。
   `workspace` 工具 op：read / write / edit / delete / set_state / clear / show / hide（`target` 不传 = 整体，h5，或插槽名）。
   页面 JS 为 `window.appAgent.workspace` 与 `window.hostApp.invoke`。宿主只实现 `AppAgentWorkspaceHost`
-  （开关、容器层级、插槽、页面按钮动作）。`hostApp.invoke` 是否由用户点击触发以原生收到的触摸为准
-  （触摸后 5 秒内放行一次），宿主 60 秒不返回按超时失败。
+  （开关、容器层级、插槽、页面动作）。页面动作两种：`hostApp.invoke` 等宿主返回（同一时间一个，12 秒超时），
+  `hostApp.send` 单向发出不等结果；都不要求用户点击；动作前是否收起工作区由宿主按动作决定
+  （`workspacePageActionHidesWorkspace`，默认收起）。
 - 对话面板档位归会话：`AISession.chatPanel`（collapsed / half / full），切会话恢复各自档位；`session` 工具 op='chat_panel'
   （原 op='ui'）。输入栏小球/展开仍是全局状态。
 - 展示状态相关 API 统一用 UI 命名：`AppAgentUIDelegate`、`AppAgentUIState`、`AppAgentViewController.uiState`

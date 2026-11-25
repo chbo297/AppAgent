@@ -2,7 +2,7 @@ import Foundation
 
 /// 注入工作区页面的脚本。两个命名空间按能力的提供方分开：
 /// - `window.appAgent.workspace`：AppAgent 提供，只管本页（状态、触摸区域、布局事件）；
-/// - `window.hostApp.invoke`：宿主提供的动作（打开页面、算路…），宿主决定放行哪些。
+/// - `window.hostApp.invoke` / `send`：宿主提供的动作（取信息、打开页面、算路…），宿主决定放行哪些。
 /// 绝不转发到宿主的通用 JS/NA bridge。
 enum AppAgentWorkspaceBridgeScript {
 
@@ -274,31 +274,43 @@ enum AppAgentWorkspaceBridgeScript {
                 }
                 scheduleLayout();
             }
-            // 页面按钮调宿主动作：只认用户点击触发的调用，同一时间只跑一个，结果由原生回填。
+            // 页面调宿主动作，两种：invoke 等宿主返回（同一时间一个，结果由原生回填，12 秒超时）；
+            // send 单向发出，不等结果，返回是否已发出。参数不合法时 invoke 回失败、send 返回 false。
+            function actionPayload(tool, args) {
+                if (typeof tool !== "string" || tool.length === 0) {
+                    return null;
+                }
+                let payload;
+                try {
+                    payload = JSON.parse(JSON.stringify(args === undefined ? {} : args));
+                } catch (error) {
+                    return null;
+                }
+                return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+            }
             let invokeSeq = 0;
             let pendingInvoke = null;
             function invoke(tool, args) {
                 if (pendingInvoke) {
                     return Promise.resolve({ok: false, error: "another invoke is running"});
                 }
-                const activation = navigator.userActivation;
-                if (activation && !activation.isActive) {
-                    return Promise.resolve({ok: false, error: "invoke must be called from a user tap"});
-                }
-                let payload;
-                try {
-                    payload = JSON.parse(JSON.stringify(args === undefined ? {} : args));
-                } catch (error) {
-                    return Promise.resolve({ok: false, error: "invoke args must be JSON"});
-                }
-                if (typeof tool !== "string" || !payload || typeof payload !== "object" || Array.isArray(payload)) {
-                    return Promise.resolve({ok: false, error: "invoke needs a tool name and an args object"});
+                const payload = actionPayload(tool, args);
+                if (!payload) {
+                    return Promise.resolve({ok: false, error: "invoke needs a tool name and a JSON args object"});
                 }
                 const callID = ++invokeSeq;
                 return new Promise(resolve => {
                     pendingInvoke = {callID, resolve};
                     post({type: "invoke", callID, tool, args: payload});
                 });
+            }
+            function send(tool, args) {
+                const payload = actionPayload(tool, args);
+                if (!payload) {
+                    return false;
+                }
+                post({type: "send", tool, args: payload});
+                return true;
             }
             Object.defineProperty(window, "appAgent", {
                 value: Object.freeze({
@@ -315,7 +327,7 @@ enum AppAgentWorkspaceBridgeScript {
                 configurable: false
             });
             Object.defineProperty(window, "hostApp", {
-                value: Object.freeze({invoke}),
+                value: Object.freeze({invoke, send}),
                 writable: false,
                 configurable: false
             });

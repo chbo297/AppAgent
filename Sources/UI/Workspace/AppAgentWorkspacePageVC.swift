@@ -17,17 +17,11 @@ private final class AppAgentWorkspaceWebView: WKWebView {
 
     /// 最近一次被接受的上报来自哪种模式：auto（脚本自动测量）或 manual（页面 setTouchRegions）。
     var touchMode = "none"
-
-    /// 页面调宿主动作只认原生看到的触摸，见 `AppAgentWorkspaceTapGate`。
-    var tapGate = AppAgentWorkspaceTapGate()
     private var lastLoggedTouch: TimeInterval = -1
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let passes = touchPolicyActive && hasSlot
             && touchPolicy.resolve(.touch(point: point, size: bounds.size, occlusions: occlusions)) == .slot
-        if !passes, let event, event.type == .touches {
-            tapGate.recordTouch(at: event.timestamp)
-        }
 
         // 每次触摸只记一条，进诊断包的运行日志：拖不动插槽视图时先看触摸给了谁。
         if hasSlot, let event, event.type == .touches, event.timestamp != lastLoggedTouch {
@@ -340,7 +334,6 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
         isWorkspaceActive = active
         webView?.isUserInteractionEnabled = active
         if !active {
-            webView?.tapGate.reset()
             view.endEditing(true)
         }
         invalidateLayout()
@@ -371,7 +364,7 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
             return
         }
         guard isWorkspaceActive, isPageReady, canHandleBridgeMessage() else {
-            // 页面在等 invoke 的结果，不回就一直占着「同一时间只跑一个」。
+            // 页面在等 invoke 的结果，不回就一直占着「同一时间只跑一个」；send 不等结果，直接丢掉。
             if type == "invoke", let callID = Self.integer(body["callID"]) {
                 deliverInvokeResult(callID: callID, output: .error("workspace is not active"))
             }
@@ -391,8 +384,8 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
             syncLayoutToWebView()
             return
         }
-        if type == "invoke" {
-            handlePageAction(body)
+        if type == "invoke" || type == "send" {
+            handlePageAction(body, waitsForResult: type == "invoke")
             return
         }
         guard type == "setTouchRegions",
@@ -556,41 +549,56 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
         return workspace?.canAffectHostUI(sessionId: pageId) == true
     }
 
-    /// 宿主动作多久没返回就当失败，放开「同一时间只跑一个」。
-    private static let pageActionTimeout: UInt64 = 60_000_000_000
+    /// `invoke` 等宿主返回的上限；超时回失败并放开「同一时间只跑一个」。`send` 不等返回，不受它限制。
+    private static let pageActionTimeout: UInt64 = 12_000_000_000
 
-    /// 页面按钮调用宿主动作：先收起工作区让 App 页面露出来，再交给宿主执行；结果回填给页面的 Promise。
-    /// 哪些动作可调、名字怎么解析都由宿主决定；是否由用户点击触发以原生看到的触摸为准。
-    private func handlePageAction(_ body: [String: Any]) {
-        guard let callID = Self.integer(body["callID"]) else {
+    /// 页面调宿主动作，两种：
+    /// - `invoke`：等宿主返回，结果回填给页面的 Promise。用于取信息，或要确认宿主真的执行了的动作。同一时间一个。
+    /// - `send`：单向发出，不等结果、不占「同一时间一个」，宿主失败也不回页面。
+    /// 哪些动作可调、名字怎么解析、要不要先收起工作区都由宿主决定。
+    private func handlePageAction(_ body: [String: Any], waitsForResult: Bool) {
+        let callID = Self.integer(body["callID"])
+        if waitsForResult, callID == nil {
             return
         }
-        guard !actionInFlight else {
-            deliverInvokeResult(callID: callID, output: .error("another invoke is running"))
+        let kind = waitsForResult ? "invoke" : "send"
+        func reject(_ message: String) {
+            Logger.info("AppAgentWorkspace", "page \(kind) rejected: \(message)")
+            if let callID {
+                deliverInvokeResult(callID: callID, output: .error(message))
+            }
+        }
+
+        if waitsForResult, actionInFlight {
+            reject("another invoke is running")
             return
         }
         guard let name = body["tool"] as? String, let host, host.workspaceCanPerformPageAction(name) else {
-            deliverInvokeResult(callID: callID, output: .error("invoke tool is not allowed on this page"))
+            reject("\(kind) tool is not allowed on this page")
             return
         }
         guard let args = body["args"] as? [String: Any],
               JSONSerialization.isValidJSONObject(args),
               let data = try? JSONSerialization.data(withJSONObject: args), data.count <= 16_384,
               let params = try? JSONDecoder().decode(JSONValue.self, from: data) else {
-            deliverInvokeResult(callID: callID, output: .error("invoke args must be a JSON object up to 16 KiB"))
+            reject("\(kind) args must be a JSON object up to 16 KiB")
             return
         }
-        guard webView?.tapGate.consume(at: ProcessInfo.processInfo.systemUptime) == true else {
-            Logger.info("AppAgentWorkspace", "page invoke \(name) call=\(callID) rejected: no recent tap")
-            deliverInvokeResult(callID: callID, output: .error("invoke must be called from a user tap"))
+        let callLabel = callID.map(String.init) ?? "-"
+        Logger.info("AppAgentWorkspace", "page \(kind) \(name) call=\(callLabel)")
+        if host.workspacePageActionHidesWorkspace(name) {
+            onCollapse?()
+        }
+        guard waitsForResult, let callID else {
+            Task { @MainActor [weak host] in
+                _ = await host?.workspacePerformPageAction(name, params: params)
+            }
             return
         }
         actionInFlight = true
         actionToken &+= 1
         let token = actionToken
         let documentID = schemeHandler?.documentID
-        Logger.info("AppAgentWorkspace", "page invoke \(name) call=\(callID)")
-        onCollapse?()
         Task { @MainActor [weak self, weak host] in
             let output = await host?.workspacePerformPageAction(name, params: params)
                 ?? .error("workspace host is gone")
@@ -599,7 +607,7 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: Self.pageActionTimeout)
             self?.finishPageAction(token: token, documentID: documentID, callID: callID,
-                                   output: .error("invoke timed out"))
+                                   output: .error("invoke timed out after 12 s"))
         }
     }
 

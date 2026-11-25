@@ -458,6 +458,23 @@ extension H5Tests {
             _ = try browser.evaluate("window.__appAgentInvokeResult(\(callID), {ok: true, result: 'opened'}); null")
             try browser.waitForJS("window.invokeResults.length === 2 && window.invokeResults[1].result === 'opened'")
         }
+        run("bridge/send posts without a pending call and rejects non-object args") {
+            let count = browser.messages(ofType: "send").count
+            try browser.assertJS("""
+            window.hostApp.send("log_event", {name: "open"}) === true
+                && window.hostApp.send("log_event", [1]) === false
+                && window.hostApp.send("", {}) === false
+            """)
+            try browser.wait("send message") {
+                browser.messages(ofType: "send").count > count
+            }
+            let message = browser.messages(ofType: "send").last!
+            let args = message["args"] as? [String: String]
+            guard message["tool"] as? String == "log_event", args?["name"] == "open", message["callID"] == nil else {
+                throw H5TestFailure(description: "malformed send payload: \(message)")
+            }
+            try require(browser.messages(ofType: "send").count == count + 1)
+        }
         run("bridge/real touch message accepted by native policy, stale replay revoked") {
             let count = browser.messages(ofType: "setTouchRegions").count
             try browser.assertJS("window.appAgent.workspace.setTouchRegions([[10, 20, 100, 150]]) === true")

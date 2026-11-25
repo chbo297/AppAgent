@@ -238,20 +238,6 @@ enum H5Tests {
             try require(policy.resolve(.touch(point: CGPoint(x: 399, y: 799), size: size, occlusions: [])) == .slot)
             try require(policy.resolve(.touch(point: CGPoint(x: 401, y: 801), size: size, occlusions: [])) == .web)
         }
-        run("invoke/native tap gate: no touch, stale touch and reused touch are rejected") {
-            var gate = AppAgentWorkspaceTapGate()
-            try require(!gate.consume(at: 10))
-            gate.recordTouch(at: 10)
-            try require(gate.consume(at: 10.2))
-            try require(!gate.consume(at: 10.3), "one touch allows one invoke")
-            gate.recordTouch(at: 20)
-            try require(!gate.consume(at: 20 + AppAgentWorkspaceTapGate.window + 0.1))
-            gate.recordTouch(at: 30)
-            try require(!gate.consume(at: 29), "clock going backwards is rejected")
-            gate.recordTouch(at: 40)
-            gate.reset()
-            try require(!gate.consume(at: 40.1))
-        }
     }
 }
 
