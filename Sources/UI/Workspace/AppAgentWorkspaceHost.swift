@@ -2,9 +2,10 @@
 //  AppAgentWorkspaceHost.swift
 //  AppAgent — 工作区的宿主接入协议
 //
-//  工作区的容器、页面、状态、落盘和显隐时机全部归 AppAgent（见 `AppAgentWorkspace`）。
+//  工作区的窗口、容器、页面、状态、落盘和显隐时机全部归 AppAgent（见 `AppAgentWorkspace`）。
+//  工作区显示在 AppAgent 自己的窗口里（宿主窗口之上、对话面板之下），宿主不提供界面层级。
 //  宿主只做两件事：
-//   1. 实现 `AppAgentWorkspaceHost`：功能是否开启、容器挂在自己界面的哪一层、页面按钮能调哪些动作；
+//   1. 实现 `AppAgentWorkspaceHost`：功能是否开启、页面按钮能调哪些动作；
 //   2. 想在页面 H5 下方放自己的视图时，声明插槽（`workspaceSlots`）并按名字提供 `AppAgentWorkspaceSlotView`。
 //  本文件之外的工作区类型，宿主都不需要实现。
 //
@@ -38,15 +39,14 @@ public protocol AppAgentWorkspaceSlotView: AnyObject {
         get
     }
 
-    /// 换成某个页面的内容。
+    /// 换成某个会话的内容。
     ///
     /// - Parameters:
-    ///   - pageId: 页面标识。会话页面就是会话 id。
-    ///   - state: 这个页面已保存的插槽状态（`SessionWorkspace.slots[name].state`），宿主读自己之前存的键。
-    ///   - persistsState: false 表示页面只读展示（由快照打开），不要回写状态。
-    ///     会话页面的状态由宿主经 `AppAgentWorkspace.updateSlotState` 写回。
+    ///   - pageId: 页面标识，就是会话 id。
+    ///   - state: 该会话已保存的插槽状态（`SessionWorkspace.slots[name].state`），宿主读自己之前存的键；
+    ///     要改状态时经 `AppAgentWorkspace.updateSlotState` 写回。
     /// - Throws: 恢复失败。页面随之打开失败。
-    func bind(pageId: String, state: [String: String], persistsState: Bool) throws
+    func bind(pageId: String, state: [String: String]) throws
 
     /// 页面离开前台（收起、切会话、退后台）：把需要恢复的状态存好。之后可能 bind 别的页面。
     func unbind()
@@ -61,13 +61,6 @@ public protocol AppAgentWorkspaceHost: AnyObject {
 
     /// 工作区功能当前是否开启（宿主自己的开关）。
     func workspaceIsEnabled() -> Bool
-
-    /// 把工作区容器放进宿主界面层级，返回是否成功。层级由宿主决定：
-    /// 一般在宿主页面之上、AppAgent 对话面板之下。
-    func mountWorkspaceContainer(_ container: UIViewController) -> Bool
-
-    /// 把工作区容器从宿主界面层级移除，返回是否成功。
-    func unmountWorkspaceContainer(_ container: UIViewController) -> Bool
 
     /// 宿主提供的插槽。空数组表示只有 H5 层。
     var workspaceSlots: [AppAgentWorkspaceSlot] {

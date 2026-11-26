@@ -11,6 +11,10 @@
 `AppAgentInputBarMetrics.collapsedMinWidth` = 56 时圆角变成整圆，靠 `.collapsedMove` 手势拖动）；拉开后依次是
 输入栏、对话面板、会话切换列表。
 
+对话面板和会话工作区都放在会话容器 `AppAgentSessionContainerView` 里（铺满，在输入栏之下，工作区在面板之下）。
+输入栏收成小球时会话容器整体按收起进度淡出（`AppAgentChatPanelContainerLayout.contentAlpha`）；
+面板跟随输入栏宽度和键盘位移只作用在 `AppAgentChatPanelContainerView` 上。见 `docs/Workspace.md`「界面层级」。
+
 **不支持宿主把 `AppAgentViewController` 塞进自己的 VC 层级**（push/present/`addChild`/SwiftUI 包一层都不行），
 所以它是 `public` 而非 `open`，也不再留 `inputBarFrameDidChange` 这类子类 override 钩子（要观察就用
 `onInputBarFrameChange` 闭包）。原因是下面整份文档的几何推导都建立在「独占一个全屏穿透 window」上：
@@ -264,7 +268,7 @@ inset / safeArea。
 - **取值协议（宿主提供、SDK 拉取）**：值来自 `AppAgentUIDelegate.appAgentHostReservedBottomHeight()`，
   设置 `uiDelegate` 时取一次；宿主页面切换、底部遮挡变化后调用
   `invalidateHostReservedBottomHeight()`，SDK 重新取值，有变化才重排。SDK 不感知具体页面。
-- **配套页面展开时不让出**：`navigationAccessory.isActive == true` 表示宿主配套页面（如工作区）盖在宿主页面上，
+- **配套页面展开时不让出**：`navigationAccessory.isActive == true` 表示配套页面（如工作区）盖在宿主页面上，
   `effectiveHostReservedBottomHeight` 取 0，输入栏回到安全区位置；收起后自动恢复缓存值，宿主不必为此改返回值。
 - **变化时 0.2 秒过渡**：生效值变了（上面两种情况）就走 `relayoutForHostReservedBottomChange`，在一个
   `UIView.animate(0.2, .curveEaseInOut)` 块里重排。输入栏 frame、面板容器、peek 展示高度都在块内写入，一起移动；

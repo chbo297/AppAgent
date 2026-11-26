@@ -64,14 +64,11 @@ private final class AppAgentWorkspaceBridgeHandler: NSObject, WKScriptMessageHan
 /// 上层 H5、下层宿主的插槽视图，两层按数据各自显示或隐藏。只由 `AppAgentWorkspace` 驱动。
 final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
 
-    /// 正在显示的页面：会话页面就是会话 id；独立页面带 `standalone:` 前缀。没有显示时为 nil。
+    /// 正在显示的页面，就是会话 id。没有显示时为 nil。
     private(set) var pageId: String?
-
-    /// 独立页面（不属于任何会话）只读展示：不回写状态，不受「当前会话在前台」的门禁约束。
-    private(set) var isStandalone = false
     var onCollapse: (() -> Void)?
 
-    /// 页面自己写了一条状态（value 为 nil 表示删掉）；只在会话页面时回调。
+    /// 页面自己写了一条状态（value 为 nil 表示删掉）。
     var onStateChange: ((String, String, String?) -> Void)?
     weak var host: AppAgentWorkspaceHost?
     weak var workspace: AppAgentWorkspace?
@@ -179,21 +176,20 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
     }
 
     /// 按一份工作区数据显示。内容没变就不重新加载 WebView；换了页面或内容才重载。
-    func render(pageId: String, workspace data: SessionWorkspace, fallbackTitle: String, isStandalone: Bool) throws {
+    func render(pageId: String, workspace data: SessionWorkspace, fallbackTitle: String) throws {
         loadViewIfNeeded()
         let source = RenderSource(workspace: data, fallbackTitle: fallbackTitle)
 
         // 会话数据改的时候已整体校验过；只是状态变了（页面 setState、插槽回写）时文件没动，
-        // 沿用上次的内容，不重新整份校验和复制。独立页面的数据来自宿主，每次都校验。
+        // 沿用上次的内容，不重新整份校验和复制。
         let next: AppAgentWorkspaceH5Content
-        if let content, !isStandalone, source == renderedSource {
+        if let content, source == renderedSource {
             next = content
         } else {
             next = try AppAgentWorkspaceH5Content(workspace: data, fallbackTitle: fallbackTitle)
         }
         let pageChanged = pageId != self.pageId
         self.pageId = pageId
-        self.isStandalone = isStandalone
         if let name = data.shownSlot {
             try attachSlotView(named: name, state: data.slots[name]?.state ?? [:])
         } else {
@@ -297,7 +293,7 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
                 slot.unbind()
             }
             slotPageId = nil
-            try slot.bind(pageId: pageId, state: state, persistsState: !isStandalone)
+            try slot.bind(pageId: pageId, state: state)
             slotPageId = pageId
         }
         if slot.view.superview !== canvas {
@@ -538,11 +534,8 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
         return number.intValue
     }
 
-    /// 会话页要求该会话仍在前台；独立页只要它正在容器里展示（isWorkspaceActive 已核对）且 App 在前台。
+    /// 要求该会话仍在前台、会话内容可见。
     private func canHandleBridgeMessage() -> Bool {
-        if isStandalone {
-            return UIApplication.shared.applicationState == .active
-        }
         guard let pageId else {
             return false
         }
@@ -645,9 +638,9 @@ final class AppAgentWorkspacePageVC: UIViewController, WKNavigationDelegate {
         webView.evaluateJavaScript("window.__appAgentInvokeResult(\(callID), \(json));", completionHandler: nil)
     }
 
-    /// 页面写了一条状态：先记在页面眼里的状态，再交给数据的主人（会话）。独立页面只读，不回写。
+    /// 页面写了一条状态：先记在页面眼里的状态，再交给数据的主人（会话）。
     private func receiveState(key: Any?, value: Any?) {
-        guard !isStandalone, let pageId,
+        guard let pageId,
               let key = key as? String, !key.isEmpty, key.utf8.count <= 256 else {
             return
         }

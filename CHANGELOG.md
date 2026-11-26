@@ -8,12 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - Unreleased
 
 ### Changed
+- 热修复 JS 桥新增方法拦截与反射调用：`appagent.hook / hookClass(className, selector, 'before'|'after'|'instead', fn)`、
+  `call / callClass / newObject`，ObjC 侧引擎是 `AppAgentMethodHook`（ObjCSupport，消息转发实现，按类型编码装拆箱
+  数字 / BOOL / SEL / CGRect 等结构体）。拦截归槽位所有：eval 失败、`setEnabled(false)`、`remove`、同名重新 `apply`
+  都恢复原实现。新增 `DefaultHotfixProvider.applySynchronously(name:javascript:applyMode:summary:)`（`@MainActor`，同步），
+  不经过会话、不要求前台 scene，返回时已生效，调用时机由宿主决定；槽位不绑 scene，之后照常列举、开关、移除。
+- 新增 App 代发的请求：`AISession.sendAppRequest(_:trigger:)` 由宿主自己发起一轮（如启动时把用户近况交给模型），
+  请求是 `AIAgentMessage.appRequest`（role user、source app、hidden），发给模型、开新一轮，但面板不显示用户气泡、
+  不给会话起标题；并发上限、终止事件、turnRecord 与 `sendMessage` 一致。`isAppRequest` / `opensTurn` 供判断。
+  会话自动起标题改为只看用户真正说过的话。
 - 新增会话工作区（`Sources/UI/Workspace/`，见 `docs/Workspace.md`）：数据归会话（`AISession.workspace`，随会话落盘、
   归档、恢复），全局一个容器、一个页面，每个插槽名一个视图，界面只跟当前会话。宿主按名字声明插槽
   （`AppAgentWorkspaceSlot`），插槽铺满 H5 下方、同一时间显示一个；H5 与各插槽各自显隐，state 都是 String→String。
   `workspace` 工具 op：read / write / edit / delete / set_state / clear / show / hide（`target` 不传 = 整体，h5，或插槽名）。
-  页面 JS 为 `window.appAgent.workspace` 与 `window.hostApp.invoke`。宿主只实现 `AppAgentWorkspaceHost`
-  （开关、容器层级、插槽、页面动作）。页面动作两种：`hostApp.invoke` 等宿主返回（同一时间一个，12 秒超时），
+  页面 JS 为 `window.appAgent.workspace` 与 `window.hostApp.invoke`（`docs/Workspace.md`「页面 JS 约定 v1」）。
+  工作区和对话面板同属会话内容，放在对话界面的会话容器 `AppAgentSessionContainerView` 里（工作区在面板之下），
+  输入栏收成小球时一起收起，不进宿主界面层级。宿主只实现 `AppAgentWorkspaceHost`（开关、插槽、页面动作），
+  插槽视图 `bind(pageId:state:)`。不提供借用工作区显示非会话页面的接口。页面动作两种：`hostApp.invoke` 等宿主返回（同一时间一个，12 秒超时），
   `hostApp.send` 单向发出不等结果；都不要求用户点击；动作前是否收起工作区由宿主按动作决定
   （`workspacePageActionHidesWorkspace`，默认收起）。
 - 对话面板档位归会话：`AISession.chatPanel`（collapsed / half / full），切会话恢复各自档位；`session` 工具 op='chat_panel'

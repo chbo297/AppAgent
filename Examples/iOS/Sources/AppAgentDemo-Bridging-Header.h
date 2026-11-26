@@ -9,3 +9,4 @@
 //
 
 #import "AppAgentObjCExceptionCatcher.h"
+#import "AppAgentMethodHook.h"

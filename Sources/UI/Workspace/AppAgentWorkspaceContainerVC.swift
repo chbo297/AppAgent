@@ -2,9 +2,10 @@
 //  AppAgentWorkspaceContainerVC.swift
 //  AppAgent — 工作区容器（全局一个，里面只放那一个工作区页面）
 //
-//  由宿主经 `AppAgentWorkspaceHost.mountWorkspaceContainer(_:)` 挂进自己的界面层级。
+//  容器是对话界面（`AppAgentViewController`）的子控制器，视图放在会话容器（`AppAgentSessionContainerView`）
+//  里对话面板之下，不进宿主的界面层级。没有页面时隐藏根视图，触摸穿透到宿主窗口。
 //  内部用标准 UIKit containment 承载当前页面：增删 child 驱动真实 appear/disappear
-//  （而非 isHidden，后者不触发生命周期回调）。没有页面时隐藏根视图，让触摸回到宿主页面。
+//  （而非 isHidden，后者不触发生命周期回调）。
 //
 
 #if canImport(UIKit)
@@ -15,10 +16,6 @@ final class AppAgentWorkspaceContainerVC: UIViewController {
 
     /// 当前挂载的页面（nil = 未展示任何页面）。
     private(set) var currentChild: AppAgentWorkspacePageVC?
-
-    weak var host: AppAgentWorkspaceHost?
-
-    private var isMounted = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -33,25 +30,27 @@ final class AppAgentWorkspaceContainerVC: UIViewController {
         currentChild?.view.frame = view.bounds
     }
 
-    /// 挂进宿主界面；已挂上时直接返回 true。
+    /// 挂进对话界面的会话容器；已挂上时直接返回 true。
     @discardableResult
-    func mount() -> Bool {
-        guard !isMounted else {
-            return true
+    func attach(to chatViewController: AppAgentViewController?) -> Bool {
+        guard let chatViewController else {
+            return false
         }
-        isMounted = host?.mountWorkspaceContainer(self) == true
-        return isMounted
+        if parent !== chatViewController {
+            chatViewController.installWorkspaceContainer(self)
+        }
+        return parent === chatViewController
     }
 
-    /// 收起当前页面并从宿主界面移除。
-    func unmount() {
+    /// 收起当前页面并从会话容器移除。
+    func detach() {
         hidePage()
-        guard isMounted else {
+        guard parent != nil else {
             return
         }
-        if host?.unmountWorkspaceContainer(self) == true {
-            isMounted = false
-        }
+        willMove(toParent: nil)
+        view.removeFromSuperview()
+        removeFromParent()
     }
 
     /// 展示某个页面：先移除现有 child，再加入新的。传入与当前相同的实例时，刷新尺寸并确保容器可见。

@@ -11,18 +11,19 @@ import UIKit
 ///
 /// 外层容器跟随 inputBar 的横向位置、宽度以及键盘避让位移，不再参与 ChatPanel 的裁切；
 /// `dragScrollView` 始终保留展开态画布，避免 resize 跟手期间重建 BODragScroll 几何。
+/// 收起进度对应的透明度（`contentAlpha`）交给会话容器 `AppAgentSessionContainerView`，面板和工作区一起淡出。
 struct AppAgentChatPanelContainerLayout: Equatable {
     /// ChatPanel 容器相对 inputBar 左右各扩出的距离。
     static let horizontalOutset = AppAgentInputBarFramePolicy.horizontalInset
 
-    /// inputBar 收起时 ChatPanel 淡出的 ease-out 系数；具体强度统一由此处配置。
+    /// inputBar 收起时会话内容淡出的 ease-out 系数；具体强度统一由此处配置。
     static let alphaEaseOutCoefficient: CGFloat = 4
 
     let containerFrame: CGRect
     let dragScrollFrame: CGRect
 
-    /// inputBar 从展开到收起时，ChatPanel 按 ease-out 曲线由完全显示过渡到透明。
-    let panelAlpha: CGFloat
+    /// inputBar 从展开到收起时，会话内容（面板 + 工作区）按 ease-out 曲线由完全显示过渡到透明。
+    let contentAlpha: CGFloat
 
     init(
         bounds: CGRect,
@@ -38,9 +39,9 @@ struct AppAgentChatPanelContainerLayout: Equatable {
             containerFrame = .zero
             // 容器是画布 frame 的唯一 writer，所以「inputBar 几何还没就绪」这一小段也得由它
             // 给出画布尺寸 —— BODragScroll 需要一个尺寸正确的画布来建立自身几何。此时
-            // containerFrame 为零、panelAlpha 为 0，面板并不可见；bounds 本身无效时自然退化为零。
+            // containerFrame 为零、contentAlpha 为 0，面板并不可见；bounds 本身无效时自然退化为零。
             dragScrollFrame = CGRect(origin: .zero, size: bounds.size)
-            panelAlpha = 0
+            contentAlpha = 0
             return
         }
 
@@ -74,7 +75,7 @@ struct AppAgentChatPanelContainerLayout: Equatable {
         )
 
         // 跟手阶段没有 UIView 动画；每一帧使用可调 ease-out 映射，起始淡出较快、接近透明时逐渐减速。
-        panelAlpha = 1 - AppAgentGeometry.easeOut(
+        contentAlpha = 1 - AppAgentGeometry.easeOut(
             collapseProgress,
             coefficient: Self.alphaEaseOutCoefficient
         )
@@ -112,20 +113,10 @@ struct AppAgentChatPanelContainerLayout: Equatable {
 
 }
 
-/// `BODragScrollView` 的透明外层容器，只负责跟随 inputBar 改变位置、宽度和透明度。
+/// `BODragScrollView` 的透明外层容器，只负责跟随 inputBar 改变位置和宽度、随键盘整体上移。
 final class AppAgentChatPanelContainerView: UIView {
     private weak var contentView: UIView?
     private var layoutAnimator: UIViewPropertyAnimator?
-    private var alphaAnimator: UIViewPropertyAnimator?
-
-    /// model alpha 在动画开始时就变成终值；只有屏幕上确实消失才算结束连续阅读。
-    var isVisuallyHidden: Bool {
-        if let presentation = layer.presentation() {
-            return presentation.opacity <= 0.01
-        }
-        // 尚未提交首帧时 presentation 可能为空，不能把正在淡出的目标值当成已隐藏。
-        return alphaAnimator == nil && alpha <= 0.01
-    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -155,22 +146,17 @@ final class AppAgentChatPanelContainerView: UIView {
         let contentTargetFrame = layout.dragScrollFrame
         let targetFrameChanged = !frame.isApproximatelyEqual(to: layout.containerFrame)
             || !(contentView?.frame.isApproximatelyEqual(to: contentTargetFrame) ?? true)
-        let targetAlphaChanged = abs(alpha - layout.panelAlpha) > 0.001
-
-        // 完全收起时同时退出命中和无障碍树；重新展开时在动画开始前立即恢复。
-        let isVisible = layout.panelAlpha > 0.01
-        isUserInteractionEnabled = isVisible
-        accessibilityElementsHidden = !isVisible
 
         // animator 启动后 model 值已经是目标值；相同目标无需停止并重启动画。
-        guard targetFrameChanged || targetAlphaChanged else { return }
+        guard targetFrameChanged else {
+            return
+        }
 
         // 新手势或新动画必须先接管 presentation 状态，避免视图跳回旧 model 值。
         stopAnimationsAtCurrentState()
 
         let frameChanged = !frame.isApproximatelyEqual(to: layout.containerFrame)
             || !(contentView?.frame.isApproximatelyEqual(to: contentTargetFrame) ?? true)
-        let alphaChanged = abs(alpha - layout.panelAlpha) > 0.001
 
         if frameChanged {
             let applyFrames = { [weak self] in
@@ -189,10 +175,6 @@ final class AppAgentChatPanelContainerView: UIView {
                 applyFrames()
             }
         }
-
-        if alphaChanged {
-            applyAlpha(layout.panelAlpha, animation: animation)
-        }
     }
 
     private func setup() {
@@ -200,30 +182,6 @@ final class AppAgentChatPanelContainerView: UIView {
         clipsToBounds = false
         isAccessibilityElement = false
         installHitTestPassthrough()
-    }
-
-    private func applyAlpha(_ targetAlpha: CGFloat, animation: AppAgentInputBarFrameAnimation) {
-        guard animation.isAnimated else {
-            // 手势 changed 阶段走这里：直接应用已经过 ease-out 函数计算的 alpha，保证完全跟手。
-            alpha = targetAlpha
-            return
-        }
-
-        let duration: TimeInterval
-        switch animation {
-        case .immediate:
-            duration = 0
-        case .standard:
-            duration = 0.24
-        case .boundaryRebound:
-            duration = 0.30
-        }
-
-        // 抬手后的展开/收起落位也使用 easeOut，并可从 presentation 状态无缝接管。
-        let animator = UIViewPropertyAnimator(duration: duration, curve: .easeOut) { [weak self] in
-            self?.alpha = targetAlpha
-        }
-        startAlphaAnimation(animator)
     }
 
     private func startLayoutAnimation(_ animator: UIViewPropertyAnimator) {
@@ -238,30 +196,13 @@ final class AppAgentChatPanelContainerView: UIView {
         animator.startAnimation()
     }
 
-    private func startAlphaAnimation(_ animator: UIViewPropertyAnimator) {
-        let identifier = ObjectIdentifier(animator)
-        alphaAnimator = animator
-        animator.addCompletion { [weak self] _ in
-            guard let self,
-                  let currentAnimator = self.alphaAnimator,
-                  ObjectIdentifier(currentAnimator) == identifier else { return }
-            self.alphaAnimator = nil
-        }
-        animator.startAnimation()
-    }
-
     private func stopAnimationsAtCurrentState() {
         let containerPresentationFrame = layer.presentation()?.frame
         let contentPresentationFrame = contentView?.layer.presentation()?.frame
-        let presentationAlpha = layer.presentation().map { CGFloat($0.opacity) }
 
         if let layoutAnimator {
             self.layoutAnimator = nil
             layoutAnimator.stopAnimation(true)
-        }
-        if let alphaAnimator {
-            self.alphaAnimator = nil
-            alphaAnimator.stopAnimation(true)
         }
 
         layer.removeAllAnimations()
@@ -272,9 +213,6 @@ final class AppAgentChatPanelContainerView: UIView {
         }
         if let contentPresentationFrame {
             contentView?.frame = contentPresentationFrame
-        }
-        if let presentationAlpha {
-            alpha = presentationAlpha
         }
     }
 }

@@ -143,6 +143,8 @@ public class AppAgentViewController: UIViewController {
 
     public let inputBar = AppAgentInputBar()
     let voiceInputOverlayView = AppAgentVoiceInputOverlayView()
+    /// 会话内容（对话面板 + 工作区）的容器，在 inputBar 之下；收起成小球时整体淡出。
+    let sessionContainer = AppAgentSessionContainerView()
     let chatPanelContainer = AppAgentChatPanelContainerView()
     let chatPanelCoordinator = AppAgentChatPanelCoordinator()
 

@@ -331,12 +331,12 @@ public struct SimpleContextCompressor: ContextCompressor, Sendable {
         }
     }
 
-    /// 最后一个含用户原话的单元（不是 tool result、不是宿主上下文）。
+    /// 最后一个含这一轮请求原文的单元（用户原话或 App 代发的请求；不是 tool result、不是宿主上下文）。
     private func latestUserRequestUnit(_ units: [MessageUnit]) -> Int? {
         units.lastIndex { unit in
             unit.messages.contains { message in
                 message.role == .user
-                    && message.source == .user
+                    && (message.source == .user || message.isAppRequest)
                     && message.content.contains { part in
                         switch part {
                         case .text, .attachment:

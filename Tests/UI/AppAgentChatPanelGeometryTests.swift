@@ -694,7 +694,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             layout.containerFrame.width,
             accuracy: 0.5
         )
-        XCTAssertEqual(layout.panelAlpha, 1, accuracy: 0.001)
+        XCTAssertEqual(layout.contentAlpha, 1, accuracy: 0.001)
     }
 
     /// 画布 frame 的 writer 只能有一个：容器。
@@ -755,7 +755,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         )
 
         XCTAssertEqual(layout.containerFrame, .zero)
-        XCTAssertEqual(layout.panelAlpha, 0, accuracy: 0.001)
+        XCTAssertEqual(layout.contentAlpha, 0, accuracy: 0.001)
         XCTAssertEqual(layout.dragScrollFrame, CGRect(origin: .zero, size: bounds.size))
     }
 
@@ -1009,7 +1009,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             layout.dragScrollFrame,
             CGRect(origin: .zero, size: bounds.size)
         )
-        XCTAssertEqual(layout.panelAlpha, 0, accuracy: 0.001)
+        XCTAssertEqual(layout.contentAlpha, 0, accuracy: 0.001)
     }
 
     func testChatPanelContainerLayoutFollowsIntermediateInputBarFrameExactly() {
@@ -1036,7 +1036,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             intermediateFrame.width + AppAgentChatPanelContainerLayout.horizontalOutset * 2,
             accuracy: 0.5
         )
-        XCTAssertEqual(layout.panelAlpha, 0.0625, accuracy: 0.001)
+        XCTAssertEqual(layout.contentAlpha, 0.0625, accuracy: 0.001)
     }
 
     func testChatPanelAlphaUsesEaseOutDuringInteractiveCollapse() {
@@ -1053,7 +1053,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             inputBarExpandedFrame: inputBarExpandedFrame
         )
 
-        XCTAssertEqual(layout.panelAlpha, 0.31640625, accuracy: 0.001)
+        XCTAssertEqual(layout.contentAlpha, 0.31640625, accuracy: 0.001)
     }
 
     func testWideChatPanelCanvasKeepsExpandedAlignmentWhileContainerFollowsInputBar() {
@@ -1070,7 +1070,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
         XCTAssertEqual(layout.dragScrollFrame, CGRect(x: -200, y: 0, width: 1_024, height: 768))
     }
 
-    func testChatPanelContainerHasNoOuterMaskAndCollapsedStateIsInactive() {
+    func testCollapsedInputBarHidesSessionContainerAndChatPanelKeepsNoMask() {
         let collapsedFrame = CGRect(
             x: bounds.maxX - AppAgentInputBarMetrics.collapsedMinWidth - 12,
             y: 620,
@@ -1082,30 +1082,56 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             inputBarFrame: collapsedFrame,
             inputBarExpandedFrame: inputBarExpandedFrame
         )
+        let sessionContainer = AppAgentSessionContainerView()
         let container = AppAgentChatPanelContainerView()
         let contentView = UIView()
 
         container.installContentView(contentView)
+        sessionContainer.installChatPanel(container)
         container.apply(layout, animation: .immediate)
+        sessionContainer.applyContentAlpha(layout.contentAlpha, animation: .immediate)
 
         XCTAssertNil(container.layer.mask)
-        XCTAssertEqual(container.alpha, 0, accuracy: 0.001)
-        XCTAssertFalse(container.isUserInteractionEnabled)
-        XCTAssertTrue(container.accessibilityElementsHidden)
+        XCTAssertEqual(container.alpha, 1, accuracy: 0.001)
+        XCTAssertEqual(sessionContainer.alpha, 0, accuracy: 0.001)
+        XCTAssertFalse(sessionContainer.isUserInteractionEnabled)
+        XCTAssertTrue(sessionContainer.accessibilityElementsHidden)
     }
 
-    func testViewControllerInstallsDragScrollViewInsideChatPanelContainer() {
+    func testViewControllerInstallsChatPanelInsideSessionContainerBelowInputBar() {
         let viewController = AppAgentViewController()
         viewController.loadViewIfNeeded()
 
         XCTAssertTrue(viewController.chatPanelCoordinator.dragScrollView.superview === viewController.chatPanelContainer)
-        XCTAssertTrue(viewController.chatPanelContainer.superview === viewController.view)
+        XCTAssertTrue(viewController.chatPanelContainer.superview === viewController.sessionContainer)
+        XCTAssertTrue(viewController.sessionContainer.superview === viewController.view)
 
-        let containerIndex = viewController.view.subviews.firstIndex { $0 === viewController.chatPanelContainer }
+        let containerIndex = viewController.view.subviews.firstIndex { view in
+            view === viewController.sessionContainer
+        }
         let inputBarIndex = viewController.view.subviews.firstIndex { $0 === viewController.inputBar }
         XCTAssertNotNil(containerIndex)
         XCTAssertNotNil(inputBarIndex)
         XCTAssertLessThan(containerIndex ?? 0, inputBarIndex ?? 0)
+    }
+
+    func testWorkspaceContainerSitsBelowChatPanelInSessionContainer() {
+        let viewController = AppAgentViewController()
+        viewController.loadViewIfNeeded()
+        let workspace = UIViewController()
+
+        viewController.installWorkspaceContainer(workspace)
+
+        let subviews = viewController.sessionContainer.subviews
+        let workspaceIndex = subviews.firstIndex { view in
+            view === workspace.view
+        }
+        let panelIndex = subviews.firstIndex { view in
+            view === viewController.chatPanelContainer
+        }
+        XCTAssertTrue(workspace.parent === viewController)
+        XCTAssertTrue(workspace.view.superview === viewController.sessionContainer)
+        XCTAssertLessThan(workspaceIndex ?? .max, panelIndex ?? .min)
     }
 
     func testExpandedResizePanUpdatesContainerAndAlphaImmediately() {
@@ -1145,7 +1171,7 @@ final class AppAgentChatPanelGeometryTests: XCTestCase {
             inputBarFrame: appliedInputBarFrame,
             inputBarExpandedFrame: startFrame
         )
-        XCTAssertEqual(viewController.chatPanelContainer.alpha, expectedLayout.panelAlpha, accuracy: 0.001)
+        XCTAssertEqual(viewController.sessionContainer.alpha, expectedLayout.contentAlpha, accuracy: 0.001)
         XCTAssertNil(viewController.chatPanelContainer.layer.mask)
         XCTAssertNil(viewController.chatPanelContainer.layer.animationKeys())
     }

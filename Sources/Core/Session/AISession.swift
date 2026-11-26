@@ -341,21 +341,36 @@ public final class AISession: @unchecked Sendable {
         _ text: String,
         attachments: [AIAgentMessage.Attachment] = []
     ) -> AsyncStream<AIAgentEvent> {
+        startRun(.user(text, attachments: attachments))
+    }
+
+    /// App 代替用户发起一轮：`text` 作为这一轮的请求发给模型，面板不显示用户气泡，只显示 agent 的回复。
+    ///
+    /// 用于宿主自己发起的场景（如启动时把用户近况交给模型做推荐）。并发上限、终止事件、
+    /// turnRecord 与 `sendMessage` 完全一致；`trigger` 原样记在消息上，供宿主区分来源。
+    public func sendAppRequest(
+        _ text: String,
+        trigger: String? = nil
+    ) -> AsyncStream<AIAgentEvent> {
+        startRun(.app(text, trigger: trigger))
+    }
+
+    private func startRun(_ request: LLMExecutor.Request) -> AsyncStream<AIAgentEvent> {
         if let agent = agentMask?.agent {
             if let stream = agent.sessionManager.startRunIfAdmitted(for: self, {
                 lifecycle.start {
-                    executor.run(text, attachments: attachments)
+                    executor.run(request)
                 }
             }) {
                 return stream
             }
             let limit = agent.sessionManager.governor.limit
-            Logger.info("AISession", "sendMessage rejected by concurrency limit: sessionId=\(id), limit=\(limit)")
+            Logger.info("AISession", "run rejected by concurrency limit: sessionId=\(id), limit=\(limit)")
             agent.sessionDidRejectRun(self, error: AIAgentError.concurrencyLimitReached(limit: limit))
             return AsyncStream { $0.finish() }
         }
         return lifecycle.start {
-            executor.run(text, attachments: attachments)
+            executor.run(request)
         }
     }
 
@@ -373,7 +388,10 @@ public final class AISession: @unchecked Sendable {
             return value
         }
         let isFirstUserMessage = $messages.mutate { history in
-            let first = !history.contains { $0.role == .user }
+            // 只看用户真的说过的话：App 代发的请求不算，否则先推荐后提问的会话永远不会自动起标题。
+            let first = !history.contains { message in
+                message.isGenuineUserInput
+            }
             history.append(.user(text, attachments: attachments, turnID: turnID))
             return first
         }
@@ -391,6 +409,20 @@ public final class AISession: @unchecked Sendable {
                 Task { try? await manager.saveSession(snapshot) }
             }
         }
+        return turnID
+    }
+
+    /// 追加一条 App 代发的请求并开新一轮，返回这一轮的编号。不改会话标题。
+    @discardableResult
+    func addAppRequest(_ text: String, trigger: String?) -> Int {
+        let turnID = $currentTurnID.mutate { value -> Int in
+            value += 1
+            return value
+        }
+        $messages.mutate { history in
+            history.append(.appRequest(text, trigger: trigger, turnID: turnID))
+        }
+        updatedAt = Date()
         return turnID
     }
 

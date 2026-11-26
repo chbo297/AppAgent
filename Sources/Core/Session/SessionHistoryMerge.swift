@@ -32,7 +32,7 @@ enum SessionHistoryMerge {
                     turn = mapTurn(old)
                     legacyTurn = turn
                 } else {
-                    if message.isGenuineUserInput || legacyTurn == nil {
+                    if message.opensTurn || legacyTurn == nil {
                         nextTurn += 1
                         legacyTurn = nextTurn
                     }

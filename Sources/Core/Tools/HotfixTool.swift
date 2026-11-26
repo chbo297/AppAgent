@@ -18,6 +18,12 @@ public struct HotfixTool: ToolProtocol {
         Only use when the host explicitly enables this capability for the current deployment. \
         This may be an internally distributed Release build as well as a Debug build. \
         instant patches take effect immediately; restart patches need an app restart.
+        JS bridge `appagent`: uiTree / uiInfo / uiSet / uiInvoke / log, plus \
+        hook(className, selector, 'before'|'after'|'instead', fn) / hookClass(...) to intercept ObjC or @objc dynamic methods \
+        (fn gets inv: target, args, setArg(i, v), getReturnValue(), setReturnValue(v), and invokeOriginal() in instead; \
+        an instead fn's return value is the method's), call(target, selector, args) / callClass(className, selector, args) / \
+        newObject(className). Structs are objects with named fields (x, y, width, height; top, left, bottom, right; location, length). One hook per selector per class hierarchy; \
+        toggling off or removing a patch restores hooked methods.
         """
     public let parameters = Tool.Schema(
         properties: [

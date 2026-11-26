@@ -87,6 +87,25 @@ final class ChatMessageAssemblerTests: XCTestCase {
         XCTAssertFalse(bubbles.contains { $0.text.contains("Result:") })
     }
 
+    /// App 代发的请求自成一轮：只显示 agent 的回复，请求原文不出现在任何气泡里，也不并进上一轮。
+    func testAppRequestTurnShowsOnlyAgentReply() {
+        let messages: [AIAgentMessage] = [
+            user("你好", turn: 1),
+            assistant(text: "你好！", turn: 1),
+            .appRequest("用户近况摘要", trigger: "app_launch", turnID: 2),
+            assistant(text: "去公司驾车约 38 分钟", turn: 2)
+        ]
+
+        let bubbles = ChatMessageAssembler.assemble(messages)
+
+        XCTAssertEqual(bubbles.map(\.role), [.user, .assistant, .assistant])
+        XCTAssertEqual(bubbles.last?.turnID, 2)
+        XCTAssertEqual(bubbles.last?.text, "去公司驾车约 38 分钟")
+        XCTAssertFalse(bubbles.contains { bubble in
+            bubble.text.contains("用户近况摘要")
+        })
+    }
+
     /// 工具往返（含中间过程）落在 agent 气泡的过程区里，且失败步骤被标出来。
     func testToolRoundTripsLandInAgentActivity() {
         let messages: [AIAgentMessage] = [

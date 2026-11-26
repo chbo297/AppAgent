@@ -13,11 +13,14 @@ import UIKit
 
 extension AppAgentViewController {
 
-    /// 初始化对话流面板：层级插在 inputBar 之下，默认半屏档。
+    /// 初始化会话容器和对话流面板：会话容器铺满、插在 inputBar 之下，面板在它里面，默认半屏档。
     func setupChatPanel() {
+        sessionContainer.frame = view.bounds
+        sessionContainer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.insertSubview(sessionContainer, belowSubview: inputBar)
         chatPanelContainer.translatesAutoresizingMaskIntoConstraints = true
         chatPanelContainer.installContentView(chatPanelCoordinator.dragScrollView)
-        view.insertSubview(chatPanelContainer, belowSubview: inputBar)
+        sessionContainer.installChatPanel(chatPanelContainer)
 
         chatPanelView.onSessionListRequested = { [weak self] in
             self?.toggleSessionSidebar()
@@ -128,15 +131,25 @@ extension AppAgentViewController {
             inputBarExpandedFrame: inputBarExpandedFrame
         )
         // 横向完全收起后重新展开；用实际显隐边界，不能把每帧 resize 当成重新进入。
-        if chatPanelContainer.alpha <= 0.01, chatPanelContainer.isVisuallyHidden,
-           layout.panelAlpha > 0.01 {
+        if sessionContainer.alpha <= 0.01, sessionContainer.isVisuallyHidden,
+           layout.contentAlpha > 0.01 {
             prepareChatForPresentation()
         }
         chatPanelContainer.apply(layout, animation: animation)
+        // 收起成小球时面板和工作区一起淡出；面板的位置、宽度和键盘位移仍只作用在面板容器上。
+        sessionContainer.applyContentAlpha(layout.contentAlpha, animation: animation)
 
         // 决策卡片要停在 inputBar 上方：面板 viewport 会一直延伸到 inputBar 底下那一段。
         let panelBottomInView = chatPanelContainer.frame.maxY
         chatPanelView.decisionCardBottomInset = max(0, panelBottomInView - inputBarFrame.minY + 8)
+    }
+
+    /// 工作区容器挂进会话容器，位于对话面板之下。由 `AppAgentWorkspace` 在要显示工作区时调用。
+    func installWorkspaceContainer(_ container: UIViewController) {
+        loadViewIfNeeded()
+        addChild(container)
+        sessionContainer.installWorkspace(container.view)
+        container.didMove(toParent: self)
     }
 
     /// inputBar 展开态相对无键盘静止位置（含此刻让出的宿主预留高度）实际上移的距离；其他输入框触发键盘时结果为 0。

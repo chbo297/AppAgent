@@ -84,3 +84,12 @@ iOS 把 App 切到后台几秒后挂起进程，协作线程池整体停摆，SS
   展示层直接跳过，只用来标记「下一段正文接着上一段写，不另起段落」。
 - 用例：`LLMStreamFailureTests` 的 `testOutputLimitAutoContinuesWithHiddenNoteAndJoinsText`、
   `testContextOverflowCompactsOnceInsteadOfBlindRetry`。
+
+## App 代发的请求
+
+- `AISession.sendAppRequest(_:trigger:)` 让宿主自己开一轮：请求落成 `AIAgentMessage.appRequest`（role user、source app、hidden）。
+  它和用户发言一样**开新一轮**（`opensTurn == true`）、作为这一轮的请求被包上消息上下文、压缩时被固定；
+  区别只有两点：面板不显示用户气泡（`ChatMessageAssembler.group` 开一个 `userText == nil` 的轮次），不给会话起标题。
+- 别拿它和 `agentNote` 混：`agentNote` 是一轮内部的续写指令，不开新轮。
+- 用例：`LLMStreamFailureTests.testAppRequestOpensHiddenTurnWithoutTitlingSession`、
+  `ChatMessageAssemblerTests.testAppRequestTurnShowsOnlyAgentReply`。

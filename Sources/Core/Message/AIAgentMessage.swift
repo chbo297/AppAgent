@@ -209,6 +209,36 @@ public struct AIAgentMessage: Sendable, Codable {
         role == .user && source == .agent
     }
 
+    /// App 代替用户发起一轮的请求（如启动时把用户近况交给模型做推荐）。
+    ///
+    /// wire 上是 user 角色、作为这一轮的请求发给模型；它不是用户说的话：面板不显示用户气泡，
+    /// 也不拿它给会话起标题。宿主经 `AISession.sendAppRequest(_:trigger:)` 发出。
+    public static func appRequest(
+        _ text: String,
+        trigger: String? = nil,
+        turnID: Int? = nil
+    ) -> AIAgentMessage {
+        AIAgentMessage(
+            role: .user,
+            content: [.text(text)],
+            turnID: turnID,
+            messageType: .user,
+            source: .app,
+            displayPolicy: .hidden,
+            trigger: trigger
+        )
+    }
+
+    /// 见 `appRequest(_:trigger:turnID:)`。
+    public var isAppRequest: Bool {
+        messageType == .user && source == .app
+    }
+
+    /// 这条消息是不是一轮的请求：用户发言，或 App 代发的请求。
+    public var opensTurn: Bool {
+        isGenuineUserInput || isAppRequest
+    }
+
     /// 把撞输出上限后的续写接到前一段后面。
     ///
     /// 实测（DeepSeek-V4-Flash，2026-11）模型续写时常把断点前的几个字再写一遍

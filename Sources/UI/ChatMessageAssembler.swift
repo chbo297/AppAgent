@@ -237,6 +237,13 @@ public enum ChatMessageAssembler {
                                   startedAt: message.createdAt, lastAt: message.createdAt))
                 continue
             }
+            if message.isAppRequest {
+                // App 代发的请求也开一轮，但不是用户说的话：没有用户气泡，只显示 agent 的回复。
+                let key = message.turnID ?? ((turns.last?.key ?? 0) + 1)
+                turns.append(Turn(key: key, userText: nil,
+                                  startedAt: message.createdAt, lastAt: message.createdAt))
+                continue
+            }
 
             guard !turns.isEmpty else {
                 // 记录开头就是 agent 消息（异常数据）：开一个没有提问的轮次兜住它。

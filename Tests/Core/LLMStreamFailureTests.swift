@@ -392,6 +392,34 @@ final class LLMStreamFailureTests: XCTestCase {
         }
     }
 
+    /// App 代发的请求：作为这一轮的请求发给模型，但不算用户发言，也不给会话起标题；
+    /// 之后用户真的提问时照常起标题、开下一轮。
+    func testAppRequestOpensHiddenTurnWithoutTitlingSession() async throws {
+        let provider = ScriptedProvider(steps: [
+            .events([.textDelta("推荐好了"), .done(stopReason: .endTurn)]),
+            .events([.textDelta("好的"), .done(stopReason: .endTurn)])
+        ])
+        let central = ModelProviderCentral()
+        await central.register(name: "p", provider: provider)
+        let agent = makeAgent(central: central, policy: ModelPolicy(primary: "p/m"))
+        let session = await agent.createSession(title: "New Chat")
+        for await _ in session.sendAppRequest("用户近况摘要", trigger: "app_launch") {}
+
+        let request = try XCTUnwrap(provider.requests.first?.last)
+        XCTAssertTrue(request.isAppRequest)
+        XCTAssertTrue(request.opensTurn)
+        XCTAssertFalse(request.isGenuineUserInput)
+        XCTAssertEqual(request.displayPolicy, .hidden)
+        XCTAssertEqual(request.trigger, "app_launch")
+        XCTAssertTrue(request.text.contains("用户近况摘要"))
+        XCTAssertEqual(session.turnRecord(turnID: 1)?.outcome, .answered)
+        XCTAssertEqual(session.title, "New Chat")
+
+        for await _ in session.sendMessage("帮我导航去公司") {}
+        XCTAssertEqual(session.turnRecord(turnID: 2)?.outcome, .answered)
+        XCTAssertEqual(session.title, "帮我导航去公司")
+    }
+
     private func makeAgent(central: ModelProviderCentral, policy: ModelPolicy) -> AIAgent {
         AIAgent(
             id: "stream-failure-\(UUID().uuidString)",

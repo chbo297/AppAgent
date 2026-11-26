@@ -80,6 +80,12 @@ public final class LLMExecutor: @unchecked Sendable {
 
     // MARK: - Public API
 
+    /// 一轮的请求从哪来：用户发言，或 App 代发（见 `AIAgentMessage.appRequest`）。
+    public enum Request: Sendable {
+        case user(String, attachments: [AIAgentMessage.Attachment])
+        case app(String, trigger: String?)
+    }
+
     /// Run the LLM execution loop for a user message.
     ///
     /// Integrates the full lifecycle: adds the user message, resolves the provider,
@@ -88,6 +94,11 @@ public final class LLMExecutor: @unchecked Sendable {
         _ text: String,
         attachments: [AIAgentMessage.Attachment] = []
     ) -> AsyncStream<AIAgentEvent> {
+        run(.user(text, attachments: attachments))
+    }
+
+    /// Run the LLM execution loop for one request. 两种请求只在「怎么落进历史」上不同，其余完全一致。
+    public func run(_ request: Request) -> AsyncStream<AIAgentEvent> {
         let (outputStream, outputContinuation) = AsyncStream<AIAgentEvent>.makePair()
         let runID = UUID()
 
@@ -152,9 +163,16 @@ public final class LLMExecutor: @unchecked Sendable {
             // 用户至少看得到自己的话和「处理中」，也能按停止。
             journal.prepareUI()
 
-            let turnID = session.addUserMessage(text, attachments: attachments)
+            let turnID: Int
+            switch request {
+            case .user(let text, let attachments):
+                turnID = session.addUserMessage(text, attachments: attachments)
+                Logger.info("LLMExecutor", "run: sessionId=\(session.id), text=\"\(text.prefix(100))\(text.count > 100 ? "..." : "")\", attachments=\(attachments.count), messageCount=\(session.messages.count)")
+            case .app(let text, let trigger):
+                turnID = session.addAppRequest(text, trigger: trigger)
+                Logger.info("LLMExecutor", "run(app): sessionId=\(session.id), trigger=\(trigger ?? "-"), chars=\(text.count), messageCount=\(session.messages.count)")
+            }
             journal.openTurn(turnID: turnID)
-            Logger.info("LLMExecutor", "run: sessionId=\(session.id), text=\"\(text.prefix(100))\(text.count > 100 ? "..." : "")\", attachments=\(attachments.count), messageCount=\(session.messages.count)")
 
             await session.hostStateReporter.startRun(runID)
             guard self.isActiveRun(runID), !Task.isCancelled else {

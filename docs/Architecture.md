@@ -155,7 +155,7 @@ UIKit files live in `Sources/UI` and are compiled when UIKit is available.
 Key public types:
 
 - `AppAgentOverlay`: the host-facing entry point — creates a passthrough overlay window and binds it to an agent/session
-- `AppAgentWindow`: lets taps outside AppAgent UI pass through to the host app
+- `AppAgentWindow`: lets taps outside AppAgent UI pass through to the host app (`.normal + 1`). Inside it, `AppAgentSessionContainerView` holds the session content below the input bar: the workspace container at the bottom and the chat panel above it. Collapsing the input bar fades both together; nothing enters the host's view hierarchy
 - `AppAgentViewController`: chat UI backed by `AISession.uiState`; only valid as `AppAgentWindow`'s `rootViewController`, not for embedding in a host hierarchy
 - `AppAgentInputBar`, `AppAgentTextView`, `AppAgentMenuButton`: input controls
 - `ChatMessage`, `ChatMessageCell`: UI message model and table cell
